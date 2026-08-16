@@ -8,12 +8,12 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, StyledExt as _, button::Button, button::ButtonVariants as _, h_flex, v_flex,
 };
-use jira_application::{ApplicationError, CancellationToken, SyncMode};
+use jira_application::{ApplicationError, CancellationToken, DefaultPollingPolicy, SyncMode};
 use jira_domain::{Issue, User};
 
 use crate::{
     config::{LiveSession, StartupError},
-    live_workspace::{CachedWorkspace, LiveWorkspace},
+    live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     presentation::{IssueViewModel, UpdateViewModel},
     sample_data::{sample_issues, sample_updates, sample_users},
 };
@@ -38,6 +38,22 @@ fn safe_sync_error(error: &ApplicationError) -> &'static str {
     }
 }
 
+fn refresh_complete_message(result: &RefreshResult) -> String {
+    let mode = match result.outcome.mode {
+        SyncMode::Baseline => "baseline",
+        SyncMode::Incremental => "incremental",
+        SyncMode::Reconciliation => "reconciliation",
+    };
+    format!(
+        "Refresh complete · {} issues · {} new updates · {} in inbox · desktop notifications: {} delivered, {} unavailable · {mode}",
+        result.cached.issues.len(),
+        result.outcome.events_inserted,
+        result.cached.events.len(),
+        result.outcome.notifications_delivered,
+        result.outcome.notification_failures,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     Issues,
@@ -57,6 +73,8 @@ pub struct Dashboard {
     site_label: String,
     mode_label: String,
     operation_in_progress: bool,
+    polling_task: Option<gpui::Task<()>>,
+    automatic_polling_paused: bool,
 }
 
 impl Dashboard {
@@ -90,6 +108,8 @@ impl Dashboard {
             site_label: "sample.atlassian.net".to_owned(),
             mode_label: "Local preview mode".to_owned(),
             operation_in_progress: false,
+            polling_task: None,
+            automatic_polling_paused: false,
         }
     }
 
@@ -113,6 +133,8 @@ impl Dashboard {
             site_label: session.site_label,
             mode_label: "Live read-only sync · best-effort desktop notifications".to_owned(),
             operation_in_progress: true,
+            polling_task: None,
+            automatic_polling_paused: false,
         };
 
         let site_id = session.site_id;
@@ -138,6 +160,7 @@ impl Dashboard {
                         let update_count = cached.events.len();
                         this.workspace = Some(workspace);
                         this.apply_cached(cached);
+                        this.start_automatic_polling(cx);
                         this.sync_message =
                             format!("Ready · cached {issue_count} issues · {update_count} updates");
                     }
@@ -150,6 +173,84 @@ impl Dashboard {
         })
         .detach();
         dashboard
+    }
+
+    fn start_automatic_polling(&mut self, cx: &mut Context<Self>) {
+        if self.polling_task.is_some() && !self.automatic_polling_paused {
+            return;
+        }
+        self.polling_task.take();
+        self.automatic_polling_paused = false;
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+
+        let policy = DefaultPollingPolicy;
+        let task = cx.spawn(async move |this, cx| {
+            let mut delay = policy.next_delay_after_success();
+            let mut consecutive_failures: u32 = 0;
+            loop {
+                cx.background_executor().timer(delay).await;
+                let should_refresh = match this.update(cx, |this, cx| {
+                    if this.operation_in_progress {
+                        false
+                    } else {
+                        this.operation_in_progress = true;
+                        this.sync_message = "Automatic refresh…".to_owned();
+                        cx.notify();
+                        true
+                    }
+                }) {
+                    Ok(should_refresh) => should_refresh,
+                    Err(_) => break,
+                };
+                if !should_refresh {
+                    continue;
+                }
+
+                let cancellation = CancellationToken::new();
+                let result = workspace.refresh_automatically(&cancellation).await;
+                let next_delay = match this.update(cx, |this, cx| {
+                    this.operation_in_progress = false;
+                    match result {
+                        Ok(result) => {
+                            consecutive_failures = 0;
+                            this.sync_message = refresh_complete_message(&result);
+                            this.apply_cached(result.cached);
+                            cx.notify();
+                            Some(policy.next_delay_after_success())
+                        }
+                        Err(error) => {
+                            let next = policy.next_delay_after_failure(
+                                &error,
+                                consecutive_failures.saturating_add(1),
+                            );
+                            if next.is_some() {
+                                consecutive_failures = consecutive_failures.saturating_add(1);
+                            }
+                            this.sync_message = if next.is_none() {
+                                format!("{} · automatic polling paused", safe_sync_error(&error))
+                            } else {
+                                safe_sync_error(&error).to_owned()
+                            };
+                            if next.is_none() {
+                                this.automatic_polling_paused = true;
+                            }
+                            cx.notify();
+                            next
+                        }
+                    }
+                }) {
+                    Ok(next) => next,
+                    Err(_) => break,
+                };
+                let Some(next_delay) = next_delay else {
+                    break;
+                };
+                delay = next_delay;
+            }
+        });
+        self.polling_task = Some(task);
     }
 
     pub fn from_configuration_error(error: StartupError) -> Self {
@@ -207,20 +308,9 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     Ok(outcome) => {
-                        let mode = match outcome.outcome.mode {
-                            SyncMode::Baseline => "baseline",
-                            SyncMode::Incremental => "incremental",
-                            SyncMode::Reconciliation => "reconciliation",
-                        };
-                        let issue_count = outcome.cached.issues.len();
-                        let new_event_count = outcome.outcome.events_inserted;
-                        let event_count = outcome.cached.events.len();
-                        let notifications_delivered = outcome.outcome.notifications_delivered;
-                        let notification_failures = outcome.outcome.notification_failures;
+                        this.sync_message = refresh_complete_message(&outcome);
                         this.apply_cached(outcome.cached);
-                        this.sync_message = format!(
-                            "Refresh complete · {issue_count} issues · {new_event_count} new updates · {event_count} in inbox · desktop notifications: {notifications_delivered} delivered, {notification_failures} unavailable · {mode}"
-                        );
+                        this.start_automatic_polling(cx);
                     }
                     Err(error) => {
                         this.sync_message = safe_sync_error(&error).to_owned();
