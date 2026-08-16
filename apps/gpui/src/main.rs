@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 fn main() {
-    use gpui::{App, AppContext as _, WindowBounds, WindowOptions, px, size};
+    use gpui::{App, AppContext as _, Styled as _, WindowBounds, WindowOptions, px, size};
     use gpui_component::{ActiveTheme as _, Root};
     use jira_gpui::{Dashboard, StartupSelection, startup_from_environment};
 
