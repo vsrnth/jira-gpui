@@ -1,6 +1,6 @@
 # Jira GPUI Desktop Application — Implementation Plan
 
-Status: In progress — durable cache and in-app update feed landed; an AppImage packaging scaffold exists, while notifications, production authentication, Linux validation, and release packaging remain.
+Status: In progress — durable cache, in-app feed, best-effort Freedesktop notifications, and validated AppImage artifact packaging are implemented; authentication, runtime, and release validation remain.
 Last updated: 2026-08-16
 
 ## 1. Objective
@@ -18,7 +18,7 @@ The application is read-only with respect to Jira. It may write local preference
 | Jira product | Jira Cloud first |
 | Jira access | Read-only |
 | Primary subject | Issues assigned to one user or a saved set of users |
-| Updates | Maintain an in-app update feed; desktop notifications are a following slice and are currently suppressed |
+| Updates | Maintain an authoritative in-app feed with best-effort actionable desktop notifications |
 | Linux display system | Native Wayland only; no X11 support |
 | Linux packaging | AppImage only |
 | Initial CPU architecture | `x86_64`; add `aarch64` only when requested |
@@ -52,20 +52,21 @@ The current foundation and live read-only vertical slice include:
 - The GPUI shell has an explicitly internal environment/API-token bootstrap (`JIRA_BASE_URL`, `JIRA_SITE_ID`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_ASSIGNEE_ACCOUNT_IDS`). It opens SQLite only after Jira configuration and client validation, reuses a saved user set whose canonical member list matches the configured accounts, loads cached issues/events without Jira, and exposes manual refresh and local mark-all-read behavior.
 - The first successful refresh is a quiet baseline. A later manual refresh performs reconciliation, including membership removals, and persists deterministic update-feed events. A failed refresh records local failure state while preserving the last committed cache.
 
-Validation on the development macOS host: 78 workspace tests passed, formatting passed, and production/library-plus-binary Clippy passed with warnings denied. Linux Wayland runtime and AppImage validation have not been performed on this macOS host. The Linux runtime target remains Wayland only; X11 is unsupported, macOS remains Phase 2, and all Jira operations remain read-only.
+Validation: 80 workspace tests passed in an x86_64 Ubuntu 22.04 container with Rust 1.95.0; rustfmt, warning-denied production Clippy, metadata checks, and the Cargo feature guard passed. A 0.1.0 AppImage passed checksum, extraction, required-file, and `ldd` no-missing/X11-link checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon delivery, hosted CI execution, public release, and multi-distribution coverage remain unvalidated. The Linux runtime target remains Wayland only; X11 is unsupported, macOS remains Phase 2, and all Jira operations remain read-only.
 
-The repository now includes an AppImage AppDir/build scaffold under
-`packaging/appimage/`. Next milestones are Linux Wayland desktop notification
-delivery, production OAuth 2.0 3LO, broader UI wiring, Linux runtime-matrix
-validation, and producing/testing a Linux-built AppImage with release
-automation. No AppImage artifact has been validated on this macOS host.
+The repository includes an AppImage build and CI validation flow under
+`packaging/appimage/`. Next milestones are production OAuth 2.0 3LO, broader UI
+wiring, and Linux runtime/release validation. The local macOS host cannot run
+the Linux GUI, AppImage, or Wayland runtime checks; hosted CI execution,
+public release, and the multi-distribution matrix remain unvalidated.
 
 ## 4. Phase 1 user outcomes
 
 The following are the Phase 1 target outcomes; the current implementation has
 the read-only pull, durable cache, in-app feed, local read state, and manual
-refresh foundations, while onboarding, full issue browsing, automatic polling,
-desktop notifications, and packaging are still being built.
+refresh foundations, while onboarding, full issue browsing, and automatic
+polling are still being built; desktop notifications and AppImage artifact
+packaging are implemented.
 
 A successful Phase 1 user can:
 
@@ -298,9 +299,9 @@ Do not mix runtimes implicitly or call a blocking HTTP client from the UI thread
 
 ### 9.4 Credentials and notifications
 
-Current behavior is intentionally narrow: the internal API-token bootstrap keeps credentials in the Jira HTTP client only, never in SQLite, and the in-app update feed is durable. Desktop notification delivery is currently represented by a suppress-all policy and a safe unavailable adapter, so synchronization never claims that a desktop notification was delivered.
+Current behavior is intentionally narrow: the internal API-token bootstrap keeps credentials in the Jira HTTP client only, never in SQLite, and the in-app update feed is durable and authoritative. The best-effort Freedesktop adapter uses the default policy for issue-added, status, assignee, priority, due-date, and comment events; removal, summary, and parent events remain in-app only. Delivery failures are nonfatal.
 
-Future production work should store OAuth credentials in the desktop secret service rather than SQLite or plain configuration files, detect missing Secret Service support, send notifications through the Freedesktop D-Bus protocol, and degrade to the in-app feed when delivery is unavailable.
+Future production work should store OAuth credentials in the desktop secret service rather than SQLite or plain configuration files, detect missing Secret Service support, and add notification coalescing, mute, and quiet-hours controls.
 
 ## 10. Jira Cloud integration
 
@@ -528,12 +529,11 @@ authentication failure, and surface stale-cache status in the UI.
 
 The in-app feed is implemented and authoritative. Baseline synchronization is
 quiet; later deterministic events are persisted with local read state and a
-notification-delivery state. The current desktop policy suppresses all
-notifications and the adapter returns a safe unavailable error if called, so
-the app does not claim delivery.
+notification-delivery state. The desktop adapter is best-effort and uses the
+default actionable policy; delivery failures do not interrupt synchronization.
 
-Future notification work should add event-type policy, coalescing, mute and
-quiet-hours settings, Freedesktop delivery, and focus/select behavior. The
+Future notification work should add coalescing, mute and quiet-hours settings,
+and focus/select behavior. The
 initial target event types remain assignment, status, priority, due-date, and
 comment changes; summary and parent changes are currently durable in-app
 events but should not automatically notify by default.
@@ -641,7 +641,7 @@ Delivered/remaining exit criteria:
 - Repeated overlapping polls do not create duplicate update events.
 - Offline startup displays cached data; accurate stale-status presentation remains.
 
-### Phase 4 — Updates and notifications (in-app feed delivered; desktop delivery remains)
+### Phase 4 — Updates and notifications (best-effort delivery implemented)
 
 Estimate: 1 week.
 
@@ -651,11 +651,14 @@ Delivered:
 - Detect configured issue field changes.
 - Add read/unread state.
 - Suppress baseline notifications.
+- Deliver actionable events through the Freedesktop adapter.
+- Preserve the durable in-app feed when notification delivery fails.
 
 Remaining:
 
 - Detect newly visible comments without downloading full histories repeatedly.
-- Add desktop notification delivery, coalescing, mute settings, and fallback behavior.
+- Validate real notification-daemon delivery and runtime behavior.
+- Add coalescing, mute and quiet-hours settings, and focus/select behavior.
 
 Remaining exit criteria:
 
@@ -682,16 +685,15 @@ Exit criteria:
 - No token, authorization header, comment body, or description appears in normal logs.
 - The app recovers cleanly from network loss, `429`, invalid credentials, and a corrupt cache copy.
 
-### Phase 6 — AppImage release (scaffolded; artifact and release validation outstanding)
+### Phase 6 — AppImage release (artifact build validated; runtime/release validation outstanding)
 
 Estimate: 0.5 to 1 week.
 
 The repository now has the AppDir metadata, desktop entry, icon, `AppRun`,
 license inclusion, and a guarded `linuxdeploy`/`appimagetool` build script.
-This is packaging scaffolding only: it requires a Linux x86_64 host and pinned,
-verified packaging tools. No Linux-built artifact, runtime matrix, or release
-automation has been validated yet, and the flow cannot be executed on the
-current macOS development host.
+The 0.1.0 artifact was built with checksum-verified pinned tools/runtime and
+passed checksum, extraction, required-file, and `ldd` no-missing/X11-link
+checks. Runtime and release validation remain outstanding.
 
 Work:
 
@@ -914,7 +916,7 @@ Execute these tasks in order:
 2. Pin a compatible GPUI/`gpui-component` pair. (Done.)
 3. Open a Wayland window containing a static issue table and detail pane. (Preview path done; Linux validation remains.)
 4. Prove async HTTP and database communication without blocking GPUI. (Done in adapters; runtime validation remains.)
-5. Produce the minimal AppImage spike. (Scaffold exists; Linux build and execution validation remain.)
+5. Produce the minimal AppImage spike. (Artifact build and CI checks done; runtime execution validation remains.)
 6. Define Jira transport fixtures and domain models. (Done.)
 7. Implement the read-only Jira client and JQL builder. (Done.)
 8. Fetch and render one configured account’s issues. (Read-only live pull foundation done; broader UI wiring remains.)
@@ -924,8 +926,8 @@ Execute these tasks in order:
 12. Add baseline and incremental synchronization. (Baseline/reconciliation done; scheduled incremental polling remains.)
 13. Add snapshot diff events. (Done for normalized issue fields and membership.)
 14. Add the update inbox. (Done, including local read state.)
-15. Add desktop notifications. (Outstanding; current policy suppresses delivery.)
-16. Finish error recovery, release testing, and AppImage automation. (Outstanding.)
+15. Add desktop notifications. (Best-effort Freedesktop adapter and default policy done; daemon/runtime validation remains.)
+16. Finish error recovery, release testing, and AppImage automation. (Build/CI automation and artifact checks done; runtime/release validation remains.)
 
 ## 25. Decisions to close before coding reaches authentication
 

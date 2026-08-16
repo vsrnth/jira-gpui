@@ -54,9 +54,11 @@ directory is created with Unix mode `0700` and a newly created database file
 with mode `0600`; SQLite uses a worker thread, WAL,
 foreign keys, migrations, and protected database-file opening. Credentials are
 not stored in SQLite: the current internal API-token flow keeps them only in
-the in-memory Jira HTTP client. Desktop notifications are not delivered yet;
-the in-app update feed is functional and notification delivery is currently
-suppressed safely.
+the in-memory Jira HTTP client. The Linux Freedesktop notification adapter is
+best-effort: the default policy notifies for issue-added, status, assignee,
+priority, due-date, and comment events. Removal, summary, and parent events
+remain in-app only; delivery failures are nonfatal and the durable in-app feed
+is authoritative.
 
 The prototype reads these environment variables as an all-or-none set:
 
@@ -76,12 +78,14 @@ platform-appropriate secret store. That is an independent release milestone,
 separate from the planned macOS Phase 2 work.
 
 The Linux release build will enable GPUI's Wayland backend only. X11 is not a
-supported runtime target. Production OAuth, the Linux runtime matrix, and the
-Linux-built AppImage release remain outstanding; macOS is Phase 2.
+supported runtime target. Production OAuth and the Linux runtime matrix remain
+outstanding; macOS is Phase 2.
 
-Current validation on the development macOS host: 78 workspace tests, rustfmt,
-and production/library-plus-binary Clippy with warnings denied pass. Linux
-Wayland runtime and AppImage execution have not yet been validated. The
-repository contains an AppImage AppDir/build scaffold under
-`packaging/appimage/`, but no Linux-built artifact or release automation has
-been validated; macOS cannot execute this packaging flow.
+Validation includes 80 workspace tests in an x86_64 Ubuntu 22.04 container with
+Rust 1.95.0, rustfmt, warning-denied production Clippy, metadata checks, and
+the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
+pinned tools/runtime; its checksum, extracted contents, required files, and
+`ldd` library/X11 checks passed. A CI workflow automates build, extraction, and
+link checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon
+delivery, GitHub-hosted execution, public release, and multi-distribution
+runtime coverage remain unvalidated.

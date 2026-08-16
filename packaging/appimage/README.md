@@ -31,4 +31,4 @@ APPIMAGE_RUNTIME=/opt/tools/runtime-x86_64 \
 packaging/appimage/build-appimage.sh
 ```
 
-The output is `dist/Jira_Desk-${VERSION}-x86_64.AppImage` with an adjacent SHA-256 checksum. Linux host-library compatibility is intentionally deferred to later Linux CI and release validation. Packaging execution cannot be tested on the current macOS development host. macOS remains Phase 2.
+The output is `dist/Jira_Desk-${VERSION}-x86_64.AppImage` with an adjacent SHA-256 checksum. The 0.1.0 artifact has been checksum-verified, extracted without FUSE, checked for required binary/desktop/metainfo/LICENSE files, and checked with `ldd` for missing or X11-linked libraries. CI automates these checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon delivery, public release, and multi-distribution runtime coverage remain unvalidated. macOS remains Phase 2.
