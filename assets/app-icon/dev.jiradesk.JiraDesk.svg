@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Jira Desk</title>
+  <desc id="desc">A blue desk tile with a gold update spark</desc>
+  <rect width="256" height="256" rx="52" fill="#172554"/>
+  <path d="M57 74c0-9.389 7.611-17 17-17h108c9.389 0 17 7.611 17 17v108c0 9.389-7.611 17-17 17H74c-9.389 0-17-7.611-17-17V74Z" fill="#2563EB"/>
+  <path d="M82 91h92c6.075 0 11 4.925 11 11v53c0 6.075-4.925 11-11 11H82c-6.075 0-11-4.925-11-11v-53c0-6.075 4.925-11 11-11Z" fill="#EFF6FF"/>
+  <path d="M85 110h48M85 127h35M85 144h23" stroke="#2563EB" stroke-width="9" stroke-linecap="round"/>
+  <path d="m169 79 4.8 14.2L188 98l-14.2 4.8L169 117l-4.8-14.2L150 98l14.2-4.8L169 79Z" fill="#FBBF24"/>
+  <circle cx="181" cy="153" r="16" fill="#FBBF24"/>
+  <path d="m174 153 5 5 10-11" fill="none" stroke="#172554" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
