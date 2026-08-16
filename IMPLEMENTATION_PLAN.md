@@ -1,6 +1,6 @@
 # Jira GPUI Desktop Application — Implementation Plan
 
-Status: In progress — durable cache, in-app feed, best-effort Freedesktop notifications, and validated AppImage artifact packaging are implemented; authentication, runtime, and release validation remain.
+Status: In progress — durable cache, in-app feed, best-effort Freedesktop notifications, automatic incremental polling, and validated AppImage artifact packaging are implemented; authentication, runtime, and release validation remain.
 Last updated: 2026-08-16
 
 ## 1. Objective
@@ -49,10 +49,10 @@ The current foundation and live read-only vertical slice include:
 - `crates/jira-http` owns `reqwest`, a dedicated Tokio runtime, read-only enhanced-search/user requests, pagination, cancellation, bounded responses, status/error mapping, and redacted API-token credentials. It accepts only HTTPS Jira Cloud sites under the validated `*.atlassian.net` boundary and binds requests to the configured site ID.
 - The application layer provides cancellation, safe assignee validation, baseline/reconciliation synchronization, deterministic normalized-issue diffing, and application ports that a future Tauri shell can reuse.
 - `crates/storage` now contains a dedicated-worker SQLite adapter with migration v1, WAL for file-backed stores, foreign keys, secure file opening, normalized searchable projections plus serialized normalized domain snapshots, saved user sets and ordered membership, sync cursors/failure state, durable update events, event-to-user-set associations, and local read/notification-delivery state. Jira transport payloads and credentials are not stored.
-- The GPUI shell has an explicitly internal environment/API-token bootstrap (`JIRA_BASE_URL`, `JIRA_SITE_ID`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_ASSIGNEE_ACCOUNT_IDS`). It opens SQLite only after Jira configuration and client validation, reuses a saved user set whose canonical member list matches the configured accounts, loads cached issues/events without Jira, and exposes manual refresh and local mark-all-read behavior.
+- The GPUI shell has an explicitly internal environment/API-token bootstrap (`JIRA_BASE_URL`, `JIRA_SITE_ID`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_ASSIGNEE_ACCOUNT_IDS`). The live Dashboard owns one cancellable automatic-poll task, opens SQLite only after Jira configuration and client validation, reuses a saved user set whose canonical member list matches the configured accounts, loads cached issues/events without Jira, and exposes manual refresh and local mark-all-read behavior.
 - The first successful refresh is a quiet baseline. A later manual refresh performs reconciliation, including membership removals, and persists deterministic update-feed events. A failed refresh records local failure state while preserving the last committed cache.
 
-Validation: 80 workspace tests passed in an x86_64 Ubuntu 22.04 container with Rust 1.95.0; rustfmt, warning-denied production Clippy, metadata checks, and the Cargo feature guard passed. A 0.1.0 AppImage passed checksum, extraction, required-file, and `ldd` no-missing/X11-link checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon delivery, hosted CI execution, public release, and multi-distribution coverage remain unvalidated. The Linux runtime target remains Wayland only; X11 is unsupported, macOS remains Phase 2, and all Jira operations remain read-only.
+Validation: 88 Linux-target workspace tests passed in an x86_64 Ubuntu 22.04 container with Rust 1.95.0 (89 on the macOS host due to the non-Linux adapter fallback test); rustfmt, warning-denied production Clippy, metadata checks, and Cargo feature and packaged-link no-X11 checks passed. The AppImage was rebuilt with checksum, extraction, and payload checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon delivery, hosted CI execution, public release, and multi-distribution coverage remain unvalidated. The Linux runtime target remains Wayland only; X11 is unsupported, macOS remains Phase 2, and all Jira operations remain read-only.
 
 The repository includes an AppImage build and CI validation flow under
 `packaging/appimage/`. Next milestones are production OAuth 2.0 3LO, broader UI
@@ -62,11 +62,11 @@ public release, and the multi-distribution matrix remain unvalidated.
 
 ## 4. Phase 1 user outcomes
 
-The following are the Phase 1 target outcomes; the current implementation has
-the read-only pull, durable cache, in-app feed, local read state, and manual
-refresh foundations, while onboarding, full issue browsing, and automatic
-polling are still being built; desktop notifications and AppImage artifact
-packaging are implemented.
+The following are the Phase 1 target outcomes. The current implementation
+includes the read-only pull, durable cache, in-app feed, local read state,
+manual refresh, automatic incremental polling, best-effort notifications, and
+AppImage artifact packaging; onboarding, full issue browsing, periodic
+automatic full reconciliation, and runtime/release validation remain.
 
 A successful Phase 1 user can:
 
@@ -99,7 +99,7 @@ A successful Phase 1 user can:
 - Project, user, issue type, status, priority, and date filters.
 - Local text filtering across issue key and summary.
 - SQLite caching and database migrations.
-- Incremental polling and periodic full reconciliation.
+- Incremental polling and manual full reconciliation now, with periodic automatic full reconciliation before release.
 - An update-event inbox.
 - Native Linux desktop notifications over the Freedesktop notification interface.
 - Offline, loading, stale-data, authentication, rate-limit, and partial-error states.
@@ -469,10 +469,10 @@ and privacy behavior are implemented.
 
 ## 12. Synchronization design
 
-The implemented coordinator is intentionally bounded: it supports a live
-workspace, a quiet baseline, and explicit manual reconciliation. Automatic
-poll scheduling, incremental cursor queries, retry/backoff, and comment
-hydration remain follow-on work.
+The implemented coordinator supports a live workspace, a quiet baseline,
+automatic incremental polling, and explicit manual reconciliation. The live
+Dashboard owns one cancellable GPUI task; polling exists only while the app
+runs.
 
 ### 12.1 Baseline synchronization
 
@@ -487,13 +487,10 @@ On the first refresh for a configured user set:
 
 ### 12.2 Incremental polling
 
-`SyncService` has an incremental mode and overlap-window support in the
-application contract, but `LiveWorkspace::refresh` currently chooses
-reconciliation after a successful cursor rather than scheduling incremental
-polls. This keeps the first desktop slice deterministic while the scheduler is
-still outstanding.
+After a quiet baseline, automatic polls use incremental mode and preserve
+membership. Manual refresh remains full reconciliation.
 
-The future incremental design is:
+The implemented incremental flow is:
 
 1. Starts from the last successful poll minus a five-minute overlap window.
 2. Fetches issues matching the selected assignees and update window.
@@ -519,11 +516,16 @@ advances the cursor atomically. The UI reload is capped at 10,000 issues and
 
 ### 12.4 Scheduling and cancellation
 
-Implemented now: cancellation propagates through Jira pagination, failed
-refreshes record categorized local failure state, and cache loading does not
-contact Jira. Outstanding scheduler work must prevent concurrent syncs,
-coalesce refreshes, apply retry/backoff and `Retry-After`, pause after
-authentication failure, and surface stale-cache status in the UI.
+The first automatic tick occurs after five minutes. `operation_in_progress`
+prevents overlap with manual refresh and feed actions. Offline and upstream
+failures use 30-second exponential backoff capped at 15 minutes; rate limits
+honor a clamped `Retry-After` from 30 seconds to one hour. Nontransient errors
+pause automatic polling, and a successful manual refresh restarts it.
+Cancellation propagates through Jira pagination, failures record categorized
+local state, and cache loading does not contact Jira. Polling is not available
+when the process is stopped; configurable intervals, jitter, and a richer
+stale-state UI remain future work. Periodic automatic full reconciliation is
+also future work; manual full reconciliation is the current safety path.
 
 ## 13. Notification policy
 
@@ -625,7 +627,7 @@ Estimate: 1 to 1.5 weeks.
 Delivered:
 
 - Add schema migrations and repositories.
-- Implement baseline and reconciliation sync modes; incremental support remains in the application contract.
+- Implement baseline, incremental polling, and reconciliation sync modes.
 - Add durable sync cursors and local failure state.
 - Add deterministic snapshot diffing, event associations, and event deduplication.
 - Add cancellation and atomic issue/membership/event/cursor commits.
@@ -633,7 +635,7 @@ Delivered:
 
 Remaining:
 
-- Add automatic polling, retry/rate-limit policy, stale-cache presentation, and broader offline states.
+- Add periodic automatic full reconciliation, stale-cache presentation, and broader offline states; polling and retry/rate-limit policy are delivered.
 
 Delivered/remaining exit criteria:
 
@@ -862,7 +864,7 @@ Add a user-triggered support bundle containing redacted logs, schema version, fe
 | Developer is new to Rust | Schedule and ownership-model friction | One crate, explicit types, minimal generics, small vertical slices, frequent tests |
 | GPUI and HTTP runtime mismatch | Deadlocks or stalled requests | Resolve in Phase 0; use a dedicated runtime and channels if needed |
 | OAuth needs a client secret | Unsafe distributable desktop auth | Use a hosted authentication broker for production |
-| Jira enhanced search is eventually consistent | Missed or delayed updates | Overlap window, dedupe, and periodic full reconciliation |
+| Jira enhanced search is eventually consistent | Missed or delayed updates | Overlap window, dedupe, manual full reconciliation now, periodic full reconciliation later |
 | Issue moves out of selected assignees | Incremental query no longer sees it | Full reconciliation and neutral removal events |
 | Large Jira directories | User search may omit accounts | Search debounce, account ID fallback, recently seen users |
 | Rate limiting | Delayed sync | Request minimal fields, batch, cap concurrency, honor headers and backoff |
@@ -923,7 +925,7 @@ Execute these tasks in order:
 9. Add user search and user-set persistence. (Persistence done; user-search UI remains.)
 10. Add pagination and parent hydration. (Bounded pagination done; parent hydration remains.)
 11. Add durable caching. (SQLite v1 done.)
-12. Add baseline and incremental synchronization. (Baseline/reconciliation done; scheduled incremental polling remains.)
+12. Add baseline and incremental synchronization. (Baseline, incremental polling, and reconciliation done; richer stale-state UX remains.)
 13. Add snapshot diff events. (Done for normalized issue fields and membership.)
 14. Add the update inbox. (Done, including local read state.)
 15. Add desktop notifications. (Best-effort Freedesktop adapter and default policy done; daemon/runtime validation remains.)
@@ -935,7 +937,7 @@ Execute these tasks in order:
 2. If distributed, where will the OAuth authentication broker be hosted and operated?
 3. Which Linux distribution and glibc baseline define the minimum supported system?
 4. Is `x86_64` sufficient for Phase 1?
-5. Is the default two-minute polling interval acceptable for the expected number of users and issues?
+5. Is the default five-minute polling interval acceptable for the expected number of users and issues?
 6. Should new comments be a mandatory Phase 1 notification, or may they land immediately after the field-change notifications?
 
 ## 26. References

@@ -37,14 +37,20 @@ cargo run -p jira-gpui
 ```
 
 The desktop opens a deterministic preview when Jira is not configured. For an
-internal development build, setting all five variables below enables a manual,
+internal development build, setting all five variables below enables a
 read-only live workspace for the configured assignee account IDs. Live startup
 opens the local SQLite cache, reuses a saved user set whose canonical member
 list matches the configured accounts, and loads cached issues and in-app update
-events before contacting Jira. The first
-successful refresh establishes a quiet baseline; later manual refreshes use
-reconciliation and derive durable update-feed events. Jira failures leave the
-last committed cache available, and mark-all-read changes are local only.
+events before contacting Jira. The first successful refresh establishes a
+quiet baseline; later automatic polls are incremental and preserve membership,
+while manual refresh remains full reconciliation. The live Dashboard owns one
+cancellable polling task, starts its first automatic tick after five minutes,
+and prevents overlap with manual refresh/feed actions. Offline/upstream errors
+back off from 30 seconds to 15 minutes, rate limits honor a clamped 30-second
+to one-hour Retry-After, and nontransient errors pause polling until a
+successful manual refresh restarts it. Polling exists only while the app runs.
+Jira failures leave the last committed cache available, and mark-all-read
+changes are local only.
 
 Phase 1 local data is stored under `$XDG_DATA_HOME/jira-desk/` when
 `XDG_DATA_HOME` is set to a non-empty absolute path, or
@@ -81,8 +87,9 @@ The Linux release build will enable GPUI's Wayland backend only. X11 is not a
 supported runtime target. Production OAuth and the Linux runtime matrix remain
 outstanding; macOS is Phase 2.
 
-Validation includes 80 workspace tests in an x86_64 Ubuntu 22.04 container with
-Rust 1.95.0, rustfmt, warning-denied production Clippy, metadata checks, and
+Validation includes 88 Linux-target workspace tests in an x86_64 Ubuntu 22.04
+container with Rust 1.95.0 (89 on the macOS host due to the non-Linux adapter
+fallback test), rustfmt, warning-denied production Clippy, metadata checks, and
 the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
 pinned tools/runtime; its checksum, extracted contents, required files, and
 `ldd` library/X11 checks passed. A CI workflow automates build, extraction, and
