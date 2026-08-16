@@ -38,9 +38,25 @@ cargo run -p jira-gpui
 
 The desktop opens a deterministic preview when Jira is not configured. For an
 internal development build, setting all five variables below enables a manual,
-read-only issue pull for the configured assignee account IDs. The UI starts
-empty in live mode and reports pull progress and safe categorized failures; it
-does not yet persist snapshots or generate update diffs.
+read-only live workspace for the configured assignee account IDs. Live startup
+opens the local SQLite cache, reuses a saved user set whose canonical member
+list matches the configured accounts, and loads cached issues and in-app update
+events before contacting Jira. The first
+successful refresh establishes a quiet baseline; later manual refreshes use
+reconciliation and derive durable update-feed events. Jira failures leave the
+last committed cache available, and mark-all-read changes are local only.
+
+Phase 1 local data is stored under `$XDG_DATA_HOME/jira-desk/` when
+`XDG_DATA_HOME` is set to a non-empty absolute path, or
+`$HOME/.local/share/jira-desk/` when it is unset or empty, in
+`jira-desk.sqlite3`. Relative roots are rejected. The app
+directory is created with Unix mode `0700` and a newly created database file
+with mode `0600`; SQLite uses a worker thread, WAL,
+foreign keys, migrations, and protected database-file opening. Credentials are
+not stored in SQLite: the current internal API-token flow keeps them only in
+the in-memory Jira HTTP client. Desktop notifications are not delivered yet;
+the in-app update feed is functional and notification delivery is currently
+suppressed safely.
 
 The prototype reads these environment variables as an all-or-none set:
 
@@ -60,4 +76,12 @@ platform-appropriate secret store. That is an independent release milestone,
 separate from the planned macOS Phase 2 work.
 
 The Linux release build will enable GPUI's Wayland backend only. X11 is not a
-supported runtime target.
+supported runtime target. Production OAuth, the Linux runtime matrix, and the
+Linux-built AppImage release remain outstanding; macOS is Phase 2.
+
+Current validation on the development macOS host: 78 workspace tests, rustfmt,
+and production/library-plus-binary Clippy with warnings denied pass. Linux
+Wayland runtime and AppImage execution have not yet been validated. The
+repository contains an AppImage AppDir/build scaffold under
+`packaging/appimage/`, but no Linux-built artifact or release automation has
+been validated; macOS cannot execute this packaging flow.

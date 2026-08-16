@@ -1,6 +1,6 @@
 # Jira GPUI Desktop Application — Implementation Plan
 
-Status: In progress
+Status: In progress — durable cache and in-app update feed landed; an AppImage packaging scaffold exists, while notifications, production authentication, Linux validation, and release packaging remain.
 Last updated: 2026-08-16
 
 ## 1. Objective
@@ -18,7 +18,7 @@ The application is read-only with respect to Jira. It may write local preference
 | Jira product | Jira Cloud first |
 | Jira access | Read-only |
 | Primary subject | Issues assigned to one user or a saved set of users |
-| Updates | Poll Jira, maintain an in-app update feed, and show Linux desktop notifications |
+| Updates | Maintain an in-app update feed; desktop notifications are a following slice and are currently suppressed |
 | Linux display system | Native Wayland only; no X11 support |
 | Linux packaging | AppImage only |
 | Initial CPU architecture | `x86_64`; add `aarch64` only when requested |
@@ -42,26 +42,30 @@ These assumptions allow implementation to begin without expanding the first rele
 
 ### Implementation checkpoint — 2026-08-16
 
-The foundation slice is in place:
+The current foundation and live read-only vertical slice include:
 
-- Pinned Rust 1.95, GPUI, and `gpui-component` as a compatible dependency set.
-- Created separate domain, application, Jira mapping, storage, and GPUI presentation crates.
-- Implemented normalized issue/user/update models, safe assignee JQL, enhanced-search response mapping, sync ports and orchestration, cancellation, local feed behavior, and an in-memory repository adapter.
-- Implemented a GPUI dashboard preview with issue selection, a detail pane, saved-user-set context, an unread update inbox, local mark-read behavior, and a pull-updates action.
+- Separate domain, application, Jira mapping, storage, and GPUI presentation crates. Domain and application APIs remain independent of GPUI, HTTP, Tokio, and SQLite.
+- `crates/jira` remains a pure Jira JSON/JQL and domain-mapping crate. It has a bounded deterministic issue-ID query helper for bulk lookup and no HTTP client or UI dependency.
+- `crates/jira-http` owns `reqwest`, a dedicated Tokio runtime, read-only enhanced-search/user requests, pagination, cancellation, bounded responses, status/error mapping, and redacted API-token credentials. It accepts only HTTPS Jira Cloud sites under the validated `*.atlassian.net` boundary and binds requests to the configured site ID.
+- The application layer provides cancellation, safe assignee validation, baseline/reconciliation synchronization, deterministic normalized-issue diffing, and application ports that a future Tauri shell can reuse.
+- `crates/storage` now contains a dedicated-worker SQLite adapter with migration v1, WAL for file-backed stores, foreign keys, secure file opening, normalized searchable projections plus serialized normalized domain snapshots, saved user sets and ordered membership, sync cursors/failure state, durable update events, event-to-user-set associations, and local read/notification-delivery state. Jira transport payloads and credentials are not stored.
+- The GPUI shell has an explicitly internal environment/API-token bootstrap (`JIRA_BASE_URL`, `JIRA_SITE_ID`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_ASSIGNEE_ACCOUNT_IDS`). It opens SQLite only after Jira configuration and client validation, reuses a saved user set whose canonical member list matches the configured accounts, loads cached issues/events without Jira, and exposes manual refresh and local mark-all-read behavior.
+- The first successful refresh is a quiet baseline. A later manual refresh performs reconciliation, including membership removals, and persists deterministic update-feed events. A failed refresh records local failure state while preserving the last committed cache.
 
-The new live read-only vertical slice is now represented in the worktree:
+Validation on the development macOS host: 78 workspace tests passed, formatting passed, and production/library-plus-binary Clippy passed with warnings denied. Linux Wayland runtime and AppImage validation have not been performed on this macOS host. The Linux runtime target remains Wayland only; X11 is unsupported, macOS remains Phase 2, and all Jira operations remain read-only.
 
-- `crates/jira` remains a pure Jira JSON/JQL and domain-mapping crate. It has a bounded, deterministic issue-ID query helper for bulk issue lookup and no HTTP client or UI dependency.
-- `crates/jira-http` is the transport adapter. It owns `reqwest`, a dedicated Tokio runtime, read-only enhanced-search/user requests, pagination, cancellation checks, bounded responses, status/error mapping, and redacted API-token credentials.
-- The transport accepts only HTTPS Jira Cloud sites under the validated `*.atlassian.net` boundary and binds each request to its configured site ID.
-- The GPUI shell has an explicitly internal environment/API-token bootstrap (`JIRA_BASE_URL`, `JIRA_SITE_ID`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_ASSIGNEE_ACCOUNT_IDS`). It falls back to preview mode when no configuration is present and exposes a manual live issue pull when configured.
-- `IssuePullService` keeps pagination, safety limits, cancellation, cursor-cycle detection, and cross-page issue de-duplication in the application layer, so the UI and transport remain replaceable.
-
-Validation of this live slice is complete on the development host: 38 workspace tests passed, formatting passed, and production/library-plus-binary Clippy passed with warnings denied. Linux Wayland runtime and AppImage validation were not performed on this macOS host; all-test-target Clippy still exposes pre-existing foundation test `unwrap` lint debt.
-
-Next milestones are SQLite cache and snapshot diff/update-inbox persistence, Linux Wayland desktop notifications, production OAuth 2.0 3LO, and finally AppImage packaging. Wayland-only Linux remains the Phase 1 runtime target; macOS remains Phase 2, and all Jira operations remain read-only.
+The repository now includes an AppImage AppDir/build scaffold under
+`packaging/appimage/`. Next milestones are Linux Wayland desktop notification
+delivery, production OAuth 2.0 3LO, broader UI wiring, Linux runtime-matrix
+validation, and producing/testing a Linux-built AppImage with release
+automation. No AppImage artifact has been validated on this macOS host.
 
 ## 4. Phase 1 user outcomes
+
+The following are the Phase 1 target outcomes; the current implementation has
+the read-only pull, durable cache, in-app feed, local read state, and manual
+refresh foundations, while onboarding, full issue browsing, automatic polling,
+desktop notifications, and packaging are still being built.
 
 A successful Phase 1 user can:
 
@@ -242,7 +246,7 @@ jira_gpui/
 │   ├── application/             # use cases and adapter ports
 │   ├── jira/                    # pure Jira JSON/JQL models, validation, and mapping
 │   ├── jira-http/               # read-only reqwest/Tokio Jira Cloud transport
-│   └── storage/                 # memory today; SQLite implementation next
+│   └── storage/                 # worker-thread SQLite and in-memory adapters
 ├── assets/
 │   ├── icons/
 │   ├── app-icon/
@@ -290,14 +294,13 @@ Do not mix runtimes implicitly or call a blocking HTTP client from the UI thread
 - Run database work on a dedicated worker thread.
 - Use numbered SQL migrations committed to the repository.
 - Enable WAL mode and foreign keys.
-- Keep network transport JSON out of the primary schema; store normalized fields plus optional raw JSON only for diagnostics when explicitly enabled.
+- Keep network transport JSON out of the primary schema. The current v1 adapter stores normalized searchable columns plus a serialized normalized domain snapshot; it does not persist raw Jira transport payloads.
 
 ### 9.4 Credentials and notifications
 
-- Store credentials in the desktop secret service, not SQLite or plain configuration files.
-- Detect whether a usable Secret Service provider exists and show an actionable setup error when it does not.
-- Send desktop notifications through the Freedesktop D-Bus notification protocol.
-- Degrade gracefully to in-app notifications when the desktop notification service is unavailable.
+Current behavior is intentionally narrow: the internal API-token bootstrap keeps credentials in the Jira HTTP client only, never in SQLite, and the in-app update feed is durable. Desktop notification delivery is currently represented by a suppress-all policy and a safe unavailable adapter, so synchronization never claims that a desktop notification was delivered.
+
+Future production work should store OAuth credentials in the desktop secret service rather than SQLite or plain configuration files, detect missing Secret Service support, send notifications through the Freedesktop D-Bus protocol, and degrade to the in-app feed when delivery is unavailable.
 
 ## 10. Jira Cloud integration
 
@@ -430,184 +433,110 @@ For comment notifications, fetch new comment pages only for issues whose comment
 
 ## 11. Local data model
 
-The initial schema should contain the following tables.
+Migration `0001_initial.sql` is the current v1 schema. It is deliberately
+smaller than the eventual product model:
 
-### `jira_sites`
+The Phase 1 file is `jira-desk/jira-desk.sqlite3` under the absolute
+`XDG_DATA_HOME` root, or under `$HOME/.local/share` when XDG is unset/empty.
+The final app directory is created with Unix mode `0700`, and a newly created
+database file uses mode `0600`; relative roots and a final app-directory
+symlink are rejected. The storage layer returns redacted errors without
+exposing paths or SQLite details.
 
-- `id`
-- `cloud_id`
-- `base_url`
-- `display_name`
-- `created_at`
-- `last_connected_at`
+### Current v1 tables
 
-### `jira_users`
+- `user_sets`: site-scoped set ID, deterministic/local name, and created/updated timestamps. IDs are globally unique so dependent local state can be removed safely.
+- `user_set_members`: ordered account IDs with uniqueness constraints and a composite foreign key back to `user_sets`.
+- `issues`: site and Jira issue ID, issue key, summary, assignee ID, normalized updated timestamp, and a serialized normalized domain snapshot. The searchable columns support local filtering; the snapshot contains the rest of the normalized issue fields.
+- `issue_membership`: the current membership of an issue in a site/user-set view, replaced atomically by baseline and reconciliation commits.
+- `sync_states`: last started/succeeded cursor timestamps, last full-sync timestamp, failure count, and categorized last error.
+- `update_events`: immutable event identity, site/issue identity, event kind, occurrence time, local read state, local notification-delivery state, and a serialized normalized event snapshot.
+- `event_user_sets`: the many-to-many association between durable events and matching configured user sets.
 
-- `site_id`
-- `account_id`
-- `display_name`
-- `avatar_url`
-- `active`
-- `last_seen_at`
+The SQLite worker enables foreign keys, uses WAL for file-backed databases,
+and applies migrations transactionally. A successful sync atomically updates
+issue snapshots, membership, deduplicated events and associations, and the
+cursor. Local read/unread and delivery state are never sent to Jira.
 
-Primary key: `(site_id, account_id)`.
+### Future extensions
 
-### `user_sets`
-
-- `id`
-- `site_id`
-- `name`
-- `created_at`
-- `updated_at`
-
-### `user_set_members`
-
-- `user_set_id`
-- `account_id`
-- `sort_order`
-
-### `issues`
-
-- `site_id`
-- `issue_id`
-- `issue_key`
-- `project_id`
-- `project_key`
-- `project_name`
-- `issue_type_id`
-- `issue_type_name`
-- `summary`
-- `status_id`
-- `status_name`
-- `priority_id`
-- `priority_name`
-- `assignee_account_id`
-- `reporter_account_id`
-- `parent_issue_id`
-- `created_at`
-- `updated_at`
-- `due_date`
-- `resolution_name`
-- `description_adf`
-- `last_fetched_at`
-
-Primary key: `(site_id, issue_id)`; unique key on `(site_id, issue_key)`.
-
-### `issue_view_membership`
-
-Tracks whether an issue was present in a user set during the latest full reconciliation.
-
-- `user_set_id`
-- `issue_id`
-- `present`
-- `first_seen_at`
-- `last_seen_at`
-- `missing_since`
-
-### `comments_seen`
-
-- `site_id`
-- `issue_id`
-- `comment_id`
-- `author_account_id`
-- `created_at`
-- `body_excerpt`
-
-### `update_events`
-
-- `id`
-- `site_id`
-- `issue_id`
-- `event_type`
-- `dedupe_key`
-- `old_value`
-- `new_value`
-- `occurred_at`
-- `detected_at`
-- `is_read`
-- `desktop_notified_at`
-
-Unique key on `dedupe_key`.
-
-### `sync_state`
-
-- `site_id`
-- `user_set_id`
-- `last_incremental_started_at`
-- `last_incremental_succeeded_at`
-- `last_full_sync_at`
-- `consecutive_failures`
-- `last_error_kind`
+The following remain design targets rather than current tables: Jira-site and
+cached-user profiles, comment history/deduplication, raw ADF storage, user
+preferences/notification settings, retention policy, and a richer issue search
+projection. Add them through new numbered migrations only after their use cases
+and privacy behavior are implemented.
 
 ## 12. Synchronization design
 
+The implemented coordinator is intentionally bounded: it supports a live
+workspace, a quiet baseline, and explicit manual reconciliation. Automatic
+poll scheduling, incremental cursor queries, retry/backoff, and comment
+hydration remain follow-on work.
+
 ### 12.1 Baseline synchronization
 
-When a user set is first created:
+On the first refresh for a configured user set:
 
-1. Mark the set as synchronizing.
+1. Reuse or create the deterministic local user set.
 2. Fetch all matching issues through enhanced JQL pagination.
 3. Normalize and upsert issue snapshots.
-4. Hydrate missing parents in batches.
-5. Record view membership.
-6. Record the successful server-time boundary.
-7. Mark this as a baseline and emit no update notifications.
-8. Render cached pages progressively instead of waiting for the entire result set.
+4. Replace view membership and record the successful cursor atomically.
+5. Mark this as a baseline and emit no update events.
+6. Reload bounded cached pages for the UI.
 
 ### 12.2 Incremental polling
 
-Default interval: two minutes while the app is running. Make it configurable to 2, 5, 15, or 30 minutes.
+`SyncService` has an incremental mode and overlap-window support in the
+application contract, but `LiveWorkspace::refresh` currently chooses
+reconciliation after a successful cursor rather than scheduling incremental
+polls. This keeps the first desktop slice deterministic while the scheduler is
+still outstanding.
 
-Each poll:
+The future incremental design is:
 
 1. Starts from the last successful poll minus a five-minute overlap window.
 2. Fetches issues matching the selected assignees and update window.
 3. Compares the new normalized snapshot with the existing snapshot.
 4. Creates deduplicated update events for relevant differences.
-5. Fetches only the additional information needed for possible comment updates.
-6. Upserts issue and comment state in one transaction.
-7. Advances the cursor only after the transaction commits.
-8. Applies the notification policy after durable event creation.
+5. Advances the cursor only after the transaction commits.
+6. Applies the notification policy after durable event creation.
 
 The overlap prevents missed records due to clock skew and eventual search consistency. Deduplication prevents repeat notifications.
 
 ### 12.3 Full reconciliation
 
-Run a full synchronization:
+Manual refresh is the implemented full reconciliation path. It is selected
+only when a prior successful cursor exists; a failed first attempt records
+failure state but the next successful attempt remains a quiet baseline.
 
-- At application startup when the cache is stale.
-- On manual refresh.
-- Every 30 minutes while active.
-- After reconnecting from a prolonged offline period.
-
-Compare the complete current result set with `issue_view_membership`. Issues no longer returned become `issue_removed_from_view` events after the full page set succeeds. If the app cannot distinguish reassignment from lost permission, present the neutral message “Issue is no longer in this view.”
+The current path compares the complete returned set with
+`issue_membership`. Issues no longer returned become
+`issue_removed_from_view` events after the full page set succeeds. The commit
+replaces membership, persists deduplicated events and associations, and
+advances the cursor atomically. The UI reload is capped at 10,000 issues and
+500 feed events.
 
 ### 12.4 Scheduling and cancellation
 
-- Never run two syncs for the same user set concurrently.
-- Coalesce repeated refresh requests into one follow-up run.
-- Cancel obsolete searches when the active site or user set changes.
-- Limit concurrent Jira requests; do not try to consume Jira’s burst allowance.
-- Use exponential backoff with full jitter for transient network errors, `429`, and retryable `5xx` responses.
-- Respect `Retry-After` exactly when supplied.
-- Pause automatic polling after authentication failures until credentials are repaired.
-- Surface the last successful refresh time and stale-cache status in the UI.
+Implemented now: cancellation propagates through Jira pagination, failed
+refreshes record categorized local failure state, and cache loading does not
+contact Jira. Outstanding scheduler work must prevent concurrent syncs,
+coalesce refreshes, apply retry/backoff and `Retry-After`, pause after
+authentication failure, and surface stale-cache status in the UI.
 
 ## 13. Notification policy
 
-Default behavior:
+The in-app feed is implemented and authoritative. Baseline synchronization is
+quiet; later deterministic events are persisted with local read state and a
+notification-delivery state. The current desktop policy suppresses all
+notifications and the adapter returns a safe unavailable error if called, so
+the app does not claim delivery.
 
-- Notify for a new assignment, status change, priority change, due-date change, and new comment.
-- Do not notify for summary or parent changes unless enabled.
-- Never notify during baseline import.
-- Do not notify twice for the same dedupe key.
-- Coalesce more than three events detected within 30 seconds into a summary notification.
-- Clicking a notification should focus the application and select the issue where the desktop supports notification actions.
-- If actions are unsupported, the notification still identifies the issue key and summary.
-- Let users mute a user set or an event type.
-- Keep quiet hours as a post-MVP enhancement unless implementation is trivial.
-
-The in-app update feed remains authoritative even when desktop notifications are unavailable or muted.
+Future notification work should add event-type policy, coalescing, mute and
+quiet-hours settings, Freedesktop delivery, and focus/select behavior. The
+initial target event types remain assignment, status, priority, due-date, and
+comment changes; summary and parent changes are currently durable in-app
+events but should not automatically notify by default.
 
 ## 14. GPUI application state
 
@@ -651,7 +580,7 @@ Exit criteria:
 - The UI remains responsive during an HTTP request and database write.
 - The chosen async runtime approach is documented.
 
-### Phase 1 — Jira vertical slice
+### Phase 1 — Jira vertical slice (foundation delivered; UI completion remains)
 
 Estimate: 1 to 1.5 weeks.
 
@@ -689,39 +618,46 @@ Exit criteria:
 - A 50-user set can be synchronized without N+1 parent requests.
 - Issue hierarchy and detail content remain correct across cached restarts.
 
-### Phase 3 — Durable cache and sync engine
+### Phase 3 — Durable cache and sync engine (implemented v1 slice)
 
 Estimate: 1 to 1.5 weeks.
 
-Work:
+Delivered:
 
 - Add schema migrations and repositories.
-- Implement baseline, incremental, and reconciliation sync modes.
-- Add overlap windows and durable sync cursors.
-- Add snapshot diffing and event deduplication.
-- Add cancellation, retry, rate-limit behavior, and stale-cache states.
-- Add offline startup.
+- Implement baseline and reconciliation sync modes; incremental support remains in the application contract.
+- Add durable sync cursors and local failure state.
+- Add deterministic snapshot diffing, event associations, and event deduplication.
+- Add cancellation and atomic issue/membership/event/cursor commits.
+- Add offline startup cache loading and bounded cache reads.
 
-Exit criteria:
+Remaining:
+
+- Add automatic polling, retry/rate-limit policy, stale-cache presentation, and broader offline states.
+
+Delivered/remaining exit criteria:
 
 - Killing the application during a sync cannot advance the cursor past committed data.
 - Repeated overlapping polls do not create duplicate update events.
-- Offline startup displays cached data and an accurate stale status.
+- Offline startup displays cached data; accurate stale-status presentation remains.
 
-### Phase 4 — Updates and notifications
+### Phase 4 — Updates and notifications (in-app feed delivered; desktop delivery remains)
 
 Estimate: 1 week.
 
-Work:
+Delivered:
 
 - Build the in-app update inbox.
 - Detect configured issue field changes.
-- Detect newly visible comments without downloading full histories repeatedly.
 - Add read/unread state.
-- Add desktop notification delivery, coalescing, mute settings, and fallback behavior.
 - Suppress baseline notifications.
 
-Exit criteria:
+Remaining:
+
+- Detect newly visible comments without downloading full histories repeatedly.
+- Add desktop notification delivery, coalescing, mute settings, and fallback behavior.
+
+Remaining exit criteria:
 
 - A controlled Jira change produces one durable in-app event and at most one desktop notification.
 - Notification failure does not lose the in-app event or break synchronization.
@@ -746,9 +682,16 @@ Exit criteria:
 - No token, authorization header, comment body, or description appears in normal logs.
 - The app recovers cleanly from network loss, `429`, invalid credentials, and a corrupt cache copy.
 
-### Phase 6 — AppImage release
+### Phase 6 — AppImage release (scaffolded; artifact and release validation outstanding)
 
 Estimate: 0.5 to 1 week.
+
+The repository now has the AppDir metadata, desktop entry, icon, `AppRun`,
+license inclusion, and a guarded `linuxdeploy`/`appimagetool` build script.
+This is packaging scaffolding only: it requires a Linux x86_64 host and pinned,
+verified packaging tools. No Linux-built artifact, runtime matrix, or release
+automation has been validated yet, and the flow cannot be executed on the
+current macOS development host.
 
 Work:
 
@@ -869,7 +812,7 @@ Do not attempt to produce the release AppImage from macOS through ad-hoc cross-c
 ## 18. Security and privacy
 
 - Use TLS validation without insecure overrides.
-- Store credentials only through the secret-storage abstraction.
+- Current internal mode consumes API-token credentials into the Jira HTTP client and never writes them to SQLite. Production mode must store credentials only through the secret-storage abstraction.
 - Never persist the Atlassian OAuth client secret in the desktop repository or binary.
 - Never log authorization headers, API tokens, access tokens, refresh tokens, OAuth codes, or broker session credentials.
 - Redact Jira description and comment bodies from normal logs.
@@ -967,22 +910,22 @@ No macOS-specific work should be allowed to complicate the Phase 1 Linux release
 
 Execute these tasks in order:
 
-1. Create the Cargo application and pin the Rust toolchain.
-2. Pin a compatible GPUI/`gpui-component` pair.
-3. Open a Wayland window containing a static issue table and detail pane.
-4. Prove async HTTP and database communication without blocking GPUI.
-5. Produce the minimal AppImage spike.
-6. Define Jira transport fixtures and domain models.
-7. Implement the read-only Jira client and JQL builder.
-8. Fetch and render one hard-coded account’s issues.
-9. Add user search and user-set persistence.
-10. Add pagination and parent hydration.
-11. Add durable caching.
-12. Add baseline and incremental synchronization.
-13. Add snapshot diff events.
-14. Add the update inbox.
-15. Add desktop notifications.
-16. Finish error recovery, release testing, and AppImage automation.
+1. Create the Cargo application and pin the Rust toolchain. (Done.)
+2. Pin a compatible GPUI/`gpui-component` pair. (Done.)
+3. Open a Wayland window containing a static issue table and detail pane. (Preview path done; Linux validation remains.)
+4. Prove async HTTP and database communication without blocking GPUI. (Done in adapters; runtime validation remains.)
+5. Produce the minimal AppImage spike. (Scaffold exists; Linux build and execution validation remain.)
+6. Define Jira transport fixtures and domain models. (Done.)
+7. Implement the read-only Jira client and JQL builder. (Done.)
+8. Fetch and render one configured account’s issues. (Read-only live pull foundation done; broader UI wiring remains.)
+9. Add user search and user-set persistence. (Persistence done; user-search UI remains.)
+10. Add pagination and parent hydration. (Bounded pagination done; parent hydration remains.)
+11. Add durable caching. (SQLite v1 done.)
+12. Add baseline and incremental synchronization. (Baseline/reconciliation done; scheduled incremental polling remains.)
+13. Add snapshot diff events. (Done for normalized issue fields and membership.)
+14. Add the update inbox. (Done, including local read state.)
+15. Add desktop notifications. (Outstanding; current policy suppresses delivery.)
+16. Finish error recovery, release testing, and AppImage automation. (Outstanding.)
 
 ## 25. Decisions to close before coding reaches authentication
 
