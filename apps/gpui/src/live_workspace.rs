@@ -169,16 +169,38 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let mode = if self
+        let mode = self.next_mode(SyncMode::Reconciliation).await?;
+        self.refresh_with_mode(mode, cancellation).await
+    }
+
+    /// Synchronize Jira automatically, using the incremental cursor after the
+    /// first successful baseline while preserving the local membership view.
+    pub async fn refresh_automatically(
+        &self,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<RefreshResult, ApplicationError> {
+        let mode = self.next_mode(SyncMode::Incremental).await?;
+        self.refresh_with_mode(mode, cancellation).await
+    }
+
+    async fn next_mode(&self, subsequent_mode: SyncMode) -> Result<SyncMode, ApplicationError> {
+        if self
             .cache
             .sync_state(&self.site_id, &self.user_set_id)
             .await?
             .is_some_and(|state| state.last_incremental_succeeded_at.is_some())
         {
-            SyncMode::Reconciliation
+            Ok(subsequent_mode)
         } else {
-            SyncMode::Baseline
-        };
+            Ok(SyncMode::Baseline)
+        }
+    }
+
+    async fn refresh_with_mode(
+        &self,
+        mode: SyncMode,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<RefreshResult, ApplicationError> {
         let outcome = self
             .sync
             .run(
@@ -415,6 +437,32 @@ mod tests {
             reconciliation.cached.events[0].notification_delivery,
             NotificationDelivery::SuppressedByPolicy
         );
+    }
+
+    #[test]
+    fn automatic_refresh_uses_incremental_cursor_without_removing_cached_issues() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue("Initial summary")));
+        jira.push_page(IssuePage {
+            issues: Vec::new(),
+            next_cursor: None,
+            server_time: Some(datetime!(2026-01-04 00:00 UTC)),
+        });
+        let workspace = make_workspace(jira, Arc::new(SqliteStore::in_memory().expect("store")));
+        let cancellation = CancellationToken::new();
+
+        let baseline =
+            block_on(workspace.refresh_automatically(&cancellation)).expect("automatic baseline");
+        assert_eq!(baseline.outcome.mode, SyncMode::Baseline);
+        assert_eq!(baseline.outcome.events_inserted, 0);
+        assert!(baseline.cached.events.is_empty());
+
+        let incremental = block_on(workspace.refresh_automatically(&cancellation))
+            .expect("automatic incremental refresh");
+        assert_eq!(incremental.outcome.mode, SyncMode::Incremental);
+        assert_eq!(incremental.outcome.events_inserted, 0);
+        assert_eq!(incremental.cached.issues.len(), 1);
+        assert_eq!(incremental.cached.issues[0].summary, "Initial summary");
     }
 
     #[test]
