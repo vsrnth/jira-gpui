@@ -6,10 +6,11 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _, button::Button, button::ButtonVariants as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, StyledExt as _, button::Button,
+    button::ButtonVariants as _, h_flex, v_flex,
 };
 use jira_application::{ApplicationError, CancellationToken, DefaultPollingPolicy, SyncMode};
-use jira_domain::{Issue, User};
+use jira_domain::{AccountId, Issue, User};
 
 use crate::{
     config::{LiveSession, StartupError},
@@ -60,6 +61,12 @@ enum Section {
     Updates,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IssueScope {
+    All,
+    Mine,
+}
+
 pub struct Dashboard {
     section: Section,
     issues: Vec<IssueViewModel>,
@@ -75,6 +82,8 @@ pub struct Dashboard {
     operation_in_progress: bool,
     polling_task: Option<gpui::Task<()>>,
     automatic_polling_paused: bool,
+    issue_scope: IssueScope,
+    authenticated_account: Option<AccountId>,
 }
 
 impl Dashboard {
@@ -110,16 +119,13 @@ impl Dashboard {
             operation_in_progress: false,
             polling_task: None,
             automatic_polling_paused: false,
+            issue_scope: IssueScope::All,
+            authenticated_account: None,
         }
     }
 
     pub fn from_live(session: LiveSession, cx: &mut Context<Self>) -> Self {
-        let workspace_members = session
-            .assignees
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let authenticated_account = session.authenticated_account.clone();
         let dashboard = Self {
             section: Section::Issues,
             issues: Vec::new(),
@@ -128,21 +134,34 @@ impl Dashboard {
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
             users: Vec::new(),
-            workspace_name: "Configured user set".to_owned(),
-            workspace_members,
+            workspace_name: "Jira Project".to_owned(),
+            workspace_members: if authenticated_account.is_some() {
+                "Authenticated Jira account".to_owned()
+            } else {
+                "Environment bootstrap · My issues unavailable".to_owned()
+            },
             site_label: session.site_label,
             mode_label: "Live read-only sync · best-effort desktop notifications".to_owned(),
             operation_in_progress: true,
             polling_task: None,
             automatic_polling_paused: false,
+            issue_scope: IssueScope::All,
+            authenticated_account,
         };
 
         let site_id = session.site_id;
-        let assignees = session.assignees;
+        let authenticated_account = session.authenticated_account;
         let jira = session.jira;
         let cache = session.cache;
         cx.spawn(async move |this, cx| {
-            let result = match LiveWorkspace::initialize(site_id, assignees, jira, cache).await {
+            let result = match LiveWorkspace::initialize(
+                site_id,
+                authenticated_account,
+                jira,
+                cache,
+            )
+            .await
+            {
                 Ok(workspace) => {
                     let workspace = Arc::new(workspace);
                     workspace
@@ -184,6 +203,8 @@ impl Dashboard {
         let Some(workspace) = self.workspace.clone() else {
             return;
         };
+        let issue_scope = self.issue_scope;
+        let authenticated_account = self.authenticated_account.clone();
 
         let policy = DefaultPollingPolicy;
         let task = cx.spawn(async move |this, cx| {
@@ -210,6 +231,25 @@ impl Dashboard {
 
                 let cancellation = CancellationToken::new();
                 let result = workspace.refresh_automatically(&cancellation).await;
+                let result = match result {
+                    Ok(mut result)
+                        if issue_scope == IssueScope::Mine
+                            && authenticated_account.as_ref().is_some() =>
+                    {
+                        let account = authenticated_account
+                            .clone()
+                            .expect("authenticated account checked above");
+                        match workspace.load_cached_for_assignee(account).await {
+                            Ok(cached) => {
+                                result.cached = cached;
+                                Ok(result)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(result) => Ok(result),
+                    Err(error) => Err(error),
+                };
                 let next_delay = match this.update(cx, |this, cx| {
                     this.operation_in_progress = false;
                     match result {
@@ -259,8 +299,8 @@ impl Dashboard {
         dashboard.updates.clear();
         dashboard.selected_issue = 0;
         dashboard.users.clear();
-        dashboard.workspace_name = "Configuration required".to_owned();
-        dashboard.workspace_members = "Set all five Jira environment variables".to_owned();
+        dashboard.workspace_name = "Jira Project".to_owned();
+        dashboard.workspace_members = "Connect Jira to load this view".to_owned();
         dashboard.site_label = "Jira site unavailable".to_owned();
         dashboard.mode_label = "Startup configuration error".to_owned();
         dashboard.sync_message = format!("Configuration error · {error}");
@@ -288,6 +328,55 @@ impl Dashboard {
         self.updates = updates;
     }
 
+    fn set_issue_scope(&mut self, scope: IssueScope, cx: &mut Context<Self>) {
+        if self.issue_scope == scope || self.operation_in_progress {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(account_id) = self.authenticated_account.clone() else {
+            return;
+        };
+        self.issue_scope = scope;
+        self.polling_task.take();
+        self.operation_in_progress = true;
+        self.sync_message = match scope {
+            IssueScope::All => "Loading all cached Jira Project issues…".to_owned(),
+            IssueScope::Mine => "Loading your cached Jira Project issues…".to_owned(),
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = match scope {
+                IssueScope::All => workspace.load_cached().await,
+                IssueScope::Mine => workspace.load_cached_for_assignee(account_id).await,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.operation_in_progress = false;
+                match result {
+                    Ok(cached) => {
+                        this.apply_cached(cached);
+                        this.start_automatic_polling(cx);
+                        this.sync_message = match scope {
+                            IssueScope::All => {
+                                "Showing all cached Jira Project issues".to_owned()
+                            }
+                            IssueScope::Mine => {
+                                "Showing your cached Jira Project issues".to_owned()
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        this.sync_message = safe_sync_error(&error).to_owned();
+                        this.start_automatic_polling(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn begin_refresh(&mut self, cx: &mut Context<Self>) {
         if self.operation_in_progress {
             return;
@@ -298,12 +387,33 @@ impl Dashboard {
             return;
         };
         let cancellation = CancellationToken::new();
+        let issue_scope = self.issue_scope;
+        let authenticated_account = self.authenticated_account.clone();
         self.operation_in_progress = true;
         self.sync_message = "Refreshing Jira…".to_owned();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = workspace.refresh(&cancellation).await;
+            let result = match result {
+                Ok(mut result)
+                    if issue_scope == IssueScope::Mine
+                        && authenticated_account.as_ref().is_some() =>
+                {
+                    let account = authenticated_account
+                        .clone()
+                        .expect("authenticated account checked above");
+                    match workspace.load_cached_for_assignee(account).await {
+                        Ok(cached) => {
+                            result.cached = cached;
+                            Ok(result)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Ok(result) => Ok(result),
+                Err(error) => Err(error),
+            };
             let _ = this.update(cx, |this, cx| {
                 this.operation_in_progress = false;
                 match result {
@@ -335,9 +445,30 @@ impl Dashboard {
         }
         self.operation_in_progress = true;
         self.sync_message = "Marking updates read…".to_owned();
+        let issue_scope = self.issue_scope;
+        let authenticated_account = self.authenticated_account.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = workspace.mark_all_read().await;
+            let result = match result {
+                Ok(mut result)
+                    if issue_scope == IssueScope::Mine
+                        && authenticated_account.as_ref().is_some() =>
+                {
+                    let account = authenticated_account
+                        .clone()
+                        .expect("authenticated account checked above");
+                    match workspace.load_cached_for_assignee(account).await {
+                        Ok(cached) => {
+                            result.cached = cached;
+                            Ok(result)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Ok(result) => Ok(result),
+                Err(error) => Err(error),
+            };
             let _ = this.update(cx, |this, cx| {
                 this.operation_in_progress = false;
                 match result {
@@ -435,7 +566,7 @@ impl Dashboard {
                             .text_xs()
                             .font_semibold()
                             .text_color(cx.theme().muted_foreground)
-                            .child("USER SET"),
+                            .child("VIEW"),
                     )
                     .child(
                         v_flex()
@@ -534,7 +665,7 @@ impl Dashboard {
                 v_flex()
                     .gap_0p5()
                     .child(div().text_lg().font_semibold().child(match self.section {
-                        Section::Issues => "Issues for selected users",
+                        Section::Issues => "Jira Project issues",
                         Section::Updates => "Update inbox",
                     }))
                     .child(
@@ -545,14 +676,41 @@ impl Dashboard {
                     ),
             )
             .child(
-                Button::new("refresh")
-                    .primary()
-                    .label(if self.operation_in_progress {
-                        "Refreshing…"
-                    } else {
-                        "Refresh"
+                h_flex()
+                    .gap_2()
+                    .when(self.section == Section::Issues, |this| {
+                        this.child(
+                            Button::new("all-issues")
+                                .label("All issues")
+                                .when(self.issue_scope == IssueScope::All, |button| {
+                                    button.primary()
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_issue_scope(IssueScope::All, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("my-issues")
+                                .label("My issues")
+                                .when(self.issue_scope == IssueScope::Mine, |button| {
+                                    button.primary()
+                                })
+                                .disabled(self.authenticated_account.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_issue_scope(IssueScope::Mine, cx)
+                                })),
+                        )
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
+                    .child(
+                        Button::new("refresh")
+                            .primary()
+                            .label(if self.operation_in_progress {
+                                "Refreshing…"
+                            } else {
+                                "Refresh"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
+                    ),
             )
     }
 
@@ -577,7 +735,14 @@ impl Dashboard {
                             .border_color(cx.theme().border)
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} matching issues", self.issues.len()))
+                            .child(format!(
+                                "{} matching Jira Project issues · {}",
+                                self.issues.len(),
+                                match self.issue_scope {
+                                    IssueScope::All => "All issues",
+                                    IssueScope::Mine => "My issues",
+                                }
+                            ))
                             .child("Updated newest first"),
                     )
                     .child(

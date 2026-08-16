@@ -168,7 +168,7 @@ impl AppShell {
                                                 div()
                                                     .text_sm()
                                                     .text_color(cx.theme().muted_foreground)
-                                                    .child("Configure a read-only Jira Cloud workspace"),
+                                                    .child("Configure a read-only Jira Project workspace"),
                                             ),
                                     ),
                             )
@@ -176,7 +176,7 @@ impl AppShell {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira Desk pulls issues, epics, and updates assigned to your Jira account. It never writes to Jira."),
+                                    .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. It never writes to Jira."),
                             ),
                     )
                     .when_some(error, |this, error| this.child(error))

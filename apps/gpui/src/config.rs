@@ -18,7 +18,6 @@ const ENV_BASE_URL: &str = "JIRA_BASE_URL";
 const ENV_SITE_ID: &str = "JIRA_SITE_ID";
 const ENV_EMAIL: &str = "JIRA_EMAIL";
 const ENV_API_TOKEN: &str = "JIRA_API_TOKEN";
-const ENV_ASSIGNEES: &str = "JIRA_ASSIGNEE_ACCOUNT_IDS";
 
 /// The startup mode selected by the shell without exposing credentials.
 pub enum StartupSelection {
@@ -31,7 +30,7 @@ pub enum StartupSelection {
 pub struct LiveSession {
     pub(crate) site_id: JiraSiteId,
     pub(crate) site_label: String,
-    pub(crate) assignees: Vec<AccountId>,
+    pub(crate) authenticated_account: Option<AccountId>,
     pub(crate) jira: Arc<JiraHttpClient>,
     pub(crate) cache: Arc<SqliteStore>,
 }
@@ -42,10 +41,12 @@ pub enum StartupError {
     Incomplete,
     InvalidSiteId,
     InvalidBaseUrl,
+    MissingEmail,
+    MissingApiToken,
     InvalidCredentials,
+    AuthenticationRejected,
+    AuthorizationDenied,
     CurrentUserUnavailable,
-    InvalidAssignees,
-    DuplicateAssignees,
     ClientUnavailable,
     StorageUnavailable,
 }
@@ -53,15 +54,23 @@ pub enum StartupError {
 impl fmt::Display for StartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::Incomplete => "Jira configuration is incomplete; set all five Jira variables",
+            Self::Incomplete => {
+                "Jira configuration is incomplete; set the Jira URL, site ID, email, and API token"
+            }
             Self::InvalidSiteId => "Jira configuration has an invalid site ID",
             Self::InvalidBaseUrl => "Jira configuration has an invalid HTTPS Atlassian URL",
-            Self::InvalidCredentials => "Jira configuration has invalid credentials",
+            Self::MissingEmail => "Enter the Atlassian email associated with this Jira token",
+            Self::MissingApiToken => "Enter an Atlassian API token",
+            Self::InvalidCredentials => "The Jira API token contains invalid whitespace",
+            Self::AuthenticationRejected => {
+                "Jira rejected the credentials (HTTP 401); check the email and API token"
+            }
+            Self::AuthorizationDenied => {
+                "Jira denied access (HTTP 403); check this account's Jira permissions"
+            }
             Self::CurrentUserUnavailable => {
                 "Jira account could not be verified; check the site URL and credentials"
             }
-            Self::InvalidAssignees => "Jira configuration has invalid assignee account IDs",
-            Self::DuplicateAssignees => "Jira configuration repeats an assignee account ID",
             Self::ClientUnavailable => "the Jira client could not be initialized",
             Self::StorageUnavailable => "local Jira Desk storage is unavailable",
         };
@@ -75,7 +84,6 @@ struct EnvironmentValues {
     site_id: Option<String>,
     email: Option<String>,
     api_token: Option<String>,
-    assignees: Option<String>,
 }
 
 impl EnvironmentValues {
@@ -85,7 +93,6 @@ impl EnvironmentValues {
             site_id: env::var(ENV_SITE_ID).ok(),
             email: env::var(ENV_EMAIL).ok(),
             api_token: env::var(ENV_API_TOKEN).ok(),
-            assignees: env::var(ENV_ASSIGNEES).ok(),
         }
     }
 }
@@ -119,6 +126,7 @@ async fn live_session_from_manual_configuration_with_store<F>(
 where
     F: FnOnce() -> Result<Arc<SqliteStore>, StartupError>,
 {
+    let (base_url, email, api_token) = normalize_manual_inputs(&base_url, &email, &api_token);
     let parsed_url = JiraBaseUrl::parse(&base_url).map_err(|_| StartupError::InvalidBaseUrl)?;
     let host = parsed_url
         .as_url()
@@ -126,8 +134,7 @@ where
         .ok_or(StartupError::InvalidBaseUrl)?;
     let site_id = JiraSiteId::new(host.to_owned()).map_err(|_| StartupError::InvalidBaseUrl)?;
 
-    let credentials =
-        ApiTokenCredentials::new(email, api_token).map_err(|_| StartupError::InvalidCredentials)?;
+    let credentials = credentials_from_values(email, api_token)?;
     let site_label = base_url.clone();
     let jira = JiraHttpClient::new(site_id.clone(), base_url, credentials)
         .map(Arc::new)
@@ -141,7 +148,7 @@ where
     Ok(LiveSession {
         site_id,
         site_label,
-        assignees: vec![assignee],
+        authenticated_account: Some(assignee),
         jira,
         cache,
     })
@@ -161,9 +168,8 @@ async fn resolve_initial_assignee(
         .fetch_current_user(site_id, &cancellation)
         .await
         .map_err(|error| match error.kind() {
-            ErrorKind::Authentication | ErrorKind::Authorization => {
-                StartupError::InvalidCredentials
-            }
+            ErrorKind::Authentication => StartupError::AuthenticationRejected,
+            ErrorKind::Authorization => StartupError::AuthorizationDenied,
             _ => StartupError::CurrentUserUnavailable,
         })?;
     if user.site_id != *site_id {
@@ -190,7 +196,6 @@ where
         values.site_id.is_some(),
         values.email.is_some(),
         values.api_token.is_some(),
-        values.assignees.is_some(),
     ];
     let present = configured.iter().filter(|value| **value).count();
     if present == 0 {
@@ -209,7 +214,6 @@ where
         values.base_url.expect("presence checked"),
         values.email.expect("presence checked"),
         values.api_token.expect("presence checked"),
-        values.assignees.expect("presence checked"),
         store_factory,
     ) {
         Ok(session) => StartupSelection::Live(session),
@@ -222,18 +226,16 @@ fn build_live_session<F>(
     base_url: String,
     email: String,
     api_token: String,
-    assignees: String,
     store_factory: F,
 ) -> Result<LiveSession, StartupError>
 where
     F: FnOnce() -> Result<Arc<SqliteStore>, StartupError>,
 {
-    let assignees = parse_assignees(&assignees)?;
+    let (base_url, email, api_token) = normalize_manual_inputs(&base_url, &email, &api_token);
 
     // Consume the credential strings directly into the client. No startup
     // state retains the token after this function returns.
-    let credentials =
-        ApiTokenCredentials::new(email, api_token).map_err(|_| StartupError::InvalidCredentials)?;
+    let credentials = credentials_from_values(email, api_token)?;
     let site_label = base_url.clone();
     let jira = match JiraHttpClient::new(site_id.clone(), base_url, credentials) {
         Ok(jira) => Arc::new(jira),
@@ -245,26 +247,39 @@ where
     Ok(LiveSession {
         site_id,
         site_label,
-        assignees,
+        // The synchronous environment bootstrap does not call `/myself`.
+        authenticated_account: None,
         jira,
         cache,
     })
 }
 
-fn parse_assignees(value: &str) -> Result<Vec<AccountId>, StartupError> {
-    if value.trim().is_empty() {
-        return Err(StartupError::InvalidAssignees);
+fn normalize_manual_inputs(
+    base_url: &str,
+    email: &str,
+    api_token: &str,
+) -> (String, String, String) {
+    (
+        base_url.trim().to_owned(),
+        email.trim().to_owned(),
+        api_token.trim().to_owned(),
+    )
+}
+
+fn credentials_from_values(
+    email: String,
+    api_token: String,
+) -> Result<ApiTokenCredentials, StartupError> {
+    if email.is_empty() {
+        return Err(StartupError::MissingEmail);
     }
-    let mut assignees = Vec::new();
-    for raw in value.split(',') {
-        let account_id =
-            AccountId::new(raw.trim().to_owned()).map_err(|_| StartupError::InvalidAssignees)?;
-        if assignees.contains(&account_id) {
-            return Err(StartupError::DuplicateAssignees);
-        }
-        assignees.push(account_id);
+    if api_token.is_empty() {
+        return Err(StartupError::MissingApiToken);
     }
-    Ok(assignees)
+    if api_token.chars().any(char::is_whitespace) {
+        return Err(StartupError::InvalidCredentials);
+    }
+    ApiTokenCredentials::new(email, api_token).map_err(|_| StartupError::InvalidCredentials)
 }
 
 #[cfg(test)]
@@ -287,7 +302,6 @@ mod tests {
             site_id: Some("cloud-site".to_owned()),
             email: Some("developer@example.com".to_owned()),
             api_token: Some("token-that-must-not-escape".to_owned()),
-            assignees: Some("account-a, account-b".to_owned()),
         }
     }
 
@@ -307,6 +321,14 @@ mod tests {
                 .map_err(|_| StartupError::StorageUnavailable)
         });
         assert!(matches!(selection, StartupSelection::Live(_)));
+    }
+
+    #[test]
+    fn environment_configuration_has_no_authenticated_account() {
+        let StartupSelection::Live(session) = in_memory_startup(complete()) else {
+            panic!("environment setup should not require authenticated account IDs");
+        };
+        assert!(session.authenticated_account.is_none());
     }
 
     fn in_memory_startup(values: EnvironmentValues) -> StartupSelection {
@@ -361,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_onboarding_uses_authenticated_account_as_only_assignee() {
+    fn manual_onboarding_uses_authenticated_account() {
         let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
         let user = User::new(
             site_id.clone(),
@@ -388,12 +410,60 @@ mod tests {
         };
 
         let error = block_on(resolve_initial_assignee(&jira, &site_id)).expect_err("auth error");
-        assert_eq!(error, StartupError::InvalidCredentials);
+        assert_eq!(error, StartupError::AuthenticationRejected);
         assert!(!error.to_string().contains("token-that-must-not-escape"));
     }
 
     #[test]
-    fn manual_configuration_rejects_invalid_url_credentials_and_assignees() {
+    fn manual_onboarding_maps_authentication_and_authorization_separately() {
+        let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
+        for (kind, expected) in [
+            (
+                ErrorKind::Authentication,
+                StartupError::AuthenticationRejected,
+            ),
+            (ErrorKind::Authorization, StartupError::AuthorizationDenied),
+        ] {
+            let jira = FakeCurrentUser {
+                result: Err(ApplicationError::new(
+                    kind,
+                    "remote details must not escape",
+                )),
+            };
+            let error =
+                block_on(resolve_initial_assignee(&jira, &site_id)).expect_err("remote auth error");
+            assert_eq!(error, expected);
+            assert!(!error.to_string().contains("remote details"));
+            let message = error.to_string();
+            if kind == ErrorKind::Authentication {
+                assert_eq!(
+                    message,
+                    "Jira rejected the credentials (HTTP 401); check the email and API token"
+                );
+            } else {
+                assert_eq!(
+                    message,
+                    "Jira denied access (HTTP 403); check this account's Jira permissions"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manual_input_snapshots_trim_surrounding_whitespace() {
+        let (base_url, email, api_token) = normalize_manual_inputs(
+            "  https://example.atlassian.net/  ",
+            "  developer@example.com\n",
+            "\tapi-token\t",
+        );
+
+        assert_eq!(base_url, "https://example.atlassian.net/");
+        assert_eq!(email, "developer@example.com");
+        assert_eq!(api_token, "api-token");
+    }
+
+    #[test]
+    fn manual_configuration_rejects_invalid_url_and_credentials() {
         assert!(matches!(
             block_on(live_session_from_manual_configuration_with_store(
                 "http://example.atlassian.net".to_owned(),
@@ -410,7 +480,16 @@ mod tests {
                 "".to_owned(),
                 || Err(StartupError::StorageUnavailable),
             )),
-            Err(StartupError::InvalidCredentials)
+            Err(StartupError::MissingApiToken)
+        ));
+        assert!(matches!(
+            block_on(live_session_from_manual_configuration_with_store(
+                "https://example.atlassian.net".to_owned(),
+                "".to_owned(),
+                "token".to_owned(),
+                || Err(StartupError::StorageUnavailable),
+            )),
+            Err(StartupError::MissingEmail)
         ));
     }
 
@@ -428,7 +507,7 @@ mod tests {
             },
         ));
 
-        assert!(matches!(result, Err(StartupError::InvalidCredentials)));
+        assert!(matches!(result, Err(StartupError::MissingApiToken)));
         assert!(!called.load(Ordering::SeqCst));
     }
 
@@ -440,23 +519,6 @@ mod tests {
         assert!(matches!(
             selection,
             StartupSelection::ConfigurationError(StartupError::Incomplete)
-        ));
-    }
-
-    #[test]
-    fn empty_and_duplicate_assignees_are_rejected() {
-        let mut empty = complete();
-        empty.assignees = Some("account-a, ,account-b".to_owned());
-        assert!(matches!(
-            in_memory_startup(empty),
-            StartupSelection::ConfigurationError(StartupError::InvalidAssignees)
-        ));
-
-        let mut duplicate = complete();
-        duplicate.assignees = Some("account-a,account-a".to_owned());
-        assert!(matches!(
-            in_memory_startup(duplicate),
-            StartupSelection::ConfigurationError(StartupError::DuplicateAssignees)
         ));
     }
 

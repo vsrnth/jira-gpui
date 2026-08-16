@@ -39,16 +39,15 @@ cargo run -p jira-gpui
 The desktop opens a native Jira setup form when no configuration is available.
 Enter the Jira Cloud site URL, Atlassian account email, and an unscoped API
 token. Jira Desk verifies the credentials with the authenticated-current-user
-endpoint and follows that account's issues as the initial user set; no account
-ID needs to be discovered or pasted. The token is masked, discarded from the
-input before connection starts, held only by the in-memory HTTP client, and
-never stored locally or logged. For an internal development build, setting all
-five variables below remains available as an environment bootstrap and enables
-a read-only live workspace for the explicitly configured assignee account IDs.
-Live startup
-opens the local SQLite cache, reuses a saved user set whose canonical member
-list matches the configured accounts, and loads cached issues and in-app update
-events before contacting Jira. The first successful refresh establishes a
+endpoint, syncs all issues in the Jira Project project, and derives the
+authenticated account automatically; no account ID needs to be discovered or
+pasted. The token is masked, discarded from the input before connection starts,
+held only by the in-memory HTTP client, and never stored locally or logged.
+The workspace defaults to All issues. My issues is a local cache filter for the
+authenticated account and never refetches Jira. Live startup opens the local
+SQLite cache, uses an Jira Project/account-scoped workspace identity, and
+loads cached issues and in-app update events before contacting Jira. The first
+successful refresh establishes a
 quiet baseline; later automatic polls are incremental and preserve membership,
 while manual refresh remains full reconciliation. The live Dashboard owns one
 cancellable polling task, starts its first automatic tick after five minutes,
@@ -73,14 +72,18 @@ priority, due-date, and comment events. Removal, summary, and parent events
 remain in-app only; delivery failures are nonfatal and the durable in-app feed
 is authoritative.
 
-The prototype reads these environment variables as an all-or-none set:
+The prototype reads these environment variables as an all-or-none set; the
+project is fixed to Jira Project and no assignee variable is required:
 
 - `JIRA_BASE_URL`: an HTTPS `*.atlassian.net` site URL.
 - `JIRA_SITE_ID`: the Atlassian cloud/site identifier.
 - `JIRA_EMAIL`: the Atlassian account email used for the token.
 - `JIRA_API_TOKEN`: an API token consumed into the in-memory HTTP client; the
   app does not persist or log this environment value.
-- `JIRA_ASSIGNEE_ACCOUNT_IDS`: comma-separated stable Atlassian account IDs.
+
+The synchronous environment bootstrap does not call Jira's current-user
+endpoint, so it has no authenticated identity and disables My issues. Use
+interactive onboarding when the authenticated-account filter is needed.
 
 This API-token flow is intended only for internal development and local
 testing; never commit or log these values. The current direct-site transport
@@ -97,8 +100,8 @@ The Linux release build will enable GPUI's Wayland backend only. X11 is not a
 supported runtime target. Production OAuth and the Linux runtime matrix remain
 outstanding; macOS is Phase 2.
 
-Validation includes 93 Linux-target workspace tests in an x86_64 Ubuntu 22.04
-container with Rust 1.95.0 (94 on the macOS host due to the non-Linux adapter
+Validation includes 99 Linux-target workspace tests in an x86_64 Ubuntu 22.04
+container with Rust 1.95.0 (100 on the macOS host due to the non-Linux adapter
 fallback test), rustfmt, warning-denied production Clippy, metadata checks, and
 the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
 pinned tools/runtime; its checksum, extracted contents, required files, and

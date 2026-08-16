@@ -4,7 +4,7 @@
 //! wiring needed by a shell, while the application services and storage ports
 //! remain reusable by a future Tauri frontend.
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use jira_application::{
     ApplicationError, Clock, DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort,
@@ -45,7 +45,7 @@ pub struct FeedActionResult {
 /// Presentation-independent live workspace coordinator.
 pub struct LiveWorkspace {
     site_id: JiraSiteId,
-    assignees: Vec<AccountId>,
+    authenticated_account: Option<AccountId>,
     user_set_id: UserSetId,
     catalog: IssueCatalogService,
     feed: UpdateFeedService,
@@ -57,31 +57,43 @@ impl LiveWorkspace {
     /// Open the configured workspace, reusing its local user set when present.
     pub async fn initialize(
         site_id: JiraSiteId,
-        assignees: Vec<AccountId>,
+        authenticated_account: Option<AccountId>,
         jira: Arc<dyn JiraReadPort>,
         cache: Arc<SqliteStore>,
     ) -> Result<Self, ApplicationError> {
-        validate_assignees(&assignees)?;
-        let mut assignees = assignees;
-        assignees.sort();
+        let members = authenticated_account.iter().cloned().collect::<Vec<_>>();
+        let workspace_name = workspace_name();
 
         let user_sets = UserSetService::new(cache.clone() as Arc<dyn UserSetPort>);
-        let user_set_id = match user_sets
+        let existing_user_set = user_sets
             .list(&site_id)
             .await?
             .into_iter()
             .find(|user_set| {
                 user_set.site_id == site_id
-                    && user_set.name == WORKSPACE_NAME
-                    && user_set.members == assignees
-            }) {
+                    && user_set.name == workspace_name
+                    && user_set.members == members
+            });
+        let user_set_id = match existing_user_set {
             Some(user_set) => user_set.id,
+            None if members.is_empty() => {
+                // UserSetService models nonempty user sets; save the deliberate
+                // empty project-wide cache partition directly through the port.
+                cache
+                    .save(UserSetDraft {
+                        site_id: site_id.clone(),
+                        name: workspace_name.clone(),
+                        members: Vec::new(),
+                    })
+                    .await?
+                    .id
+            }
             None => {
                 user_sets
                     .save(UserSetDraft {
                         site_id: site_id.clone(),
-                        name: WORKSPACE_NAME.to_owned(),
-                        members: assignees.clone(),
+                        name: workspace_name.clone(),
+                        members,
                     })
                     .await?
                     .id
@@ -108,7 +120,7 @@ impl LiveWorkspace {
 
         Ok(Self {
             site_id,
-            assignees,
+            authenticated_account,
             user_set_id,
             catalog,
             feed,
@@ -121,8 +133,8 @@ impl LiveWorkspace {
         &self.site_id
     }
 
-    pub fn assignees(&self) -> &[AccountId] {
-        &self.assignees
+    pub fn authenticated_account(&self) -> Option<&AccountId> {
+        self.authenticated_account.as_ref()
     }
 
     pub fn user_set_id(&self) -> &UserSetId {
@@ -131,6 +143,23 @@ impl LiveWorkspace {
 
     /// Load bounded cached data without contacting Jira.
     pub async fn load_cached(&self) -> Result<CachedWorkspace, ApplicationError> {
+        self.load_cached_with_assignees(Vec::new()).await
+    }
+
+    /// Load the authenticated account's issues from the local cache without
+    /// contacting Jira. This is a presentation filter over the project-wide
+    /// cache, not a second remote synchronization.
+    pub async fn load_cached_for_assignee(
+        &self,
+        account_id: AccountId,
+    ) -> Result<CachedWorkspace, ApplicationError> {
+        self.load_cached_with_assignees(vec![account_id]).await
+    }
+
+    async fn load_cached_with_assignees(
+        &self,
+        assignees: Vec<AccountId>,
+    ) -> Result<CachedWorkspace, ApplicationError> {
         let mut issues = Vec::new();
         for offset in (0..MAX_CACHED_ISSUES).step_by(ISSUE_PAGE_SIZE) {
             let page = self
@@ -139,7 +168,7 @@ impl LiveWorkspace {
                     site_id: self.site_id.clone(),
                     user_set_id: self.user_set_id.clone(),
                     text: None,
-                    assignees: Vec::new(),
+                    assignees: assignees.clone(),
                     limit: ISSUE_PAGE_SIZE,
                     offset,
                 })
@@ -207,7 +236,7 @@ impl LiveWorkspace {
                 SyncRequest {
                     site_id: self.site_id.clone(),
                     user_set_id: self.user_set_id.clone(),
-                    assignees: self.assignees.clone(),
+                    assignees: None,
                     mode,
                 },
                 cancellation,
@@ -245,18 +274,8 @@ impl LiveWorkspace {
     }
 }
 
-fn validate_assignees(assignees: &[AccountId]) -> Result<(), ApplicationError> {
-    if assignees.is_empty() {
-        return Err(ApplicationError::invalid_input(
-            "workspace requires at least one assignee",
-        ));
-    }
-    if assignees.iter().collect::<HashSet<_>>().len() != assignees.len() {
-        return Err(ApplicationError::invalid_input(
-            "workspace assignees must be unique",
-        ));
-    }
-    Ok(())
+fn workspace_name() -> String {
+    format!("{WORKSPACE_NAME} · Jira Project")
 }
 
 #[derive(Debug)]
@@ -289,6 +308,7 @@ mod tests {
     struct FakeJira {
         pages: Mutex<VecDeque<IssuePage>>,
         request_count: Mutex<usize>,
+        assignee_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
     }
 
     impl FakeJira {
@@ -298,6 +318,13 @@ mod tests {
 
         fn request_count(&self) -> usize {
             *self.request_count.lock().expect("request count lock")
+        }
+
+        fn assignee_filters(&self) -> Vec<Option<Vec<AccountId>>> {
+            self.assignee_filters
+                .lock()
+                .expect("assignee filters lock")
+                .clone()
         }
     }
 
@@ -325,10 +352,14 @@ mod tests {
 
         fn fetch_issue_page<'a>(
             &'a self,
-            _request: &'a IssueFetchRequest,
+            request: &'a IssueFetchRequest,
             _cancellation: &'a CancellationToken,
         ) -> PortFuture<'a, IssuePage> {
             *self.request_count.lock().expect("request count lock") += 1;
+            self.assignee_filters
+                .lock()
+                .expect("assignee filters lock")
+                .push(request.assignees.clone());
             let result = self
                 .pages
                 .lock()
@@ -353,10 +384,19 @@ mod tests {
     }
 
     fn issue(summary: &str) -> Issue {
+        issue_for(summary, "account-a")
+    }
+
+    fn issue_for(summary: &str, account_id: &str) -> Issue {
+        let (issue_id, issue_key) = if account_id == "account-a" {
+            ("10001", "APP-1")
+        } else {
+            ("10002", "APP-2")
+        };
         Issue::new(
             JiraSiteId::new("site").expect("valid site"),
-            IssueId::new("10001").expect("valid issue"),
-            IssueKey::new("APP-1").expect("valid key"),
+            IssueId::new(issue_id).expect("valid issue"),
+            IssueKey::new(issue_key).expect("valid key"),
             Project {
                 id: "10".into(),
                 key: "APP".into(),
@@ -378,7 +418,7 @@ mod tests {
                 name: None,
                 icon_url: None,
             },
-            Some(account("account-a")),
+            Some(account(account_id)),
             None,
             None,
             Vec::new(),
@@ -399,7 +439,7 @@ mod tests {
     fn make_workspace(jira: Arc<FakeJira>, cache: Arc<SqliteStore>) -> LiveWorkspace {
         block_on(LiveWorkspace::initialize(
             JiraSiteId::new("site").expect("valid site"),
-            vec![account("account-a"), account("account-b")],
+            Some(account("account-a")),
             jira,
             cache,
         ))
@@ -413,19 +453,35 @@ mod tests {
         let first = make_workspace(jira.clone(), cache.clone());
         let second = block_on(LiveWorkspace::initialize(
             JiraSiteId::new("site").expect("valid site"),
-            vec![account("account-b"), account("account-a")],
+            Some(account("account-a")),
             jira,
             cache.clone(),
         ))
         .expect("workspace initializes");
         assert_eq!(first.user_set_id(), second.user_set_id());
-        assert_eq!(
-            second.assignees(),
-            &[account("account-a"), account("account-b")]
-        );
+        assert_eq!(second.authenticated_account(), Some(&account("account-a")));
         let sets =
             block_on(cache.list(&JiraSiteId::new("site").expect("valid site"))).expect("list sets");
         assert_eq!(sets.len(), 1);
+    }
+
+    #[test]
+    fn initialization_does_not_reuse_legacy_assignee_only_user_set() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("memory store"));
+        let site_id = JiraSiteId::new("site").expect("valid site");
+        let legacy = block_on(cache.save(UserSetDraft {
+            site_id: site_id.clone(),
+            name: WORKSPACE_NAME.to_owned(),
+            members: vec![account("account-a"), account("account-b")],
+        }))
+        .expect("save legacy user set");
+
+        let current = make_workspace(jira, cache.clone());
+        assert_ne!(current.user_set_id(), &legacy.id);
+        let sets = block_on(cache.list(&site_id)).expect("list sets");
+        assert_eq!(sets.len(), 2);
+        assert!(sets.iter().any(|set| set.name.contains("Jira Project")));
     }
 
     #[test]
@@ -552,35 +608,52 @@ mod tests {
     }
 
     #[test]
-    fn invalid_assignee_selection_is_rejected_before_persistence() {
+    fn my_issue_cache_filter_does_not_contact_jira() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(IssuePage {
+            issues: vec![
+                issue("Initial summary"),
+                issue_for("Other account summary", "account-b"),
+            ],
+            next_cursor: None,
+            server_time: Some(datetime!(2026-01-03 00:00 UTC)),
+        });
+        let workspace = make_workspace(
+            jira.clone(),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        );
+        let cancellation = CancellationToken::new();
+        block_on(workspace.refresh(&cancellation)).expect("baseline refresh");
+        let requests_after_sync = jira.request_count();
+        assert_eq!(jira.assignee_filters(), vec![None]);
+
+        let all = block_on(workspace.load_cached()).expect("load all local issues");
+        assert_eq!(all.issues.len(), 2);
+
+        let mine = block_on(workspace.load_cached_for_assignee(account("account-a")))
+            .expect("load local my filter");
+        assert_eq!(mine.issues.len(), 1);
+        assert_eq!(jira.request_count(), requests_after_sync);
+    }
+
+    #[test]
+    fn project_wide_workspace_has_no_authenticated_account() {
         let jira = Arc::new(FakeJira::default());
         let cache = Arc::new(SqliteStore::in_memory().expect("store"));
         let result = block_on(LiveWorkspace::initialize(
             JiraSiteId::new("site").expect("valid site"),
-            vec![account("account-a"), account("account-a")],
+            None,
             jira,
             cache.clone(),
         ));
-        assert!(matches!(
-            result,
-            Err(error) if error.kind() == ErrorKind::InvalidInput
-        ));
-        assert!(
+        let workspace = result.expect("project-wide workspace initializes");
+        assert!(workspace.authenticated_account().is_none());
+        assert_eq!(
             block_on(cache.list(&JiraSiteId::new("site").expect("valid site")))
                 .expect("list sets")
-                .is_empty()
+                .len(),
+            1
         );
-
-        let empty_result = block_on(LiveWorkspace::initialize(
-            JiraSiteId::new("site").expect("valid site"),
-            Vec::new(),
-            Arc::new(FakeJira::default()),
-            cache,
-        ));
-        assert!(matches!(
-            empty_result,
-            Err(error) if error.kind() == ErrorKind::InvalidInput
-        ));
     }
 
     #[test]
