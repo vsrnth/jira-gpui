@@ -111,7 +111,7 @@ impl Dashboard {
             workspace_name: "Configured user set".to_owned(),
             workspace_members,
             site_label: session.site_label,
-            mode_label: "Live read-only sync · desktop notifications unavailable".to_owned(),
+            mode_label: "Live read-only sync · best-effort desktop notifications".to_owned(),
             operation_in_progress: true,
         };
 
@@ -215,9 +215,11 @@ impl Dashboard {
                         let issue_count = outcome.cached.issues.len();
                         let new_event_count = outcome.outcome.events_inserted;
                         let event_count = outcome.cached.events.len();
+                        let notifications_delivered = outcome.outcome.notifications_delivered;
+                        let notification_failures = outcome.outcome.notification_failures;
                         this.apply_cached(outcome.cached);
                         this.sync_message = format!(
-                            "Refresh complete · {issue_count} issues · {new_event_count} new updates · {event_count} in inbox · {mode}"
+                            "Refresh complete · {issue_count} issues · {new_event_count} new updates · {event_count} in inbox · desktop notifications: {notifications_delivered} delivered, {notification_failures} unavailable · {mode}"
                         );
                     }
                     Err(error) => {

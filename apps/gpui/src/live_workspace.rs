@@ -7,11 +7,12 @@
 use std::{collections::HashSet, sync::Arc};
 
 use jira_application::{
-    ApplicationError, Clock, DefaultIssueDiffer, ErrorKind, IssueCachePort, IssueCatalogService,
-    IssueListQuery, JiraReadPort, NoopEventSink, NotificationPolicy, NotificationPort,
-    NotificationRequest, PortFuture, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
-    UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
+    ApplicationError, Clock, DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort,
+    IssueCatalogService, IssueListQuery, JiraReadPort, NoopEventSink, SyncConfig, SyncMode,
+    SyncOutcome, SyncRequest, SyncService, UpdateFeedQuery, UpdateFeedService, UserSetDraft,
+    UserSetPort, UserSetService,
 };
+use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{AccountId, EventId, Issue, JiraSiteId, Timestamp, UpdateEvent, UserSetId};
 use jira_storage::SqliteStore;
 
@@ -98,8 +99,8 @@ impl LiveWorkspace {
             jira,
             cache_port,
             Arc::new(DefaultIssueDiffer),
-            Arc::new(UnavailableDesktopNotifications),
-            Arc::new(SuppressDesktopNotifications),
+            Arc::new(FreedesktopNotificationPort),
+            Arc::new(DefaultDesktopNotificationPolicy),
             Arc::new(SystemClock),
             events,
             SyncConfig::default(),
@@ -245,29 +246,6 @@ impl Clock for SystemClock {
     }
 }
 
-#[derive(Debug)]
-struct SuppressDesktopNotifications;
-
-impl NotificationPolicy for SuppressDesktopNotifications {
-    fn should_notify(&self, _event: &UpdateEvent) -> bool {
-        false
-    }
-}
-
-#[derive(Debug)]
-struct UnavailableDesktopNotifications;
-
-impl NotificationPort for UnavailableDesktopNotifications {
-    fn deliver<'a>(&'a self, _request: NotificationRequest) -> PortFuture<'a, ()> {
-        Box::pin(async {
-            Err(ApplicationError::new(
-                ErrorKind::Notification,
-                "desktop notifications are unavailable",
-            ))
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
@@ -278,7 +256,8 @@ mod tests {
         UserSearchRequest,
     };
     use jira_domain::{
-        IssueId, IssueKey, IssueType, JiraSiteId, Priority, Project, Status, UpdateReadState, User,
+        IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery, Priority, Project, Status,
+        UpdateReadState, User,
     };
     use time::macros::datetime;
 
@@ -432,6 +411,10 @@ mod tests {
         assert_eq!(reconciliation.outcome.mode, SyncMode::Reconciliation);
         assert_eq!(reconciliation.outcome.events_inserted, 1);
         assert_eq!(reconciliation.cached.events.len(), 1);
+        assert_eq!(
+            reconciliation.cached.events[0].notification_delivery,
+            NotificationDelivery::SuppressedByPolicy
+        );
     }
 
     #[test]

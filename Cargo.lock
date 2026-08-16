@@ -3379,6 +3379,7 @@ dependencies = [
  "gpui-component",
  "gpui_platform",
  "jira-application",
+ "jira-desktop-notifications",
  "jira-domain",
  "jira-http",
  "jira-storage",

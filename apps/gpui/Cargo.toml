@@ -11,6 +11,7 @@ anyhow.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 jira-application = { path = "../../crates/application" }
+jira-desktop-notifications = { path = "../../crates/desktop-notifications" }
 jira-domain = { path = "../../crates/domain" }
 jira-http = { path = "../../crates/jira-http" }
 jira-storage = { path = "../../crates/storage" }
