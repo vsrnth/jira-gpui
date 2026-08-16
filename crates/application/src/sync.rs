@@ -177,6 +177,7 @@ impl SyncService {
                 existing,
                 incoming: issues.clone(),
                 site_id: request.site_id.clone(),
+                user_set_id: request.user_set_id.clone(),
                 detected_at: cursor,
                 include_removed_from_view: request.mode.replaces_membership(),
             })?

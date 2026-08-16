@@ -82,6 +82,7 @@ pub struct ChangeSet {
     pub existing: Vec<Issue>,
     pub incoming: Vec<Issue>,
     pub site_id: JiraSiteId,
+    pub user_set_id: UserSetId,
     pub detected_at: Timestamp,
     pub include_removed_from_view: bool,
 }
