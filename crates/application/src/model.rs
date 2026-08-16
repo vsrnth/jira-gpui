@@ -1,4 +1,7 @@
-use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp, UpdateEvent, UpdateKind, UserSetId};
+use jira_domain::{
+    AccountId, Issue, IssueComment, IssueId, JiraSiteId, Timestamp, UpdateEvent, UpdateKind,
+    UserSetId,
+};
 
 #[derive(Clone, Debug)]
 pub struct UserSearchRequest {
@@ -16,6 +19,35 @@ pub struct IssueFetchRequest {
     pub page_cursor: Option<PageCursor>,
     pub page_size: usize,
 }
+
+/// Typed request for the core issue-detail payload.
+#[derive(Clone, Debug)]
+pub struct IssueDetailRequest {
+    pub site_id: JiraSiteId,
+    pub issue_id: IssueId,
+}
+
+/// Typed request for one page of issue comments.
+#[derive(Clone, Debug)]
+pub struct IssueCommentsPageRequest {
+    pub site_id: JiraSiteId,
+    pub issue_id: IssueId,
+    pub start_at: usize,
+    pub page_cursor: Option<PageCursor>,
+    pub page_size: usize,
+}
+
+/// A transport-neutral page of comments with explicit cursor/startAt progression.
+#[derive(Clone, Debug)]
+pub struct IssueCommentsPage {
+    pub comments: Vec<IssueComment>,
+    pub start_at: usize,
+    pub next_start_at: Option<usize>,
+    pub next_cursor: Option<PageCursor>,
+    pub total: Option<usize>,
+}
+
+pub type IssueCommentPage = IssueCommentsPage;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageCursor(pub String);

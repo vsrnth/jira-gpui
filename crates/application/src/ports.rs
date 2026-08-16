@@ -7,14 +7,41 @@ use jira_domain::{
 
 use crate::{
     ApplicationError, ApplicationEvent, CancellationToken, ChangeSet, CommitOutcome,
-    IssueFetchRequest, IssueListQuery, IssuePage, NotificationRequest, SyncCommit, SyncState,
-    UpdateFeedQuery, UserSearchRequest, UserSetDraft,
+    IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
+    IssueListQuery, IssuePage, NotificationRequest, SyncCommit, SyncState, UpdateFeedQuery,
+    UserSearchRequest, UserSetDraft,
 };
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationError>> + Send + 'a>>;
 
 /// Read-only Jira gateway. Its implementation may own any async runtime it needs.
 pub trait JiraReadPort: Send + Sync {
+    /// Fetches the typed core payload for one issue. Adapters may override this when issue-detail
+    /// support is available; the default preserves compatibility with existing gateways.
+    fn fetch_issue_detail<'a>(
+        &'a self,
+        _request: &'a IssueDetailRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, jira_domain::IssueDetailCore> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "issue detail is not supported by this Jira gateway",
+        ))))
+    }
+
+    /// Fetches one comments page. Adapters may override this when issue-detail support is
+    /// available; the default preserves compatibility with existing gateways.
+    fn fetch_issue_comments_page<'a>(
+        &'a self,
+        _request: &'a IssueCommentsPageRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, IssueCommentsPage> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "issue comments are not supported by this Jira gateway",
+        ))))
+    }
+
     fn fetch_current_user<'a>(
         &'a self,
         site_id: &'a JiraSiteId,

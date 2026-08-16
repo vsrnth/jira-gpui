@@ -7,6 +7,7 @@
 mod cancellation;
 mod error;
 mod feed;
+mod issue_detail;
 mod issue_diff;
 mod issue_pull;
 mod issues;
@@ -20,6 +21,7 @@ mod user_sets;
 pub use cancellation::CancellationToken;
 pub use error::{ApplicationError, ErrorKind};
 pub use feed::UpdateFeedService;
+pub use issue_detail::{IssueDetailConfig, IssueDetailService};
 pub use issue_diff::DefaultIssueDiffer;
 pub use issue_pull::{IssuePullConfig, IssuePullOutcome, IssuePullRequest, IssuePullService};
 pub use issues::IssueCatalogService;

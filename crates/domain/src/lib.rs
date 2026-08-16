@@ -4,6 +4,7 @@
 //! map their transport and persistence representations at the application edge.
 
 mod issue;
+mod issue_detail;
 mod update_event;
 mod user;
 mod user_set;
@@ -12,6 +13,7 @@ mod value;
 pub use issue::{
     Issue, IssueField, IssueLifecycle, IssueType, ParentIssue, Priority, Project, Status,
 };
+pub use issue_detail::{AttachmentMetadata, IssueComment, IssueDetail, IssueDetailCore};
 pub use update_event::{
     ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,
 };
