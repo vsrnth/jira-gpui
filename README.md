@@ -36,9 +36,15 @@ cargo test --workspace
 cargo run -p jira-gpui
 ```
 
-The desktop opens a deterministic preview when Jira is not configured. For an
-internal development build, setting all five variables below enables a
-read-only live workspace for the configured assignee account IDs. Live startup
+The desktop opens a native Jira setup form when no configuration is available.
+Enter the Jira Cloud site URL, Atlassian account email, an API token created
+without scopes, and comma-separated assignee account IDs. The site hostname and
+site identity are derived from the URL. The token is masked, used only for the
+current session, removed from the input after a successful connection, held
+only by the in-memory HTTP client, and never stored locally or logged. For an
+internal development build, setting all five variables below remains available
+as an environment bootstrap and enables a read-only live workspace for the
+configured assignee account IDs. Live startup
 opens the local SQLite cache, reuses a saved user set whose canonical member
 list matches the configured accounts, and loads cached issues and in-app update
 events before contacting Jira. The first successful refresh establishes a
@@ -76,23 +82,26 @@ The prototype reads these environment variables as an all-or-none set:
 - `JIRA_ASSIGNEE_ACCOUNT_IDS`: comma-separated stable Atlassian account IDs.
 
 This API-token flow is intended only for internal development and local
-testing; never commit or log these values. The application does not erase or
-modify the process environment, so the environment remains the caller's
-responsibility. Production/public distribution requires an interactive
-Atlassian 3LO/OAuth flow with scoped, revocable credentials and a
-platform-appropriate secret store. That is an independent release milestone,
-separate from the planned macOS Phase 2 work.
+testing; never commit or log these values. The current direct-site transport
+does not support scoped API tokens; those use
+`https://api.atlassian.com/ex/jira/{cloudId}` instead. The application does not
+erase or modify the process environment, so the environment remains the
+caller's responsibility. Production/public distribution still requires an
+interactive Atlassian 3LO/OAuth flow with scoped, revocable credentials and a
+platform-appropriate secret store; collected API tokens are not suitable for
+public distribution. That is an independent release milestone, separate from
+the planned macOS Phase 2 work.
 
 The Linux release build will enable GPUI's Wayland backend only. X11 is not a
 supported runtime target. Production OAuth and the Linux runtime matrix remain
 outstanding; macOS is Phase 2.
 
-Validation includes 88 Linux-target workspace tests in an x86_64 Ubuntu 22.04
-container with Rust 1.95.0 (89 on the macOS host due to the non-Linux adapter
+Validation includes 92 Linux-target workspace tests in an x86_64 Ubuntu 22.04
+container with Rust 1.95.0 (93 on the macOS host due to the non-Linux adapter
 fallback test), rustfmt, warning-denied production Clippy, metadata checks, and
 the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
 pinned tools/runtime; its checksum, extracted contents, required files, and
-`ldd` library/X11 checks passed. A CI workflow automates build, extraction, and
-link checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon
-delivery, GitHub-hosted execution, public release, and multi-distribution
-runtime coverage remain unvalidated.
+`ldd` library/X11 checks passed. The GitHub-hosted workflow, AppImage
+build/extraction inspection, and artifact upload are validated by CI. Wayland
+GUI launch, FUSE execution, real Jira and notification-daemon delivery, public
+release, and multi-distribution runtime coverage remain unvalidated.
