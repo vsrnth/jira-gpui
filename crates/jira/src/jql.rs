@@ -1,5 +1,13 @@
 use std::fmt;
 
+use jira_domain::IssueId;
+
+/// Jira's enhanced search endpoint accepts a bounded collection of issue IDs.
+///
+/// The limit is deliberately conservative: it keeps generated JQL bodies small and gives the
+/// caller a clear failure mode instead of relying on an endpoint-specific request-size limit.
+pub const MAX_ISSUE_IDS: usize = 1_000;
+
 /// A Jira Cloud account identifier safe to interpolate in a quoted JQL literal.
 ///
 /// Atlassian currently uses opaque account IDs. We intentionally accept their common
@@ -76,6 +84,66 @@ pub fn assigned_issues_for_account_ids(
         .and_then(assigned_issues_jql)
 }
 
+/// Builds a read-only enhanced-search request for a known set of Jira issue IDs.
+///
+/// Issue IDs are quoted JQL literals and are validated at this adapter boundary because domain
+/// IDs may come from persisted data or a JSON payload that bypassed a constructor. IDs are sorted
+/// and deduplicated so equivalent calls produce identical request bodies. No cursor is included:
+/// this helper is intended for bounded refreshes of already-known issues.
+pub fn enhanced_search_request_for_issue_ids(
+    issue_ids: &[IssueId],
+) -> Result<crate::EnhancedSearchRequest, JqlError> {
+    if issue_ids.is_empty() {
+        return Err(JqlError::NoIssueIds);
+    }
+    if issue_ids.len() > MAX_ISSUE_IDS {
+        return Err(JqlError::TooManyIssueIds {
+            maximum: MAX_ISSUE_IDS,
+            received: issue_ids.len(),
+        });
+    }
+
+    let mut issue_ids = issue_ids
+        .iter()
+        .map(|issue_id| {
+            let value = issue_id.as_str();
+            if value.trim().is_empty() {
+                return Err(JqlError::EmptyIssueId);
+            }
+            if value.len() > 255 {
+                return Err(JqlError::IssueIdTooLong);
+            }
+            if value
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+            {
+                return Err(JqlError::UnsafeIssueId);
+            }
+            Ok(value.to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    issue_ids.sort();
+    issue_ids.dedup();
+
+    let literals = issue_ids
+        .into_iter()
+        .map(|issue_id| format!("\"{issue_id}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Ok(crate::EnhancedSearchRequest {
+        jql: format!("id IN ({literals}) ORDER BY updated DESC"),
+        next_page_token: None,
+        max_results: Some(100),
+        fields: crate::ASSIGNED_ISSUE_FIELDS
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        expand: Vec::new(),
+    })
+}
+
 /// Converts the application-layer fetch command into Jira's enhanced-search request body.
 ///
 /// This is intentionally pure: it adds no HTTP client or credentials dependency. The cursor is
@@ -128,6 +196,16 @@ pub enum JqlError {
     UnsafeAccountId,
     #[error("Jira page size must be between 1 and 1000, received {0}")]
     InvalidPageSize(usize),
+    #[error("at least one Jira issue ID is required")]
+    NoIssueIds,
+    #[error("a Jira issue ID cannot be empty")]
+    EmptyIssueId,
+    #[error("a Jira issue ID is longer than 255 bytes")]
+    IssueIdTooLong,
+    #[error("a Jira issue ID contains unsafe JQL characters")]
+    UnsafeIssueId,
+    #[error("at most {maximum} Jira issue IDs may be requested, received {received}")]
+    TooManyIssueIds { maximum: usize, received: usize },
 }
 
 #[cfg(test)]
@@ -190,5 +268,75 @@ mod tests {
             enhanced.jql,
             "assignee IN (\"557058:abc-123\") AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
         );
+    }
+
+    #[test]
+    fn builds_a_deterministic_deduplicated_issue_id_request() {
+        let first = IssueId::new("1002").unwrap();
+        let second = IssueId::new("1001").unwrap();
+        let request =
+            enhanced_search_request_for_issue_ids(&[first.clone(), second.clone(), first]).unwrap();
+
+        assert_eq!(
+            request.jql,
+            "id IN (\"1001\", \"1002\") ORDER BY updated DESC"
+        );
+        assert_eq!(request.max_results, Some(100));
+        assert_eq!(
+            request.fields,
+            crate::ASSIGNED_ISSUE_FIELDS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rejects_empty_oversized_and_unsafe_issue_id_inputs() {
+        assert_eq!(
+            enhanced_search_request_for_issue_ids(&[]).unwrap_err(),
+            JqlError::NoIssueIds
+        );
+
+        let empty: IssueId = serde_json::from_str("\"\"").unwrap();
+        assert_eq!(
+            enhanced_search_request_for_issue_ids(&[empty]).unwrap_err(),
+            JqlError::EmptyIssueId
+        );
+
+        let oversized: IssueId = serde_json::from_str(&format!("\"{}\"", "x".repeat(256))).unwrap();
+        assert_eq!(
+            enhanced_search_request_for_issue_ids(&[oversized]).unwrap_err(),
+            JqlError::IssueIdTooLong
+        );
+
+        let unsafe_id = IssueId::new("100\" OR project = SECRET").unwrap();
+        assert_eq!(
+            enhanced_search_request_for_issue_ids(&[unsafe_id]).unwrap_err(),
+            JqlError::UnsafeIssueId
+        );
+
+        let ids = (0..=MAX_ISSUE_IDS)
+            .map(|index| IssueId::new(index.to_string()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            enhanced_search_request_for_issue_ids(&ids).unwrap_err(),
+            JqlError::TooManyIssueIds {
+                maximum: MAX_ISSUE_IDS,
+                received: MAX_ISSUE_IDS + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn serializes_the_issue_id_request_using_jira_field_names() {
+        let request =
+            enhanced_search_request_for_issue_ids(&[IssueId::new("1001").unwrap()]).unwrap();
+        let value = serde_json::to_value(request).unwrap();
+
+        assert_eq!(value["jql"], "id IN (\"1001\") ORDER BY updated DESC");
+        assert_eq!(value["maxResults"], 100);
+        assert_eq!(value["fields"][0], "summary");
+        assert!(value.get("nextPageToken").is_none());
     }
 }

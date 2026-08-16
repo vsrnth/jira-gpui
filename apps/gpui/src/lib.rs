@@ -5,8 +5,10 @@
 //! of a platform renderer, which is useful while Linux is the only release
 //! target and macOS remains a later phase.
 
+mod config;
 mod dashboard;
 mod presentation;
 mod sample_data;
 
+pub use config::{StartupSelection, startup_from_environment};
 pub use dashboard::Dashboard;

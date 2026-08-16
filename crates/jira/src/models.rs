@@ -142,3 +142,34 @@ pub struct JiraUser {
     #[serde(default)]
     pub avatar_urls: BTreeMap<String, String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::JiraUser;
+
+    #[test]
+    fn deserializes_the_documented_top_level_jira_user_array() {
+        let users: Vec<JiraUser> = serde_json::from_str(
+            r#"[
+                {
+                    "accountId": "557058:abc-123",
+                    "displayName": "Ada Lovelace",
+                    "active": true,
+                    "avatarUrls": {
+                        "48x48": "https://example.test/avatar.png"
+                    }
+                }
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].account_id, "557058:abc-123");
+        assert_eq!(users[0].display_name, "Ada Lovelace");
+        assert!(users[0].active);
+        assert_eq!(
+            users[0].avatar_urls.get("48x48").map(String::as_str),
+            Some("https://example.test/avatar.png")
+        );
+    }
+}

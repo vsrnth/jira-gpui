@@ -7,6 +7,7 @@
 mod cancellation;
 mod error;
 mod feed;
+mod issue_pull;
 mod issues;
 mod model;
 mod ports;
@@ -16,6 +17,7 @@ mod user_sets;
 pub use cancellation::CancellationToken;
 pub use error::{ApplicationError, ErrorKind};
 pub use feed::UpdateFeedService;
+pub use issue_pull::{IssuePullConfig, IssuePullOutcome, IssuePullRequest, IssuePullService};
 pub use issues::IssueCatalogService;
 pub use model::*;
 pub use ports::*;

@@ -9,8 +9,8 @@ mod mapping;
 mod models;
 
 pub use jql::{
-    AccountId as JqlAccountId, JqlError, assigned_issues_for_account_ids, assigned_issues_jql,
-    enhanced_search_request,
+    AccountId as JqlAccountId, JqlError, MAX_ISSUE_IDS, assigned_issues_for_account_ids,
+    assigned_issues_jql, enhanced_search_request, enhanced_search_request_for_issue_ids,
 };
 pub use mapping::{
     DomainIssuePage, IssueMapper, MappingError, RemoteIssue, RemoteIssuePage, RemoteNamedEntity,

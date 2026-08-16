@@ -42,15 +42,24 @@ These assumptions allow implementation to begin without expanding the first rele
 
 ### Implementation checkpoint — 2026-08-16
 
-Completed in the first foundation slice:
+The foundation slice is in place:
 
 - Pinned Rust 1.95, GPUI, and `gpui-component` as a compatible dependency set.
-- Created separate domain, application, Jira adapter, storage adapter, and GPUI presentation crates.
+- Created separate domain, application, Jira mapping, storage, and GPUI presentation crates.
 - Implemented normalized issue/user/update models, safe assignee JQL, enhanced-search response mapping, sync ports and orchestration, cancellation, local feed behavior, and an in-memory repository adapter.
 - Implemented a GPUI dashboard preview with issue selection, a detail pane, saved-user-set context, an unread update inbox, local mark-read behavior, and a pull-updates action.
-- Verified one GPUI dependency graph, workspace compilation, Clippy, and 17 tests.
 
-The next vertical slice is live read-only Atlassian authentication and HTTP transport. SQLite persistence, Linux desktop notifications, and AppImage packaging follow it.
+The new live read-only vertical slice is now represented in the worktree:
+
+- `crates/jira` remains a pure Jira JSON/JQL and domain-mapping crate. It has a bounded, deterministic issue-ID query helper for bulk issue lookup and no HTTP client or UI dependency.
+- `crates/jira-http` is the transport adapter. It owns `reqwest`, a dedicated Tokio runtime, read-only enhanced-search/user requests, pagination, cancellation checks, bounded responses, status/error mapping, and redacted API-token credentials.
+- The transport accepts only HTTPS Jira Cloud sites under the validated `*.atlassian.net` boundary and binds each request to its configured site ID.
+- The GPUI shell has an explicitly internal environment/API-token bootstrap (`JIRA_BASE_URL`, `JIRA_SITE_ID`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, and `JIRA_ASSIGNEE_ACCOUNT_IDS`). It falls back to preview mode when no configuration is present and exposes a manual live issue pull when configured.
+- `IssuePullService` keeps pagination, safety limits, cancellation, cursor-cycle detection, and cross-page issue de-duplication in the application layer, so the UI and transport remain replaceable.
+
+Validation of this live slice is complete on the development host: 38 workspace tests passed, formatting passed, and production/library-plus-binary Clippy passed with warnings denied. Linux Wayland runtime and AppImage validation were not performed on this macOS host; all-test-target Clippy still exposes pre-existing foundation test `unwrap` lint debt.
+
+Next milestones are SQLite cache and snapshot diff/update-inbox persistence, Linux Wayland desktop notifications, production OAuth 2.0 3LO, and finally AppImage packaging. Wayland-only Linux remains the Phase 1 runtime target; macOS remains Phase 2, and all Jira operations remain read-only.
 
 ## 4. Phase 1 user outcomes
 
@@ -231,7 +240,8 @@ jira_gpui/
 ├── crates/
 │   ├── domain/                  # entities, value objects, invariants
 │   ├── application/             # use cases and adapter ports
-│   ├── jira/                    # Jira REST/JQL transport adapter
+│   ├── jira/                    # pure Jira JSON/JQL models, validation, and mapping
+│   ├── jira-http/               # read-only reqwest/Tokio Jira Cloud transport
 │   └── storage/                 # memory today; SQLite implementation next
 ├── assets/
 │   ├── icons/
@@ -265,15 +275,14 @@ Dependency direction is one-way: presentations and adapters depend on `applicati
 
 ### 9.2 HTTP and asynchronous execution
 
-GPUI has its own executor, while common Rust HTTP clients may assume a Tokio runtime. Resolve this in the technical spike before building the Jira client.
+GPUI has its own executor, while `reqwest` uses Tokio for asynchronous I/O. The current implementation resolves this boundary in `crates/jira-http`: it owns one dedicated Tokio runtime and exposes the executor-independent `JiraReadPort` from `crates/application`. GPUI submits work through the application service and applies results back on its foreground context.
 
-Preferred options, in order:
+- Use `reqwest` with JSON and Rustls TLS features in the transport crate.
+- Construct endpoints with `url::Url`; require HTTPS and validate the Jira Cloud host before sending requests.
+- Keep request timeouts, response-size limits, cancellation checks, and status classification in the transport boundary.
+- Keep Jira JSON/JQL construction and mapping in the pure `crates/jira` crate.
 
-1. Use a GPUI-compatible asynchronous HTTP client if it supports TLS, proxies, cancellation, and the required Jira APIs cleanly.
-2. Otherwise, run `reqwest` on one dedicated Tokio runtime owned by the sync subsystem.
-3. Communicate between GPUI and the sync runtime through bounded command and event channels.
-
-Do not mix runtimes implicitly or call a blocking HTTP client from the UI thread.
+Do not mix runtimes implicitly or call a blocking HTTP client from the UI thread. A future Tauri presentation can consume the same application port without taking a dependency on GPUI or Tokio details.
 
 ### 9.3 Storage
 

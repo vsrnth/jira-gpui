@@ -35,6 +35,7 @@ impl IssueViewModel {
                         .find(|user| &user.account_id == account_id)
                         .map(|user| user.display_name.clone())
                 })
+                .or_else(|| account_id.map(ToString::to_string))
                 .unwrap_or_else(|| "Unassigned".to_owned())
         };
 
@@ -193,5 +194,16 @@ mod tests {
         assert_eq!(view.key, "DESK-184");
         assert_eq!(view.assignee, "Amina Yusuf");
         assert_eq!(view.project, "Developer Experience");
+    }
+
+    #[test]
+    fn preserves_unknown_account_ids_instead_of_calling_them_unassigned() {
+        let mut issues = sample_issues();
+        issues[0].assignee = Some(
+            jira_domain::AccountId::new("unknown-account").expect("test account ID must be valid"),
+        );
+        let view = IssueViewModel::from_domain(&issues[0], &[]);
+
+        assert_eq!(view.assignee, "unknown-account");
     }
 }

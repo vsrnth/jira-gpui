@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
@@ -6,11 +8,36 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, StyledExt as _, button::Button, button::ButtonVariants as _, h_flex, v_flex,
 };
+use jira_application::{ApplicationError, CancellationToken, IssuePullRequest, IssuePullService};
+use jira_domain::{AccountId, Issue, JiraSiteId, User};
 
 use crate::{
+    config::{LiveSession, StartupError},
     presentation::{IssueViewModel, UpdateViewModel},
     sample_data::{sample_issues, sample_updates, sample_users},
 };
+
+fn safe_pull_error(error: &ApplicationError) -> &'static str {
+    match error.kind() {
+        jira_application::ErrorKind::Authentication => {
+            "Issue pull failed · Jira authentication was rejected"
+        }
+        jira_application::ErrorKind::Authorization => {
+            "Issue pull failed · Jira authorization was denied"
+        }
+        jira_application::ErrorKind::RateLimited => "Issue pull paused · Jira rate limit reached",
+        jira_application::ErrorKind::Offline => "Issue pull failed · Jira is unreachable",
+        jira_application::ErrorKind::Cancelled => "Issue pull cancelled",
+        jira_application::ErrorKind::InvalidInput => "Issue pull failed · invalid request",
+        jira_application::ErrorKind::NotFound => "Issue pull failed · Jira site was not found",
+        jira_application::ErrorKind::Upstream => "Issue pull failed · Jira returned an error",
+        jira_application::ErrorKind::Storage
+        | jira_application::ErrorKind::Notification
+        | jira_application::ErrorKind::Internal => {
+            "Issue pull failed · unexpected application error"
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
@@ -24,6 +51,15 @@ pub struct Dashboard {
     updates: Vec<UpdateViewModel>,
     selected_issue: usize,
     sync_message: String,
+    pull_service: Option<Arc<IssuePullService>>,
+    site_id: Option<JiraSiteId>,
+    assignees: Vec<AccountId>,
+    users: Vec<User>,
+    workspace_name: String,
+    workspace_members: String,
+    site_label: String,
+    mode_label: String,
+    pull_in_progress: bool,
 }
 
 impl Dashboard {
@@ -50,7 +86,117 @@ impl Dashboard {
             updates,
             selected_issue: 0,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
+            pull_service: None,
+            site_id: None,
+            assignees: Vec::new(),
+            users,
+            workspace_name: "Platform team".to_owned(),
+            workspace_members: "Amina, Devon, Marco".to_owned(),
+            site_label: "sample.atlassian.net".to_owned(),
+            mode_label: "Local preview mode".to_owned(),
+            pull_in_progress: false,
         }
+    }
+
+    pub fn from_live(session: LiveSession) -> Self {
+        let workspace_members = session
+            .assignees
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self {
+            section: Section::Issues,
+            issues: Vec::new(),
+            updates: Vec::new(),
+            selected_issue: 0,
+            sync_message: "Ready · no issue pull has run".to_owned(),
+            pull_service: Some(session.pull_service()),
+            site_id: Some(session.site_id),
+            assignees: session.assignees,
+            users: Vec::new(),
+            workspace_name: "Configured user set".to_owned(),
+            workspace_members,
+            site_label: session.site_label,
+            mode_label: "Live read-only issue pull".to_owned(),
+            pull_in_progress: false,
+        }
+    }
+
+    pub fn from_configuration_error(error: StartupError) -> Self {
+        let mut dashboard = Self::from_sample_data();
+        dashboard.issues.clear();
+        dashboard.updates.clear();
+        dashboard.selected_issue = 0;
+        dashboard.users.clear();
+        dashboard.workspace_name = "Configuration required".to_owned();
+        dashboard.workspace_members = "Set all five Jira environment variables".to_owned();
+        dashboard.site_label = "Jira site unavailable".to_owned();
+        dashboard.mode_label = "Startup configuration error".to_owned();
+        dashboard.sync_message = format!("Configuration error · {error}");
+        dashboard
+    }
+
+    fn apply_live_issues(&mut self, issues: Vec<Issue>) {
+        self.issues = issues
+            .iter()
+            .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+            .collect();
+        self.selected_issue = self.selected_issue.min(self.issues.len().saturating_sub(1));
+    }
+
+    fn begin_pull(&mut self, cx: &mut Context<Self>) {
+        if self.pull_in_progress {
+            return;
+        }
+        let Some(service) = self.pull_service.clone() else {
+            self.sync_message = "Issue pull unavailable · configure Jira credentials".to_owned();
+            cx.notify();
+            return;
+        };
+        let Some(site_id) = self.site_id.clone() else {
+            self.sync_message = "Issue pull unavailable · configure a Jira site".to_owned();
+            cx.notify();
+            return;
+        };
+        if self.assignees.is_empty() {
+            self.sync_message =
+                "Issue pull unavailable · configure assignee account IDs".to_owned();
+            cx.notify();
+            return;
+        }
+
+        let request = IssuePullRequest {
+            site_id,
+            assignees: self.assignees.clone(),
+            updated_since: None,
+        };
+        let cancellation = CancellationToken::new();
+        self.pull_in_progress = true;
+        self.sync_message = "Pulling issues from Jira…".to_owned();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = service.pull(request, &cancellation).await;
+            let _ = this.update(cx, |this, cx| {
+                this.pull_in_progress = false;
+                match result {
+                    Ok(outcome) => {
+                        let issue_count = outcome.issues.len();
+                        this.apply_live_issues(outcome.issues);
+                        this.sync_message = format!(
+                            "Issue pull complete · {issue_count} issues · {} pages",
+                            outcome.pages_fetched
+                        );
+                    }
+                    Err(error) => {
+                        this.sync_message = safe_pull_error(&error).to_owned();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn unread_count(&self) -> usize {
@@ -135,7 +281,7 @@ impl Dashboard {
                             .text_xs()
                             .font_semibold()
                             .text_color(cx.theme().muted_foreground)
-                            .child("SAVED USER SET"),
+                            .child("USER SET"),
                     )
                     .child(
                         v_flex()
@@ -146,12 +292,17 @@ impl Dashboard {
                             .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().sidebar_border)
-                            .child(div().text_sm().font_semibold().child("Platform team"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child(self.workspace_name.clone()),
+                            )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Amina, Devon, Marco"),
+                                    .child(self.workspace_members.clone()),
                             ),
                     ),
             )
@@ -165,13 +316,13 @@ impl Dashboard {
                         div()
                             .text_sm()
                             .font_semibold()
-                            .child("sample.atlassian.net"),
+                            .child(self.site_label.clone()),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Local preview mode"),
+                            .child(self.mode_label.clone()),
                     ),
             )
     }
@@ -229,7 +380,7 @@ impl Dashboard {
                 v_flex()
                     .gap_0p5()
                     .child(div().text_lg().font_semibold().child(match self.section {
-                        Section::Issues => "Issues for Platform team",
+                        Section::Issues => "Issues for selected users",
                         Section::Updates => "Update inbox",
                     }))
                     .child(
@@ -240,15 +391,14 @@ impl Dashboard {
                     ),
             )
             .child(
-                Button::new("pull-updates")
+                Button::new("pull-issues")
                     .primary()
-                    .label("Pull updates")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sync_message =
-                            "Sync requested · live Jira transport is the next adapter step"
-                                .to_owned();
-                        cx.notify();
-                    })),
+                    .label(if self.pull_in_progress {
+                        "Pulling issues…"
+                    } else {
+                        "Pull issues"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_pull(cx))),
             )
     }
 
@@ -359,7 +509,51 @@ impl Dashboard {
     }
 
     fn issue_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let issue = &self.issues[self.selected_issue];
+        let issue = self.issues.get(self.selected_issue);
+        let project = issue
+            .map(|issue| issue.project.clone())
+            .unwrap_or_else(|| "Jira".to_owned());
+        let key = issue
+            .map(|issue| issue.key.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let summary = issue
+            .map(|issue| issue.summary.clone())
+            .unwrap_or_else(|| "No issues loaded".to_owned());
+        let issue_type = issue
+            .map(|issue| issue.issue_type.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let status = issue
+            .map(|issue| issue.status.clone())
+            .unwrap_or_else(|| "Ready to pull".to_owned());
+        let priority = issue
+            .map(|issue| issue.priority.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let description = issue.map_or_else(
+            || "Pull issues from Jira to populate this view.".to_owned(),
+            |issue| issue.description.clone(),
+        );
+        let assignee = issue
+            .map(|issue| issue.assignee.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let reporter = issue
+            .map(|issue| issue.reporter.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let status_category = issue
+            .map(|issue| issue.status_category.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let parent = issue
+            .and_then(|issue| issue.parent.clone())
+            .unwrap_or_else(|| "None".to_owned());
+        let created = issue
+            .map(|issue| issue.created.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let updated = issue
+            .map(|issue| issue.updated.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let due_date = issue
+            .map(|issue| issue.due_date.clone())
+            .unwrap_or_else(|| "—".to_owned());
+        let labels = issue.map(|issue| issue.labels.clone()).unwrap_or_default();
         v_flex()
             .id("issue-detail")
             .h_full()
@@ -376,22 +570,17 @@ impl Dashboard {
                             .gap_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(issue.project.clone())
+                            .child(project)
                             .child("/")
-                            .child(issue.key.clone()),
+                            .child(key),
                     )
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_semibold()
-                            .child(issue.summary.clone()),
-                    )
+                    .child(div().text_2xl().font_semibold().child(summary))
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(self.pill(issue.issue_type.clone(), cx))
-                            .child(self.pill(issue.status.clone(), cx))
-                            .child(self.pill(issue.priority.clone(), cx)),
+                            .child(self.pill(issue_type, cx))
+                            .child(self.pill(status, cx))
+                            .child(self.pill(priority, cx)),
                     ),
             )
             .child(
@@ -406,38 +595,30 @@ impl Dashboard {
                             .border_color(cx.theme().border)
                             .text_sm()
                             .text_color(cx.theme().foreground)
-                            .child(issue.description.clone()),
+                            .child(description),
                     ),
             )
             .child(
                 v_flex()
                     .gap_3()
                     .child(div().text_sm().font_semibold().child("Details"))
-                    .child(self.detail_field("Assignee", issue.assignee.clone(), cx))
-                    .child(self.detail_field("Reporter", issue.reporter.clone(), cx))
-                    .child(self.detail_field("Status category", issue.status_category.clone(), cx))
-                    .child(self.detail_field(
-                        "Parent",
-                        issue.parent.clone().unwrap_or_else(|| "None".to_owned()),
-                        cx,
-                    ))
-                    .child(self.detail_field("Created", issue.created.clone(), cx))
-                    .child(self.detail_field("Updated", issue.updated.clone(), cx))
-                    .child(self.detail_field("Due date", issue.due_date.clone(), cx)),
+                    .child(self.detail_field("Assignee", assignee, cx))
+                    .child(self.detail_field("Reporter", reporter, cx))
+                    .child(self.detail_field("Status category", status_category, cx))
+                    .child(self.detail_field("Parent", parent, cx))
+                    .child(self.detail_field("Created", created, cx))
+                    .child(self.detail_field("Updated", updated, cx))
+                    .child(self.detail_field("Due date", due_date, cx)),
             )
-            .when(!issue.labels.is_empty(), |this| {
+            .when(!labels.is_empty(), |this| {
                 this.child(
                     v_flex()
                         .gap_2()
                         .child(div().text_sm().font_semibold().child("Labels"))
                         .child(
-                            h_flex().gap_2().children(
-                                issue
-                                    .labels
-                                    .iter()
-                                    .cloned()
-                                    .map(|label| self.pill(label, cx)),
-                            ),
+                            h_flex()
+                                .gap_2()
+                                .children(labels.iter().cloned().map(|label| self.pill(label, cx))),
                         ),
                 )
             })

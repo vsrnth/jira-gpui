@@ -1,0 +1,22 @@
+[package]
+name = "jira-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Read-only Jira Cloud HTTP adapter with an owned Tokio runtime"
+
+[dependencies]
+jira-adapter = { path = "../jira" }
+jira-application = { path = "../application" }
+jira-domain = { path = "../domain" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

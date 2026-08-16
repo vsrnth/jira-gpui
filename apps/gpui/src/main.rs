@@ -2,7 +2,9 @@
 fn main() {
     use gpui::{App, AppContext as _, WindowBounds, WindowOptions, px, size};
     use gpui_component::{ActiveTheme as _, Root};
-    use jira_gpui::Dashboard;
+    use jira_gpui::{Dashboard, StartupSelection, startup_from_environment};
+
+    let startup = startup_from_environment();
 
     gpui_platform::application().run(|cx: &mut App| {
         gpui_component::init(cx);
@@ -17,7 +19,13 @@ fn main() {
                 window.activate_window();
                 window.set_window_title("Jira Desk");
 
-                let dashboard = cx.new(|_| Dashboard::from_sample_data());
+                let dashboard = cx.new(|_| match startup {
+                    StartupSelection::Preview => Dashboard::from_sample_data(),
+                    StartupSelection::Live(session) => Dashboard::from_live(session),
+                    StartupSelection::ConfigurationError(error) => {
+                        Dashboard::from_configuration_error(error)
+                    }
+                });
                 cx.new(|cx| Root::new(dashboard, window, cx).bg(cx.theme().background))
             })
             .expect("failed to open the Jira dashboard window");
