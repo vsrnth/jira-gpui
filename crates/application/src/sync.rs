@@ -266,12 +266,9 @@ impl SyncService {
     }
 
     fn validate(&self, request: &SyncRequest) -> Result<(), ApplicationError> {
-        if request.assignees.is_empty() {
-            return Err(ApplicationError::invalid_input(
-                "sync requires at least one assignee",
-            ));
-        }
-        if request.assignees.iter().collect::<HashSet<_>>().len() != request.assignees.len() {
+        if let Some(assignees) = &request.assignees
+            && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
+        {
             return Err(ApplicationError::invalid_input(
                 "sync assignees must be unique",
             ));
@@ -589,7 +586,7 @@ mod tests {
 
     #[test]
     fn baseline_is_committed_without_diffing_or_notifications() {
-        let (site_id, user_set_id, account_id) = fixture_ids();
+        let (site_id, user_set_id, _account_id) = fixture_ids();
         let issue = fixture_issue(site_id.clone());
         let jira = Arc::new(FakeJira {
             pages: Mutex::new(VecDeque::from([IssuePage {
@@ -603,7 +600,7 @@ mod tests {
         let differ = Arc::new(FakeDiffer::default());
         let notifications = Arc::new(FakeNotifications::default());
         let service = service(
-            jira,
+            jira.clone(),
             cache.clone(),
             differ.clone(),
             notifications.clone(),
@@ -614,7 +611,7 @@ mod tests {
             SyncRequest {
                 site_id,
                 user_set_id,
-                assignees: vec![account_id],
+                assignees: None,
                 mode: SyncMode::Baseline,
             },
             &CancellationToken::new(),
@@ -638,6 +635,10 @@ mod tests {
         assert_eq!(
             commits[0].state.last_full_sync_at,
             Some(datetime!(2026-08-16 12:01 UTC))
+        );
+        assert_eq!(
+            jira.requests.lock().expect("requests lock")[0].assignees,
+            None
         );
     }
 
@@ -689,7 +690,7 @@ mod tests {
             SyncRequest {
                 site_id,
                 user_set_id,
-                assignees: vec![account_id],
+                assignees: Some(vec![account_id.clone()]),
                 mode: SyncMode::Incremental,
             },
             &CancellationToken::new(),
@@ -704,6 +705,7 @@ mod tests {
             requests[0].updated_since,
             Some(datetime!(2026-08-16 11:55 UTC))
         );
+        assert_eq!(requests[0].assignees, Some(vec![account_id]));
         assert_eq!(
             cache.deliveries.lock().expect("deliveries lock").as_slice(),
             &[(

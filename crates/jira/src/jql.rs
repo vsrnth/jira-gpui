@@ -8,6 +8,8 @@ use jira_domain::IssueId;
 /// caller a clear failure mode instead of relying on an endpoint-specific request-size limit.
 pub const MAX_ISSUE_IDS: usize = 1_000;
 
+const ISSUES_BASE_JQL: &str = "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()";
+
 /// A Jira Cloud account identifier safe to interpolate in a quoted JQL literal.
 ///
 /// Atlassian currently uses opaque account IDs. We intentionally accept their common
@@ -48,8 +50,10 @@ impl fmt::Display for AccountId {
 
 /// Builds the JQL used for the primary read-only view.
 ///
-/// Account IDs are emitted as quoted literals. Duplicate IDs are removed so callers can
-/// freely combine saved sets without producing unnecessarily long queries.
+/// The project and issue-status scope is owned by this Jira adapter. Account IDs are an optional
+/// remote restriction: an empty iterator means project-wide results. IDs are emitted as quoted
+/// literals and duplicate IDs are removed so callers can freely combine saved sets without
+/// producing unnecessarily long queries.
 pub fn assigned_issues_jql(
     account_ids: impl IntoIterator<Item = AccountId>,
 ) -> Result<String, JqlError> {
@@ -57,17 +61,20 @@ pub fn assigned_issues_jql(
     account_ids.sort();
     account_ids.dedup();
 
-    if account_ids.is_empty() {
-        return Err(JqlError::NoAccountIds);
-    }
+    let assignee_filter = if account_ids.is_empty() {
+        String::new()
+    } else {
+        let literals = account_ids
+            .into_iter()
+            .map(|account_id| format!("\"{}\"", account_id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND assignee IN ({literals})")
+    };
 
-    let literals = account_ids
-        .into_iter()
-        .map(|account_id| format!("\"{}\"", account_id.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    Ok(format!("assignee IN ({literals}) ORDER BY updated DESC"))
+    Ok(format!(
+        "{ISSUES_BASE_JQL}{assignee_filter} ORDER BY updated DESC"
+    ))
 }
 
 /// Builds the assigned-issues JQL directly from stable domain account IDs.
@@ -155,7 +162,7 @@ pub fn enhanced_search_request(
         return Err(JqlError::InvalidPageSize(request.page_size));
     }
 
-    let mut jql = assigned_issues_for_account_ids(request.assignees.clone())?;
+    let mut jql = assigned_issues_for_account_ids(request.assignees.clone().unwrap_or_default())?;
     if let Some(updated_since) = request.updated_since {
         // Jira Cloud accepts this explicit UTC literal for JQL date comparisons. It is generated
         // from a typed timestamp, rather than copied from any user-entered query text.
@@ -186,8 +193,6 @@ pub fn enhanced_search_request(
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum JqlError {
-    #[error("at least one Jira account ID is required")]
-    NoAccountIds,
     #[error("a Jira account ID cannot be empty")]
     EmptyAccountId,
     #[error("a Jira account ID is longer than 256 bytes")]
@@ -219,7 +224,15 @@ mod tests {
 
         assert_eq!(
             assigned_issues_jql([beta, alpha.clone(), alpha]).unwrap(),
-            "assignee IN (\"557058:aaa\", \"712020:bbb\") ORDER BY updated DESC"
+            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND assignee IN (\"557058:aaa\", \"712020:bbb\") ORDER BY updated DESC"
+        );
+    }
+
+    #[test]
+    fn allows_project_wide_query_without_remote_assignees() {
+        assert_eq!(
+            assigned_issues_jql(Vec::<AccountId>::new()).unwrap(),
+            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() ORDER BY updated DESC"
         );
     }
 
@@ -244,7 +257,7 @@ mod tests {
         let account_id = jira_domain::AccountId::new("557058:abc-123").unwrap();
         assert_eq!(
             assigned_issues_for_account_ids([account_id]).unwrap(),
-            "assignee IN (\"557058:abc-123\") ORDER BY updated DESC"
+            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND assignee IN (\"557058:abc-123\") ORDER BY updated DESC"
         );
     }
 
@@ -255,7 +268,7 @@ mod tests {
 
         let request = IssueFetchRequest {
             site_id: jira_domain::JiraSiteId::new("site").unwrap(),
-            assignees: vec![jira_domain::AccountId::new("557058:abc-123").unwrap()],
+            assignees: Some(vec![jira_domain::AccountId::new("557058:abc-123").unwrap()]),
             updated_since: Some(datetime!(2026-08-15 17:20 UTC)),
             page_cursor: Some(PageCursor("opaque-token".into())),
             page_size: 100,
@@ -266,7 +279,35 @@ mod tests {
         assert_eq!(enhanced.max_results, Some(100));
         assert_eq!(
             enhanced.jql,
-            "assignee IN (\"557058:abc-123\") AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
+            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND assignee IN (\"557058:abc-123\") AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
+        );
+    }
+
+    #[test]
+    fn incremental_project_wide_query_keeps_updated_clause_and_cursor() {
+        use jira_application::{IssueFetchRequest, PageCursor};
+        use time::macros::datetime;
+
+        let request = IssueFetchRequest {
+            site_id: jira_domain::JiraSiteId::new("site").unwrap(),
+            assignees: None,
+            updated_since: Some(datetime!(2026-08-15 17:20 UTC)),
+            page_cursor: Some(PageCursor("opaque-token".into())),
+            page_size: 100,
+        };
+
+        let enhanced = enhanced_search_request(&request).unwrap();
+        assert_eq!(enhanced.next_page_token.as_deref(), Some("opaque-token"));
+        assert_eq!(
+            enhanced.jql,
+            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
+        );
+
+        let mut explicitly_empty = request.clone();
+        explicitly_empty.assignees = Some(Vec::new());
+        assert_eq!(
+            enhanced_search_request(&explicitly_empty).unwrap().jql,
+            enhanced.jql
         );
     }
 

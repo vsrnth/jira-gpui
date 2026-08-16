@@ -10,7 +10,8 @@ pub struct UserSearchRequest {
 #[derive(Clone, Debug)]
 pub struct IssueFetchRequest {
     pub site_id: JiraSiteId,
-    pub assignees: Vec<AccountId>,
+    /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
+    pub assignees: Option<Vec<AccountId>>,
     pub updated_since: Option<Timestamp>,
     pub page_cursor: Option<PageCursor>,
     pub page_size: usize,
@@ -48,7 +49,8 @@ impl SyncMode {
 pub struct SyncRequest {
     pub site_id: JiraSiteId,
     pub user_set_id: UserSetId,
-    pub assignees: Vec<AccountId>,
+    /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
+    pub assignees: Option<Vec<AccountId>>,
     pub mode: SyncMode,
 }
 

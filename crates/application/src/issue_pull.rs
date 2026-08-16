@@ -27,11 +27,12 @@ impl Default for IssuePullConfig {
     }
 }
 
-/// A read-only issue pull for one Jira site and a set of assignees.
+/// A read-only issue pull for one Jira site with an optional remote assignee restriction.
 #[derive(Clone, Debug)]
 pub struct IssuePullRequest {
     pub site_id: JiraSiteId,
-    pub assignees: Vec<AccountId>,
+    /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
+    pub assignees: Option<Vec<AccountId>>,
     pub updated_since: Option<Timestamp>,
 }
 
@@ -132,12 +133,9 @@ impl IssuePullService {
     }
 
     fn validate(&self, request: &IssuePullRequest) -> Result<(), ApplicationError> {
-        if request.assignees.is_empty() {
-            return Err(ApplicationError::invalid_input(
-                "issue pull requires at least one assignee",
-            ));
-        }
-        if request.assignees.iter().collect::<HashSet<_>>().len() != request.assignees.len() {
+        if let Some(assignees) = &request.assignees
+            && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
+        {
             return Err(ApplicationError::invalid_input(
                 "issue pull assignees must be unique",
             ));
@@ -276,7 +274,7 @@ mod tests {
     fn request() -> IssuePullRequest {
         IssuePullRequest {
             site_id: site(),
-            assignees: vec![assignee()],
+            assignees: Some(vec![assignee()]),
             updated_since: Some(datetime!(2026-08-16 10:00 UTC)),
         }
     }
@@ -385,24 +383,31 @@ mod tests {
         assert_eq!(requests[0].page_cursor, None);
         assert_eq!(requests[1].page_cursor, Some(PageCursor("next".into())));
         assert_eq!(requests[0].updated_since, request().updated_since);
+        assert_eq!(requests[0].assignees, Some(vec![assignee()]));
     }
 
     #[test]
-    fn rejects_empty_duplicate_assignees_and_invalid_configuration() {
-        let jira = Arc::new(FakeJira::new(Vec::new()));
+    fn allows_empty_remote_assignee_restrictions_and_rejects_duplicates() {
+        let jira = Arc::new(FakeJira::new(vec![
+            page(Vec::new(), None, None),
+            page(Vec::new(), None, None),
+        ]));
         let service = IssuePullService::new(jira.clone(), IssuePullConfig::default());
 
         let mut empty = request();
-        empty.assignees.clear();
-        assert_eq!(
-            block_on(service.pull(empty, &CancellationToken::new()))
-                .expect_err("empty assignees")
-                .kind(),
-            ErrorKind::InvalidInput
-        );
+        empty.assignees = None;
+        assert!(block_on(service.pull(empty, &CancellationToken::new())).is_ok());
+
+        let mut explicitly_empty = request();
+        explicitly_empty.assignees = Some(Vec::new());
+        assert!(block_on(service.pull(explicitly_empty, &CancellationToken::new())).is_ok());
 
         let mut duplicate = request();
-        duplicate.assignees.push(assignee());
+        duplicate
+            .assignees
+            .as_mut()
+            .expect("assignee restriction")
+            .push(assignee());
         assert_eq!(
             block_on(service.pull(duplicate, &CancellationToken::new()))
                 .expect_err("duplicate assignees")
