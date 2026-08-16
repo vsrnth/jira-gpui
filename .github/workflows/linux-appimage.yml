@@ -35,6 +35,7 @@ jobs:
             jq \
             libfontconfig1-dev \
             libfreetype6-dev \
+            libstdc++-12-dev \
             libssl-dev \
             libwayland-dev \
             libvulkan1 \
