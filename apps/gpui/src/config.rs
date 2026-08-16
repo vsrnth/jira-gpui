@@ -7,7 +7,6 @@
 
 use std::{env, fmt, sync::Arc};
 
-use jira_application::{IssuePullService, JiraReadPort};
 use jira_domain::{AccountId, JiraSiteId};
 use jira_http::{ApiTokenCredentials, ConfigError, JiraHttpClient};
 use jira_storage::SqliteStore;
@@ -33,7 +32,6 @@ pub struct LiveSession {
     pub(crate) site_label: String,
     pub(crate) assignees: Vec<AccountId>,
     pub(crate) jira: Arc<JiraHttpClient>,
-    #[allow(dead_code, reason = "dashboard cache wiring is a following slice")]
     pub(crate) cache: Arc<SqliteStore>,
 }
 
@@ -63,13 +61,6 @@ impl fmt::Display for StartupError {
             Self::StorageUnavailable => "local Jira Desk storage is unavailable",
         };
         formatter.write_str(message)
-    }
-}
-
-impl LiveSession {
-    pub(crate) fn pull_service(&self) -> Arc<IssuePullService> {
-        let jira: Arc<dyn JiraReadPort> = self.jira.clone();
-        Arc::new(IssuePullService::new(jira, Default::default()))
     }
 }
 

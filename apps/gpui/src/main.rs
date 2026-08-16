@@ -19,9 +19,9 @@ fn main() {
                 window.activate_window();
                 window.set_window_title("Jira Desk");
 
-                let dashboard = cx.new(|_| match startup {
+                let dashboard = cx.new(|dashboard_cx| match startup {
                     StartupSelection::Preview => Dashboard::from_sample_data(),
-                    StartupSelection::Live(session) => Dashboard::from_live(session),
+                    StartupSelection::Live(session) => Dashboard::from_live(session, dashboard_cx),
                     StartupSelection::ConfigurationError(error) => {
                         Dashboard::from_configuration_error(error)
                     }

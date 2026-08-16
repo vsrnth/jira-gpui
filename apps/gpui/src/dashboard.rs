@@ -8,34 +8,33 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, StyledExt as _, button::Button, button::ButtonVariants as _, h_flex, v_flex,
 };
-use jira_application::{ApplicationError, CancellationToken, IssuePullRequest, IssuePullService};
-use jira_domain::{AccountId, Issue, JiraSiteId, User};
+use jira_application::{ApplicationError, CancellationToken, SyncMode};
+use jira_domain::{Issue, User};
 
 use crate::{
     config::{LiveSession, StartupError},
+    live_workspace::{CachedWorkspace, LiveWorkspace},
     presentation::{IssueViewModel, UpdateViewModel},
     sample_data::{sample_issues, sample_updates, sample_users},
 };
 
-fn safe_pull_error(error: &ApplicationError) -> &'static str {
+fn safe_sync_error(error: &ApplicationError) -> &'static str {
     match error.kind() {
         jira_application::ErrorKind::Authentication => {
-            "Issue pull failed · Jira authentication was rejected"
+            "Refresh failed · Jira authentication was rejected"
         }
         jira_application::ErrorKind::Authorization => {
-            "Issue pull failed · Jira authorization was denied"
+            "Refresh failed · Jira authorization was denied"
         }
-        jira_application::ErrorKind::RateLimited => "Issue pull paused · Jira rate limit reached",
-        jira_application::ErrorKind::Offline => "Issue pull failed · Jira is unreachable",
-        jira_application::ErrorKind::Cancelled => "Issue pull cancelled",
-        jira_application::ErrorKind::InvalidInput => "Issue pull failed · invalid request",
-        jira_application::ErrorKind::NotFound => "Issue pull failed · Jira site was not found",
-        jira_application::ErrorKind::Upstream => "Issue pull failed · Jira returned an error",
+        jira_application::ErrorKind::RateLimited => "Refresh paused · Jira rate limit reached",
+        jira_application::ErrorKind::Offline => "Refresh failed · Jira is unreachable",
+        jira_application::ErrorKind::Cancelled => "Refresh cancelled",
+        jira_application::ErrorKind::InvalidInput => "Refresh failed · invalid request",
+        jira_application::ErrorKind::NotFound => "Refresh failed · Jira site was not found",
+        jira_application::ErrorKind::Upstream => "Refresh failed · Jira returned an error",
         jira_application::ErrorKind::Storage
         | jira_application::ErrorKind::Notification
-        | jira_application::ErrorKind::Internal => {
-            "Issue pull failed · unexpected application error"
-        }
+        | jira_application::ErrorKind::Internal => "Refresh failed · local application error",
     }
 }
 
@@ -51,15 +50,13 @@ pub struct Dashboard {
     updates: Vec<UpdateViewModel>,
     selected_issue: usize,
     sync_message: String,
-    pull_service: Option<Arc<IssuePullService>>,
-    site_id: Option<JiraSiteId>,
-    assignees: Vec<AccountId>,
+    workspace: Option<Arc<LiveWorkspace>>,
     users: Vec<User>,
     workspace_name: String,
     workspace_members: String,
     site_label: String,
     mode_label: String,
-    pull_in_progress: bool,
+    operation_in_progress: bool,
 }
 
 impl Dashboard {
@@ -86,41 +83,73 @@ impl Dashboard {
             updates,
             selected_issue: 0,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
-            pull_service: None,
-            site_id: None,
-            assignees: Vec::new(),
+            workspace: None,
             users,
             workspace_name: "Platform team".to_owned(),
             workspace_members: "Amina, Devon, Marco".to_owned(),
             site_label: "sample.atlassian.net".to_owned(),
             mode_label: "Local preview mode".to_owned(),
-            pull_in_progress: false,
+            operation_in_progress: false,
         }
     }
 
-    pub fn from_live(session: LiveSession) -> Self {
+    pub fn from_live(session: LiveSession, cx: &mut Context<Self>) -> Self {
         let workspace_members = session
             .assignees
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        Self {
+        let dashboard = Self {
             section: Section::Issues,
             issues: Vec::new(),
             updates: Vec::new(),
             selected_issue: 0,
-            sync_message: "Ready · no issue pull has run".to_owned(),
-            pull_service: Some(session.pull_service()),
-            site_id: Some(session.site_id),
-            assignees: session.assignees,
+            sync_message: "Opening local cache…".to_owned(),
+            workspace: None,
             users: Vec::new(),
             workspace_name: "Configured user set".to_owned(),
             workspace_members,
             site_label: session.site_label,
-            mode_label: "Live read-only issue pull".to_owned(),
-            pull_in_progress: false,
-        }
+            mode_label: "Live read-only sync · desktop notifications unavailable".to_owned(),
+            operation_in_progress: true,
+        };
+
+        let site_id = session.site_id;
+        let assignees = session.assignees;
+        let jira = session.jira;
+        let cache = session.cache;
+        cx.spawn(async move |this, cx| {
+            let result = match LiveWorkspace::initialize(site_id, assignees, jira, cache).await {
+                Ok(workspace) => {
+                    let workspace = Arc::new(workspace);
+                    workspace
+                        .load_cached()
+                        .await
+                        .map(|cached| (workspace, cached))
+                }
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.operation_in_progress = false;
+                match result {
+                    Ok((workspace, cached)) => {
+                        let issue_count = cached.issues.len();
+                        let update_count = cached.events.len();
+                        this.workspace = Some(workspace);
+                        this.apply_cached(cached);
+                        this.sync_message =
+                            format!("Ready · cached {issue_count} issues · {update_count} updates");
+                    }
+                    Err(error) => {
+                        this.sync_message = safe_sync_error(&error).to_owned();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        dashboard
     }
 
     pub fn from_configuration_error(error: StartupError) -> Self {
@@ -145,53 +174,86 @@ impl Dashboard {
         self.selected_issue = self.selected_issue.min(self.issues.len().saturating_sub(1));
     }
 
-    fn begin_pull(&mut self, cx: &mut Context<Self>) {
-        if self.pull_in_progress {
-            return;
-        }
-        let Some(service) = self.pull_service.clone() else {
-            self.sync_message = "Issue pull unavailable · configure Jira credentials".to_owned();
-            cx.notify();
-            return;
-        };
-        let Some(site_id) = self.site_id.clone() else {
-            self.sync_message = "Issue pull unavailable · configure a Jira site".to_owned();
-            cx.notify();
-            return;
-        };
-        if self.assignees.is_empty() {
-            self.sync_message =
-                "Issue pull unavailable · configure assignee account IDs".to_owned();
-            cx.notify();
-            return;
-        }
+    fn apply_cached(&mut self, cached: CachedWorkspace) {
+        let CachedWorkspace { issues, events } = cached;
+        let updates = events
+            .iter()
+            .map(|event| {
+                let issue = issues.iter().find(|issue| issue.id == event.issue_id);
+                UpdateViewModel::from_domain(event, issue)
+            })
+            .collect();
+        self.apply_live_issues(issues);
+        self.updates = updates;
+    }
 
-        let request = IssuePullRequest {
-            site_id,
-            assignees: self.assignees.clone(),
-            updated_since: None,
+    fn begin_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.operation_in_progress {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.sync_message = "Refresh unavailable · local workspace is not ready".to_owned();
+            cx.notify();
+            return;
         };
         let cancellation = CancellationToken::new();
-        self.pull_in_progress = true;
-        self.sync_message = "Pulling issues from Jira…".to_owned();
+        self.operation_in_progress = true;
+        self.sync_message = "Refreshing Jira…".to_owned();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let result = service.pull(request, &cancellation).await;
+            let result = workspace.refresh(&cancellation).await;
             let _ = this.update(cx, |this, cx| {
-                this.pull_in_progress = false;
+                this.operation_in_progress = false;
                 match result {
                     Ok(outcome) => {
-                        let issue_count = outcome.issues.len();
-                        this.apply_live_issues(outcome.issues);
+                        let mode = match outcome.outcome.mode {
+                            SyncMode::Baseline => "baseline",
+                            SyncMode::Incremental => "incremental",
+                            SyncMode::Reconciliation => "reconciliation",
+                        };
+                        let issue_count = outcome.cached.issues.len();
+                        let new_event_count = outcome.outcome.events_inserted;
+                        let event_count = outcome.cached.events.len();
+                        this.apply_cached(outcome.cached);
                         this.sync_message = format!(
-                            "Issue pull complete · {issue_count} issues · {} pages",
-                            outcome.pages_fetched
+                            "Refresh complete · {issue_count} issues · {new_event_count} new updates · {event_count} in inbox · {mode}"
                         );
                     }
                     Err(error) => {
-                        this.sync_message = safe_pull_error(&error).to_owned();
+                        this.sync_message = safe_sync_error(&error).to_owned();
                     }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn mark_all_read(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.clone() else {
+            for update in &mut self.updates {
+                update.unread = false;
+            }
+            cx.notify();
+            return;
+        };
+        if self.operation_in_progress {
+            return;
+        }
+        self.operation_in_progress = true;
+        self.sync_message = "Marking updates read…".to_owned();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = workspace.mark_all_read().await;
+            let _ = this.update(cx, |this, cx| {
+                this.operation_in_progress = false;
+                match result {
+                    Ok(result) => {
+                        this.apply_cached(result.cached);
+                        this.sync_message = format!("Marked {} updates read", result.changed);
+                    }
+                    Err(error) => this.sync_message = safe_sync_error(&error).to_owned(),
                 }
                 cx.notify();
             });
@@ -391,14 +453,14 @@ impl Dashboard {
                     ),
             )
             .child(
-                Button::new("pull-issues")
+                Button::new("refresh")
                     .primary()
-                    .label(if self.pull_in_progress {
-                        "Pulling issues…"
+                    .label(if self.operation_in_progress {
+                        "Refreshing…"
                     } else {
-                        "Pull issues"
+                        "Refresh"
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.begin_pull(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
             )
     }
 
@@ -524,12 +586,12 @@ impl Dashboard {
             .unwrap_or_else(|| "—".to_owned());
         let status = issue
             .map(|issue| issue.status.clone())
-            .unwrap_or_else(|| "Ready to pull".to_owned());
+            .unwrap_or_else(|| "Ready to refresh".to_owned());
         let priority = issue
             .map(|issue| issue.priority.clone())
             .unwrap_or_else(|| "—".to_owned());
         let description = issue.map_or_else(
-            || "Pull issues from Jira to populate this view.".to_owned(),
+            || "Refresh from Jira to populate this view.".to_owned(),
             |issue| issue.description.clone(),
         );
         let assignee = issue
@@ -677,12 +739,7 @@ impl Dashboard {
                         Button::new("mark-all-read")
                             .ghost()
                             .label("Mark all read")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                for update in &mut this.updates {
-                                    update.unread = false;
-                                }
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.mark_all_read(cx))),
                     ),
             )
             .child(
