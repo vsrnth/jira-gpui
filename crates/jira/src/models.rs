@@ -84,7 +84,69 @@ pub struct JiraIssueFields {
     #[serde(default)]
     pub description: Option<Value>,
     #[serde(default)]
+    pub attachment: Vec<JiraAttachment>,
+    #[serde(default)]
     pub resolution: Option<JiraNamedEntity>,
+}
+
+/// Metadata returned in an issue's `attachment` field. Content URLs are intentionally not
+/// represented: this client never follows or downloads attachment bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraAttachment {
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub id: String,
+    pub filename: String,
+    pub size: u64,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraCommentPage {
+    #[serde(default)]
+    pub start_at: usize,
+    #[serde(default)]
+    pub max_results: usize,
+    #[serde(default)]
+    pub total: Option<usize>,
+    #[serde(default, alias = "values")]
+    pub comments: Vec<JiraComment>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraComment {
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub id: String,
+    #[serde(default)]
+    pub author: Option<JiraUser>,
+    #[serde(default)]
+    pub body: Option<Value>,
+    pub created: String,
+    #[serde(default)]
+    pub updated: Option<String>,
+    /// Jira visibility is deliberately not carried into the domain until a policy is defined.
+    #[serde(default)]
+    pub visibility: Option<Value>,
+}
+
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        String(String),
+        Number(u64),
+    }
+
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::String(value) => Ok(value),
+        StringOrNumber::Number(value) => Ok(value.to_string()),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

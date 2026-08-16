@@ -10,10 +10,11 @@ use std::{
     time::Duration,
 };
 
-use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraUser};
+use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraCommentPage, JiraIssue, JiraUser};
 use jira_application::{
-    ApplicationError, CancellationToken, ErrorKind, IssueFetchRequest, IssuePage, JiraReadPort,
-    PageCursor, PortFuture, UserSearchRequest,
+    ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage, IssueCommentsPageRequest,
+    IssueDetailRequest, IssueFetchRequest, IssuePage, JiraReadPort, PageCursor, PortFuture,
+    UserSearchRequest,
 };
 use jira_domain::{Issue, IssueId, JiraSiteId, User};
 use reqwest::{Client, Response, StatusCode, header};
@@ -194,6 +195,24 @@ impl JiraHttpClient {
         Ok(())
     }
 
+    fn issue_endpoint(
+        &self,
+        issue_id: &IssueId,
+        suffix: Option<&str>,
+    ) -> Result<Url, ApplicationError> {
+        let mut url = self.endpoint("rest/api/3/issue")?;
+        {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                ApplicationError::new(ErrorKind::Internal, "invalid Jira issue endpoint")
+            })?;
+            segments.push(issue_id.as_str());
+            if let Some(suffix) = suffix {
+                segments.push(suffix);
+            }
+        }
+        Ok(url)
+    }
+
     fn submit<T, F>(&self, cancellation: &CancellationToken, operation: F) -> PortFuture<'static, T>
     where
         T: Send + 'static,
@@ -363,9 +382,111 @@ impl JiraHttpClient {
             "Jira issue pagination exceeded the safety limit",
         ))
     }
+
+    async fn issue_detail_request(
+        client: Client,
+        mut url: Url,
+        credentials: ApiTokenCredentials,
+        site_id: jira_domain::JiraSiteId,
+        max_response_bytes: usize,
+    ) -> Result<jira_domain::IssueDetailCore, ApplicationError> {
+        url.query_pairs_mut()
+            .append_pair("fields", &jira_adapter::issue_detail_fields_query());
+        let response = client
+            .get(url)
+            .basic_auth(credentials.email, Some(credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let issue: JiraIssue = read_json(response, max_response_bytes).await?;
+        IssueMapper
+            .map_domain_issue_detail(site_id, issue)
+            .map_err(|_| {
+                ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid issue detail")
+            })
+    }
+
+    async fn issue_comments_page_request(
+        client: Client,
+        mut url: Url,
+        credentials: ApiTokenCredentials,
+        request: IssueCommentsPageRequest,
+        max_response_bytes: usize,
+    ) -> Result<IssueCommentsPage, ApplicationError> {
+        let limit = request.page_size.min(100);
+        if limit == 0 {
+            return Err(ApplicationError::invalid_input(
+                "comment page size must be positive",
+            ));
+        }
+        url.query_pairs_mut()
+            .append_pair("startAt", &request.start_at.to_string())
+            .append_pair("maxResults", &limit.to_string())
+            .append_pair("orderBy", "created");
+        let response = client
+            .get(url)
+            .basic_auth(credentials.email, Some(credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let page: JiraCommentPage = read_json(response, max_response_bytes).await?;
+        IssueMapper.map_comment_page(page).map_err(|_| {
+            ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid comment data")
+        })
+    }
 }
 
 impl JiraReadPort for JiraHttpClient {
+    fn fetch_issue_detail<'a>(
+        &'a self,
+        request: &'a IssueDetailRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, jira_domain::IssueDetailCore> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.issue_id, None) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let site_id = request.site_id.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::issue_detail_request(client, url, credentials, site_id, max).await
+        })
+    }
+
+    fn fetch_issue_comments_page<'a>(
+        &'a self,
+        request: &'a IssueCommentsPageRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, IssueCommentsPage> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.issue_id, Some("comment")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let request = request.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::issue_comments_page_request(client, url, credentials, request, max).await
+        })
+    }
+
     fn fetch_current_user<'a>(
         &'a self,
         site_id: &'a JiraSiteId,
@@ -768,5 +889,60 @@ mod tests {
             Some("https://avatar.example.test/ada.png")
         );
         assert!(user.active);
+    }
+
+    #[test]
+    fn issue_detail_and_comment_urls_encode_ids_as_path_segments_and_use_expected_queries() {
+        let configured = JiraSiteId::new("configured-site").unwrap();
+        let client = JiraHttpClient {
+            site_id: configured,
+            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            credentials: ApiTokenCredentials::new("person@example.com", "secret").unwrap(),
+            client: Client::new(),
+            runtime: Arc::new(RuntimeBridge::new().unwrap()),
+            config: JiraHttpConfig::default(),
+        };
+        let issue_id = IssueId::new("ENG/42?private").unwrap();
+        let mut detail = client.issue_endpoint(&issue_id, None).unwrap();
+        detail
+            .query_pairs_mut()
+            .append_pair("fields", &jira_adapter::issue_detail_fields_query());
+        assert_eq!(detail.path(), "/rest/api/3/issue/ENG%2F42%3Fprivate");
+        assert_eq!(
+            detail
+                .query_pairs()
+                .find(|(name, _)| name == "fields")
+                .map(|(_, value)| value.into_owned()),
+            Some(jira_adapter::issue_detail_fields_query())
+        );
+
+        let mut comments = client.issue_endpoint(&issue_id, Some("comment")).unwrap();
+        comments
+            .query_pairs_mut()
+            .append_pair("startAt", "20")
+            .append_pair("maxResults", "50")
+            .append_pair("orderBy", "created");
+        assert_eq!(
+            comments.path(),
+            "/rest/api/3/issue/ENG%2F42%3Fprivate/comment"
+        );
+        assert_eq!(
+            comments.query(),
+            Some("startAt=20&maxResults=50&orderBy=created")
+        );
+    }
+
+    #[test]
+    fn detail_request_builder_uses_basic_auth_without_putting_credentials_in_the_url() {
+        let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
+        let request = Client::new()
+            .get(Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42").unwrap())
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .build()
+            .unwrap();
+        assert_eq!(request.url().query(), None);
+        assert_eq!(request.url().username(), "");
+        assert!(!request.url().as_str().contains("secret-token"));
+        assert!(request.headers().contains_key(header::AUTHORIZATION));
     }
 }
