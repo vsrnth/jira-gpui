@@ -8,7 +8,7 @@
 use std::{env, fmt, sync::Arc};
 
 use jira_application::{CancellationToken, ErrorKind, JiraReadPort};
-use jira_domain::{AccountId, JiraSiteId};
+use jira_domain::{JiraSiteId, User};
 use jira_http::{ApiTokenCredentials, ConfigError, JiraBaseUrl, JiraHttpClient};
 use jira_storage::SqliteStore;
 
@@ -30,7 +30,7 @@ pub enum StartupSelection {
 pub struct LiveSession {
     pub(crate) site_id: JiraSiteId,
     pub(crate) site_label: String,
-    pub(crate) authenticated_account: Option<AccountId>,
+    pub(crate) authenticated_user: Option<User>,
     pub(crate) jira: Arc<JiraHttpClient>,
     pub(crate) cache: Arc<SqliteStore>,
 }
@@ -142,27 +142,40 @@ where
             ConfigError::InvalidBaseUrl => StartupError::InvalidBaseUrl,
             _ => StartupError::ClientUnavailable,
         })?;
-    let assignee = resolve_initial_assignee(jira.as_ref(), &site_id).await?;
+    let authenticated_user = ensure_authenticated_user(None, jira.as_ref(), &site_id).await?;
     let cache = store_factory()?;
 
     Ok(LiveSession {
         site_id,
         site_label,
-        authenticated_account: Some(assignee),
+        authenticated_user: Some(authenticated_user),
         jira,
         cache,
     })
 }
 
-/// Resolves the one initial assignee used by interactive onboarding.
+/// Resolves the authenticated user used by interactive onboarding or the
+/// environment bootstrap. An existing user is deliberately reused so manual
+/// onboarding never performs a second `/myself` request.
 ///
 /// Keeping this operation at the application-port seam makes onboarding
 /// testable without an HTTP server and ensures the UI never asks users to
 /// discover or paste an Atlassian account ID.
-async fn resolve_initial_assignee(
+pub(crate) async fn ensure_authenticated_user(
+    existing: Option<User>,
     jira: &dyn JiraReadPort,
     site_id: &JiraSiteId,
-) -> Result<AccountId, StartupError> {
+) -> Result<User, StartupError> {
+    if let Some(user) = existing {
+        return validate_authenticated_user(user, site_id);
+    }
+    resolve_initial_user(jira, site_id).await
+}
+
+async fn resolve_initial_user(
+    jira: &dyn JiraReadPort,
+    site_id: &JiraSiteId,
+) -> Result<User, StartupError> {
     let cancellation = CancellationToken::new();
     let user = jira
         .fetch_current_user(site_id, &cancellation)
@@ -172,10 +185,15 @@ async fn resolve_initial_assignee(
             ErrorKind::Authorization => StartupError::AuthorizationDenied,
             _ => StartupError::CurrentUserUnavailable,
         })?;
-    if user.site_id != *site_id {
-        return Err(StartupError::CurrentUserUnavailable);
+    validate_authenticated_user(user, site_id)
+}
+
+fn validate_authenticated_user(user: User, site_id: &JiraSiteId) -> Result<User, StartupError> {
+    if user.site_id == *site_id {
+        Ok(user)
+    } else {
+        Err(StartupError::CurrentUserUnavailable)
     }
-    Ok(user.account_id)
 }
 
 fn startup_from_values(values: EnvironmentValues) -> StartupSelection {
@@ -248,7 +266,7 @@ where
         site_id,
         site_label,
         // The synchronous environment bootstrap does not call `/myself`.
-        authenticated_account: None,
+        authenticated_user: None,
         jira,
         cache,
     })
@@ -291,7 +309,7 @@ mod tests {
         ApplicationError, CancellationToken, IssueCachePort, IssueFetchRequest, IssuePage,
         PortFuture, UserSearchRequest,
     };
-    use jira_domain::{Issue, IssueId, User};
+    use jira_domain::{AccountId, Issue, IssueId, User};
     use jira_storage::SqliteStore;
 
     use super::*;
@@ -328,7 +346,7 @@ mod tests {
         let StartupSelection::Live(session) = in_memory_startup(complete()) else {
             panic!("environment setup should not require authenticated account IDs");
         };
-        assert!(session.authenticated_account.is_none());
+        assert!(session.authenticated_user.is_none());
     }
 
     fn in_memory_startup(values: EnvironmentValues) -> StartupSelection {
@@ -383,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_onboarding_uses_authenticated_account() {
+    fn manual_onboarding_preserves_authenticated_user() {
         let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
         let user = User::new(
             site_id.clone(),
@@ -394,9 +412,60 @@ mod tests {
         );
         let jira = FakeCurrentUser { result: Ok(user) };
 
-        let assignee = block_on(resolve_initial_assignee(&jira, &site_id))
-            .expect("current user should resolve");
-        assert_eq!(assignee.as_str(), "712020:authenticated");
+        let authenticated_user =
+            block_on(resolve_initial_user(&jira, &site_id)).expect("current user should resolve");
+        assert_eq!(
+            authenticated_user.account_id.as_str(),
+            "712020:authenticated"
+        );
+        assert_eq!(authenticated_user.display_name, "Ada Lovelace");
+    }
+
+    #[test]
+    fn existing_authenticated_user_is_reused_without_a_second_myself_request() {
+        let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
+        let existing = User::new(
+            site_id.clone(),
+            AccountId::new("712020:authenticated").expect("account"),
+            "Ada Lovelace",
+            None,
+            true,
+        );
+        let jira = FakeCurrentUser {
+            result: Err(ApplicationError::new(
+                ErrorKind::Authentication,
+                "the existing identity should avoid this request",
+            )),
+        };
+
+        let resolved = block_on(ensure_authenticated_user(
+            Some(existing.clone()),
+            &jira,
+            &site_id,
+        ))
+        .expect("existing identity should be reused");
+
+        assert_eq!(resolved, existing);
+    }
+
+    #[test]
+    fn missing_authenticated_user_is_resolved_through_the_jira_port() {
+        let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
+        let expected = User::new(
+            site_id.clone(),
+            AccountId::new("712020:authenticated").expect("account"),
+            "Ada Lovelace",
+            None,
+            true,
+        );
+        let jira = FakeCurrentUser {
+            result: Ok(expected.clone()),
+        };
+
+        let resolved = block_on(ensure_authenticated_user(None, &jira, &site_id))
+            .expect("missing identity should be resolved");
+
+        assert_eq!(resolved, expected);
     }
 
     #[test]
@@ -409,7 +478,7 @@ mod tests {
             )),
         };
 
-        let error = block_on(resolve_initial_assignee(&jira, &site_id)).expect_err("auth error");
+        let error = block_on(resolve_initial_user(&jira, &site_id)).expect_err("auth error");
         assert_eq!(error, StartupError::AuthenticationRejected);
         assert!(!error.to_string().contains("token-that-must-not-escape"));
     }
@@ -431,7 +500,7 @@ mod tests {
                 )),
             };
             let error =
-                block_on(resolve_initial_assignee(&jira, &site_id)).expect_err("remote auth error");
+                block_on(resolve_initial_user(&jira, &site_id)).expect_err("remote auth error");
             assert_eq!(error, expected);
             assert!(!error.to_string().contains("remote details"));
             let message = error.to_string();

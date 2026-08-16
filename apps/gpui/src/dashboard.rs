@@ -10,12 +10,15 @@ use gpui_component::{
     button::ButtonVariants as _, h_flex, v_flex,
 };
 use jira_application::{ApplicationError, CancellationToken, DefaultPollingPolicy, SyncMode};
-use jira_domain::{AccountId, Issue, User};
+use jira_domain::{AccountId, Issue, IssueId, User};
 
 use crate::{
-    config::{LiveSession, StartupError},
+    config::{LiveSession, StartupError, ensure_authenticated_user},
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
-    presentation::{IssueViewModel, UpdateViewModel},
+    presentation::{
+        IssueDetailViewModel, IssueStatusFilter, IssueViewModel, UpdateViewModel,
+        issue_views_for_filter,
+    },
     sample_data::{sample_issues, sample_updates, sample_users},
 };
 
@@ -39,6 +42,32 @@ fn safe_sync_error(error: &ApplicationError) -> &'static str {
     }
 }
 
+fn safe_detail_error(error: &ApplicationError) -> &'static str {
+    match error.kind() {
+        jira_application::ErrorKind::Authentication => {
+            "Issue details unavailable · Jira authentication was rejected"
+        }
+        jira_application::ErrorKind::Authorization => {
+            "Issue details unavailable · Jira authorization was denied"
+        }
+        jira_application::ErrorKind::NotFound => {
+            "Issue details unavailable · Jira issue was not found"
+        }
+        jira_application::ErrorKind::RateLimited => {
+            "Issue details unavailable · Jira rate limit reached"
+        }
+        jira_application::ErrorKind::Offline => "Issue details unavailable · Jira is unreachable",
+        jira_application::ErrorKind::Cancelled => "Issue details request cancelled",
+        jira_application::ErrorKind::InvalidInput
+        | jira_application::ErrorKind::Upstream
+        | jira_application::ErrorKind::Storage
+        | jira_application::ErrorKind::Notification
+        | jira_application::ErrorKind::Internal => {
+            "Issue details unavailable · Jira returned an error"
+        }
+    }
+}
+
 fn refresh_complete_message(result: &RefreshResult) -> String {
     let mode = match result.outcome.mode {
         SyncMode::Baseline => "baseline",
@@ -55,6 +84,11 @@ fn refresh_complete_message(result: &RefreshResult) -> String {
     )
 }
 
+fn authenticated_identity(user: Option<User>) -> (Vec<User>, Option<AccountId>) {
+    let account = user.as_ref().map(|user| user.account_id.clone());
+    (user.into_iter().collect(), account)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     Issues,
@@ -67,11 +101,29 @@ enum IssueScope {
     Mine,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DetailState {
+    Empty,
+    Loading { issue_id: IssueId },
+    Loaded(IssueDetailViewModel),
+    Error { issue_id: IssueId, message: String },
+}
+
+fn detail_result_is_current(
+    selected_issue: Option<&IssueId>,
+    expected_issue: &IssueId,
+    generation: u64,
+    expected_generation: u64,
+) -> bool {
+    generation == expected_generation && selected_issue == Some(expected_issue)
+}
+
 pub struct Dashboard {
     section: Section,
+    domain_issues: Vec<Issue>,
     issues: Vec<IssueViewModel>,
     updates: Vec<UpdateViewModel>,
-    selected_issue: usize,
+    selected_issue: Option<IssueId>,
     sync_message: String,
     workspace: Option<Arc<LiveWorkspace>>,
     users: Vec<User>,
@@ -84,6 +136,11 @@ pub struct Dashboard {
     automatic_polling_paused: bool,
     issue_scope: IssueScope,
     authenticated_account: Option<AccountId>,
+    status_filter: IssueStatusFilter,
+    detail_state: DetailState,
+    detail_generation: u64,
+    detail_cancellation: Option<CancellationToken>,
+    detail_task: Option<gpui::Task<()>>,
 }
 
 impl Dashboard {
@@ -99,16 +156,15 @@ impl Dashboard {
                 UpdateViewModel::from_domain(event, issue)
             })
             .collect();
-        let issues = domain_issues
-            .iter()
-            .map(|issue| IssueViewModel::from_domain(issue, &users))
-            .collect();
+        let issues = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All);
+        let selected_issue = issues.first().map(|issue| issue.id.clone());
 
         Self {
             section: Section::Issues,
+            domain_issues,
             issues,
             updates,
-            selected_issue: 0,
+            selected_issue,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
             workspace: None,
             users,
@@ -121,21 +177,28 @@ impl Dashboard {
             automatic_polling_paused: false,
             issue_scope: IssueScope::All,
             authenticated_account: None,
+            status_filter: IssueStatusFilter::All,
+            detail_state: DetailState::Empty,
+            detail_generation: 0,
+            detail_cancellation: None,
+            detail_task: None,
         }
     }
 
     pub fn from_live(session: LiveSession, cx: &mut Context<Self>) -> Self {
-        let authenticated_account = session.authenticated_account.clone();
+        let (users, initial_authenticated_account) =
+            authenticated_identity(session.authenticated_user.clone());
         let dashboard = Self {
             section: Section::Issues,
+            domain_issues: Vec::new(),
             issues: Vec::new(),
             updates: Vec::new(),
-            selected_issue: 0,
+            selected_issue: None,
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
-            users: Vec::new(),
+            users,
             workspace_name: "Jira Project".to_owned(),
-            workspace_members: if authenticated_account.is_some() {
+            workspace_members: if initial_authenticated_account.is_some() {
                 "Authenticated Jira account".to_owned()
             } else {
                 "Environment bootstrap · My issues unavailable".to_owned()
@@ -146,46 +209,65 @@ impl Dashboard {
             polling_task: None,
             automatic_polling_paused: false,
             issue_scope: IssueScope::All,
-            authenticated_account,
+            authenticated_account: initial_authenticated_account,
+            status_filter: IssueStatusFilter::All,
+            detail_state: DetailState::Empty,
+            detail_generation: 0,
+            detail_cancellation: None,
+            detail_task: None,
         };
 
         let site_id = session.site_id;
-        let authenticated_account = session.authenticated_account;
+        let initial_authenticated_user = session.authenticated_user;
         let jira = session.jira;
         let cache = session.cache;
         cx.spawn(async move |this, cx| {
-            let result = match LiveWorkspace::initialize(
-                site_id,
-                authenticated_account,
-                jira,
-                cache,
+            let result = match ensure_authenticated_user(
+                initial_authenticated_user,
+                jira.as_ref(),
+                &site_id,
             )
             .await
             {
-                Ok(workspace) => {
-                    let workspace = Arc::new(workspace);
-                    workspace
-                        .load_cached()
-                        .await
-                        .map(|cached| (workspace, cached))
+                Ok(authenticated_user) => {
+                    let authenticated_account = authenticated_user.account_id.clone();
+                    match LiveWorkspace::initialize(
+                        site_id,
+                        Some(authenticated_account),
+                        jira,
+                        cache,
+                    )
+                    .await
+                    {
+                        Ok(workspace) => {
+                            let workspace = Arc::new(workspace);
+                            workspace
+                                .load_cached()
+                                .await
+                                .map(|cached| (workspace, cached, authenticated_user))
+                                .map_err(|error| safe_sync_error(&error).to_owned())
+                        }
+                        Err(error) => Err(safe_sync_error(&error).to_owned()),
+                    }
                 }
-                Err(error) => Err(error),
+                Err(error) => Err(error.to_string()),
             };
             let _ = this.update(cx, |this, cx| {
                 this.operation_in_progress = false;
                 match result {
-                    Ok((workspace, cached)) => {
+                    Ok((workspace, cached, authenticated_user)) => {
                         let issue_count = cached.issues.len();
                         let update_count = cached.events.len();
+                        this.users = vec![authenticated_user.clone()];
+                        this.authenticated_account = Some(authenticated_user.account_id.clone());
+                        this.workspace_members = "Authenticated Jira account".to_owned();
                         this.workspace = Some(workspace);
-                        this.apply_cached(cached);
+                        this.apply_cached(cached, cx);
                         this.start_automatic_polling(cx);
                         this.sync_message =
                             format!("Ready · cached {issue_count} issues · {update_count} updates");
                     }
-                    Err(error) => {
-                        this.sync_message = safe_sync_error(&error).to_owned();
-                    }
+                    Err(error) => this.sync_message = format!("Startup error · {error}"),
                 }
                 cx.notify();
             });
@@ -256,7 +338,7 @@ impl Dashboard {
                         Ok(result) => {
                             consecutive_failures = 0;
                             this.sync_message = refresh_complete_message(&result);
-                            this.apply_cached(result.cached);
+                            this.apply_cached(result.cached, cx);
                             cx.notify();
                             Some(policy.next_delay_after_success())
                         }
@@ -295,9 +377,11 @@ impl Dashboard {
 
     pub fn from_configuration_error(error: StartupError) -> Self {
         let mut dashboard = Self::from_sample_data();
+        dashboard.domain_issues.clear();
         dashboard.issues.clear();
         dashboard.updates.clear();
-        dashboard.selected_issue = 0;
+        dashboard.selected_issue = None;
+        dashboard.invalidate_detail_selection();
         dashboard.users.clear();
         dashboard.workspace_name = "Jira Project".to_owned();
         dashboard.workspace_members = "Connect Jira to load this view".to_owned();
@@ -307,15 +391,119 @@ impl Dashboard {
         dashboard
     }
 
-    fn apply_live_issues(&mut self, issues: Vec<Issue>) {
-        self.issues = issues
-            .iter()
-            .map(|issue| IssueViewModel::from_domain(issue, &self.users))
-            .collect();
-        self.selected_issue = self.selected_issue.min(self.issues.len().saturating_sub(1));
+    fn apply_live_issues(
+        &mut self,
+        issues: Vec<Issue>,
+        refresh_detail: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.domain_issues = issues;
+        self.rebuild_issue_views(refresh_detail, cx);
     }
 
-    fn apply_cached(&mut self, cached: CachedWorkspace) {
+    fn rebuild_issue_views(&mut self, refresh_detail: bool, cx: &mut Context<Self>) {
+        self.issues = issue_views_for_filter(&self.domain_issues, &self.users, self.status_filter);
+        let selected_visible = self
+            .selected_issue
+            .as_ref()
+            .is_some_and(|selected| self.issues.iter().any(|issue| &issue.id == selected));
+        if self.selected_issue.is_some() && !selected_visible {
+            self.invalidate_detail_selection();
+        }
+        if self.selected_issue.is_none() {
+            if let Some(issue_id) = self.issues.first().map(|issue| issue.id.clone()) {
+                self.select_issue(issue_id, cx, true);
+            }
+        } else if refresh_detail {
+            self.reload_selected_detail(cx);
+        }
+    }
+
+    fn set_status_filter(&mut self, filter: IssueStatusFilter, cx: &mut Context<Self>) {
+        if self.status_filter == filter {
+            return;
+        }
+        self.status_filter = filter;
+        self.rebuild_issue_views(false, cx);
+        cx.notify();
+    }
+
+    fn invalidate_detail_selection(&mut self) {
+        if let Some(cancellation) = self.detail_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.detail_task.take();
+        self.detail_generation = self.detail_generation.wrapping_add(1);
+        self.selected_issue = None;
+        self.detail_state = DetailState::Empty;
+    }
+
+    fn select_issue(&mut self, issue_id: IssueId, cx: &mut Context<Self>, force: bool) {
+        if self.selected_issue.as_ref() == Some(&issue_id)
+            && !force
+            && matches!(
+                self.detail_state,
+                DetailState::Loading { .. } | DetailState::Loaded(_)
+            )
+        {
+            return;
+        }
+        if let Some(cancellation) = self.detail_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.detail_task.take();
+        self.detail_generation = self.detail_generation.wrapping_add(1);
+        let generation = self.detail_generation;
+        self.selected_issue = Some(issue_id.clone());
+
+        let Some(workspace) = self.workspace.clone() else {
+            self.detail_state = DetailState::Empty;
+            cx.notify();
+            return;
+        };
+
+        let cancellation = CancellationToken::new();
+        self.detail_cancellation = Some(cancellation.clone());
+        self.detail_state = DetailState::Loading {
+            issue_id: issue_id.clone(),
+        };
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace
+                .fetch_issue_detail(issue_id.clone(), &cancellation)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !detail_result_is_current(
+                    this.selected_issue.as_ref(),
+                    &issue_id,
+                    this.detail_generation,
+                    generation,
+                ) {
+                    return;
+                }
+                this.detail_cancellation = None;
+                this.detail_task = None;
+                this.detail_state = match result {
+                    Ok(detail) => DetailState::Loaded(IssueDetailViewModel::from_domain(&detail)),
+                    Err(error) => DetailState::Error {
+                        issue_id: issue_id.clone(),
+                        message: safe_detail_error(&error).to_owned(),
+                    },
+                };
+                cx.notify();
+            });
+        });
+        self.detail_task = Some(task);
+        cx.notify();
+    }
+
+    fn reload_selected_detail(&mut self, cx: &mut Context<Self>) {
+        let Some(issue_id) = self.selected_issue.clone() else {
+            return;
+        };
+        self.select_issue(issue_id, cx, true);
+    }
+
+    fn apply_cached(&mut self, cached: CachedWorkspace, cx: &mut Context<Self>) {
         let CachedWorkspace { issues, events } = cached;
         let updates = events
             .iter()
@@ -324,7 +512,7 @@ impl Dashboard {
                 UpdateViewModel::from_domain(event, issue)
             })
             .collect();
-        self.apply_live_issues(issues);
+        self.apply_live_issues(issues, true, cx);
         self.updates = updates;
     }
 
@@ -355,7 +543,7 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     Ok(cached) => {
-                        this.apply_cached(cached);
+                        this.apply_cached(cached, cx);
                         this.start_automatic_polling(cx);
                         this.sync_message = match scope {
                             IssueScope::All => {
@@ -419,7 +607,7 @@ impl Dashboard {
                 match result {
                     Ok(outcome) => {
                         this.sync_message = refresh_complete_message(&outcome);
-                        this.apply_cached(outcome.cached);
+                        this.apply_cached(outcome.cached, cx);
                         this.start_automatic_polling(cx);
                     }
                     Err(error) => {
@@ -473,7 +661,7 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     Ok(result) => {
-                        this.apply_cached(result.cached);
+                        this.apply_cached(result.cached, cx);
                         this.sync_message = format!("Marked {} updates read", result.changed);
                     }
                     Err(error) => this.sync_message = safe_sync_error(&error).to_owned(),
@@ -746,30 +934,55 @@ impl Dashboard {
                             .child("Updated newest first"),
                     )
                     .child(
+                        h_flex()
+                            .h(px(44.))
+                            .px_3()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(self.status_filter_button(IssueStatusFilter::All, cx))
+                            .child(self.status_filter_button(IssueStatusFilter::ToDo, cx))
+                            .child(self.status_filter_button(IssueStatusFilter::InProgress, cx))
+                            .child(self.status_filter_button(IssueStatusFilter::Done, cx))
+                            .child(self.status_filter_button(IssueStatusFilter::Uncategorized, cx)),
+                    )
+                    .child(
                         v_flex()
                             .id("issue-list")
                             .flex_1()
                             .overflow_y_scroll()
-                            .children(
-                                self.issues
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(index, issue)| self.issue_row(index, issue, cx)),
-                            ),
+                            .children(self.issues.iter().map(|issue| self.issue_row(issue, cx))),
                     ),
             )
             .child(self.issue_detail(cx))
     }
 
-    fn issue_row(
+    fn status_filter_button(
         &self,
-        index: usize,
-        issue: &IssueViewModel,
+        filter: IssueStatusFilter,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = index == self.selected_issue;
+    ) -> impl IntoElement {
+        let id = match filter {
+            IssueStatusFilter::All => "status-filter-all",
+            IssueStatusFilter::ToDo => "status-filter-to-do",
+            IssueStatusFilter::InProgress => "status-filter-in-progress",
+            IssueStatusFilter::Done => "status-filter-done",
+            IssueStatusFilter::Uncategorized => "status-filter-uncategorized",
+        };
+        Button::new(id)
+            .label(filter.label())
+            .when(self.status_filter == filter, |button| button.primary())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_status_filter(filter, cx);
+            }))
+    }
+
+    fn issue_row(&self, issue: &IssueViewModel, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.selected_issue.as_ref() == Some(&issue.id);
+        let issue_id = issue.id.clone();
         v_flex()
-            .id(("issue-row", index))
+            .id(issue.id.to_string())
             .w_full()
             .p_4()
             .gap_2()
@@ -781,8 +994,7 @@ impl Dashboard {
                 this.hover(|style| style.bg(cx.theme().list_hover))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected_issue = index;
-                cx.notify();
+                this.select_issue(issue_id.clone(), cx, false);
             }))
             .child(
                 h_flex()
@@ -828,7 +1040,10 @@ impl Dashboard {
     }
 
     fn issue_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let issue = self.issues.get(self.selected_issue);
+        let issue = self
+            .selected_issue
+            .as_ref()
+            .and_then(|selected| self.issues.iter().find(|issue| &issue.id == selected));
         let project = issue
             .map(|issue| issue.project.clone())
             .unwrap_or_else(|| "Jira".to_owned());
@@ -847,10 +1062,13 @@ impl Dashboard {
         let priority = issue
             .map(|issue| issue.priority.clone())
             .unwrap_or_else(|| "—".to_owned());
-        let description = issue.map_or_else(
-            || "Refresh from Jira to populate this view.".to_owned(),
-            |issue| issue.description.clone(),
-        );
+        let description = match &self.detail_state {
+            DetailState::Loaded(detail) => detail.description.clone(),
+            _ => issue.map_or_else(
+                || "Select an issue to load its details.".to_owned(),
+                |issue| issue.description.clone(),
+            ),
+        };
         let assignee = issue
             .map(|issue| issue.assignee.clone())
             .unwrap_or_else(|| "—".to_owned());
@@ -941,6 +1159,140 @@ impl Dashboard {
                         ),
                 )
             })
+            .child(self.render_detail_state(cx))
+    }
+
+    fn render_detail_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        match &self.detail_state {
+            DetailState::Empty => v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .child("Comments and attachments"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if self.selected_issue.is_some() {
+                            "Select the issue to load its Jira details."
+                        } else {
+                            "Select an issue to load comments and attachments."
+                        }),
+                )
+                .into_any_element(),
+            DetailState::Loading { .. } => v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .child("Comments and attachments"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading issue details…"),
+                )
+                .into_any_element(),
+            DetailState::Error { message, .. } => v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .child("Comments and attachments"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(message.clone()),
+                )
+                .into_any_element(),
+            DetailState::Loaded(detail) => {
+                let comments = if detail.comments.is_empty() {
+                    v_flex()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No comments.")
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .gap_3()
+                        .children(detail.comments.iter().map(|comment| {
+                            v_flex()
+                                .gap_1()
+                                .p_3()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .child(comment.author.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(comment.created.clone()),
+                                        ),
+                                )
+                                .child(div().text_sm().child(comment.body.clone()))
+                                .when_some(comment.updated.clone(), |this, updated| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("Updated {updated}")),
+                                    )
+                                })
+                        }))
+                        .into_any_element()
+                };
+                let attachments = if detail.attachments.is_empty() {
+                    v_flex()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No attachments.")
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .gap_2()
+                        .children(detail.attachments.iter().map(|attachment| {
+                            h_flex()
+                                .justify_between()
+                                .text_sm()
+                                .child(attachment.filename.clone())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{} · {}",
+                                            attachment.mime_type, attachment.size
+                                        )),
+                                )
+                        }))
+                        .into_any_element()
+                };
+                v_flex()
+                    .gap_3()
+                    .child(div().text_sm().font_semibold().child("Comments"))
+                    .child(comments)
+                    .child(div().text_sm().font_semibold().child("Attachments"))
+                    .child(attachments)
+                    .into_any_element()
+            }
+        }
     }
 
     fn detail_field(
@@ -1103,5 +1455,45 @@ impl Render for Dashboard {
                     .child(self.render_header(cx))
                     .child(div().min_h_0().flex_1().child(content)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sample_data::{sample_issues, sample_users};
+
+    #[test]
+    fn authenticated_user_is_seeded_for_display_mapping_and_account_filtering() {
+        let authenticated_user = sample_users().into_iter().next().expect("sample user");
+        let display_name = authenticated_user.display_name.clone();
+        let account_id = authenticated_user.account_id.clone();
+        let (users, account) = authenticated_identity(Some(authenticated_user));
+        let views = issue_views_for_filter(&sample_issues(), &users, IssueStatusFilter::All);
+
+        assert_eq!(account, Some(account_id));
+        assert_eq!(views[0].assignee, display_name);
+    }
+
+    #[test]
+    fn status_filter_rebuilds_from_loaded_domain_issues_without_remote_state() {
+        let domain_issues = sample_issues();
+        let users = sample_users();
+        let all = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All);
+        let done = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::Done);
+
+        assert_eq!(all.len(), 5);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].key, "DESK-163");
+    }
+
+    #[test]
+    fn stale_detail_results_are_rejected_after_selection_changes() {
+        let first = IssueId::new("10001").expect("issue");
+        let second = IssueId::new("10002").expect("issue");
+
+        assert!(!detail_result_is_current(Some(&second), &first, 2, 1));
+        assert!(!detail_result_is_current(Some(&first), &first, 2, 1));
+        assert!(detail_result_is_current(Some(&second), &second, 2, 2));
     }
 }

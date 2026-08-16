@@ -1,7 +1,9 @@
 #[cfg(target_os = "linux")]
 fn main() {
-    use gpui::{App, AppContext as _, Styled as _, WindowBounds, WindowOptions, px, size};
-    use gpui_component::{ActiveTheme as _, Root};
+    use gpui::{
+        App, AppContext as _, Styled as _, WindowBounds, WindowDecorations, WindowOptions, px, size,
+    };
+    use gpui_component::{ActiveTheme as _, Root, TitleBar};
     use jira_gpui::{AppShell, startup_from_environment};
 
     let startup = startup_from_environment();
@@ -11,7 +13,8 @@ fn main() {
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1240.), px(780.)), cx)),
-            ..WindowOptions::default()
+            window_decorations: Some(WindowDecorations::Client),
+            ..TitleBar::window_options()
         };
 
         cx.spawn(async move |cx| {

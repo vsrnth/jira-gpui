@@ -8,12 +8,14 @@ use std::sync::Arc;
 
 use jira_application::{
     ApplicationError, Clock, DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort,
-    IssueCatalogService, IssueListQuery, JiraReadPort, NoopEventSink, SyncConfig, SyncMode,
-    SyncOutcome, SyncRequest, SyncService, UpdateFeedQuery, UpdateFeedService, UserSetDraft,
-    UserSetPort, UserSetService,
+    IssueCatalogService, IssueDetailConfig, IssueDetailRequest, IssueDetailService, IssueListQuery,
+    JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
+    UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
-use jira_domain::{AccountId, EventId, Issue, JiraSiteId, Timestamp, UpdateEvent, UserSetId};
+use jira_domain::{
+    AccountId, EventId, Issue, IssueDetail, IssueId, JiraSiteId, Timestamp, UpdateEvent, UserSetId,
+};
 use jira_storage::SqliteStore;
 
 const WORKSPACE_NAME: &str = "Jira Desk workspace";
@@ -49,6 +51,7 @@ pub struct LiveWorkspace {
     user_set_id: UserSetId,
     catalog: IssueCatalogService,
     feed: UpdateFeedService,
+    detail: IssueDetailService,
     cache: Arc<SqliteStore>,
     sync: SyncService,
 }
@@ -102,6 +105,7 @@ impl LiveWorkspace {
 
         let cache_port: Arc<dyn IssueCachePort> = cache.clone();
         let catalog = IssueCatalogService::new(jira.clone(), cache_port.clone());
+        let detail = IssueDetailService::new(jira.clone(), IssueDetailConfig::default());
         let events = Arc::new(NoopEventSink);
         let feed = UpdateFeedService::new(
             cache.clone() as Arc<dyn jira_application::UpdateFeedPort>,
@@ -124,6 +128,7 @@ impl LiveWorkspace {
             user_set_id,
             catalog,
             feed,
+            detail,
             cache,
             sync,
         })
@@ -139,6 +144,23 @@ impl LiveWorkspace {
 
     pub fn user_set_id(&self) -> &UserSetId {
         &self.user_set_id
+    }
+
+    /// Fetch one issue's complete read-only detail through the application service.
+    pub async fn fetch_issue_detail(
+        &self,
+        issue_id: IssueId,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<IssueDetail, ApplicationError> {
+        self.detail
+            .fetch(
+                IssueDetailRequest {
+                    site_id: self.site_id.clone(),
+                    issue_id,
+                },
+                cancellation,
+            )
+            .await
     }
 
     /// Load bounded cached data without contacting Jira.
@@ -293,12 +315,13 @@ mod tests {
 
     use futures_lite::future::block_on;
     use jira_application::{
-        ApplicationError, CancellationToken, ErrorKind, IssueFetchRequest, IssuePage, PortFuture,
+        ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
+        IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage, PortFuture,
         UserSearchRequest,
     };
     use jira_domain::{
-        IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery, Priority, Project, Status,
-        UpdateReadState, User,
+        AttachmentMetadata, IssueComment, IssueDetailCore, IssueId, IssueKey, IssueType,
+        JiraSiteId, NotificationDelivery, Priority, Project, Status, UpdateReadState, User,
     };
     use time::macros::datetime;
 
@@ -307,6 +330,8 @@ mod tests {
     #[derive(Default)]
     struct FakeJira {
         pages: Mutex<VecDeque<IssuePage>>,
+        detail_pages: Mutex<VecDeque<IssueDetailCore>>,
+        comment_pages: Mutex<VecDeque<IssueCommentsPage>>,
         request_count: Mutex<usize>,
         assignee_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
     }
@@ -314,6 +339,20 @@ mod tests {
     impl FakeJira {
         fn push_page(&self, page: IssuePage) {
             self.pages.lock().expect("pages lock").push_back(page);
+        }
+
+        fn push_detail(&self, detail: IssueDetailCore) {
+            self.detail_pages
+                .lock()
+                .expect("detail pages lock")
+                .push_back(detail);
+        }
+
+        fn push_comment_page(&self, page: IssueCommentsPage) {
+            self.comment_pages
+                .lock()
+                .expect("comment pages lock")
+                .push_back(page);
         }
 
         fn request_count(&self) -> usize {
@@ -329,6 +368,34 @@ mod tests {
     }
 
     impl JiraReadPort for FakeJira {
+        fn fetch_issue_detail<'a>(
+            &'a self,
+            _request: &'a IssueDetailRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, IssueDetailCore> {
+            let detail = self
+                .detail_pages
+                .lock()
+                .expect("detail pages lock")
+                .pop_front()
+                .ok_or_else(|| ApplicationError::new(ErrorKind::Upstream, "missing detail"));
+            Box::pin(async move { detail })
+        }
+
+        fn fetch_issue_comments_page<'a>(
+            &'a self,
+            _request: &'a IssueCommentsPageRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, IssueCommentsPage> {
+            let page = self
+                .comment_pages
+                .lock()
+                .expect("comment pages lock")
+                .pop_front()
+                .ok_or_else(|| ApplicationError::new(ErrorKind::Upstream, "missing comments"));
+            Box::pin(async move { page })
+        }
+
         fn fetch_current_user<'a>(
             &'a self,
             _site_id: &'a JiraSiteId,
@@ -634,6 +701,55 @@ mod tests {
             .expect("load local my filter");
         assert_eq!(mine.issues.len(), 1);
         assert_eq!(jira.request_count(), requests_after_sync);
+    }
+
+    #[test]
+    fn issue_detail_fetches_core_comments_and_attachment_metadata_through_workspace() {
+        let jira = Arc::new(FakeJira::default());
+        let mut detailed_issue = issue("Detailed summary");
+        detailed_issue.description_text = Some("Detailed description".to_owned());
+        jira.push_detail(
+            IssueDetailCore::new(
+                detailed_issue,
+                vec![
+                    AttachmentMetadata::new("attachment-1", "notes.txt", 42, Some("text/plain"))
+                        .expect("attachment"),
+                ],
+            )
+            .expect("detail core"),
+        );
+        jira.push_comment_page(IssueCommentsPage {
+            comments: vec![
+                IssueComment::new(
+                    "comment-1",
+                    Some(account("account-a")),
+                    "A complete comment",
+                    datetime!(2026-01-03 00:00 UTC),
+                    None,
+                    Vec::new(),
+                )
+                .expect("comment"),
+            ],
+            start_at: 0,
+            next_start_at: None,
+            next_cursor: None,
+            total: Some(1),
+        });
+        let workspace = make_workspace(jira, Arc::new(SqliteStore::in_memory().expect("store")));
+
+        let detail = block_on(workspace.fetch_issue_detail(
+            IssueId::new("10001").expect("issue"),
+            &CancellationToken::new(),
+        ))
+        .expect("issue detail");
+
+        assert_eq!(
+            detail.core.issue.description_text.as_deref(),
+            Some("Detailed description")
+        );
+        assert_eq!(detail.comments.len(), 1);
+        assert_eq!(detail.comments[0].body, "A complete comment");
+        assert_eq!(detail.core.attachments[0].filename, "notes.txt");
     }
 
     #[test]

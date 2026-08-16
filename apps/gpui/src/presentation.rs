@@ -3,11 +3,59 @@
 //! Keeping this mapping free of GPUI types means a future Tauri presentation
 //! adapter can reuse the same decisions without depending on the native UI.
 
-use jira_domain::{ChangeValue, Issue, UpdateEvent, UpdateKind, UpdateReadState, User};
+use jira_domain::{
+    ChangeValue, Issue, IssueDetail, UpdateEvent, UpdateKind, UpdateReadState, User,
+};
 use time::{Date, OffsetDateTime};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IssueStatusFilter {
+    #[default]
+    All,
+    ToDo,
+    InProgress,
+    Done,
+    Uncategorized,
+}
+
+impl IssueStatusFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All statuses",
+            Self::ToDo => "To do",
+            Self::InProgress => "In progress",
+            Self::Done => "Done",
+            Self::Uncategorized => "Uncategorized",
+        }
+    }
+
+    pub fn matches(self, category: &str) -> bool {
+        let category = category.trim().to_ascii_lowercase();
+        match self {
+            Self::All => true,
+            Self::ToDo => category == "to do",
+            Self::InProgress => category == "in progress",
+            Self::Done => category == "done",
+            Self::Uncategorized => category.is_empty(),
+        }
+    }
+}
+
+pub fn issue_views_for_filter(
+    issues: &[Issue],
+    users: &[User],
+    filter: IssueStatusFilter,
+) -> Vec<IssueViewModel> {
+    issues
+        .iter()
+        .filter(|issue| filter.matches(issue.status.category.as_deref().unwrap_or_default()))
+        .map(|issue| IssueViewModel::from_domain(issue, users))
+        .collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssueViewModel {
+    pub id: jira_domain::IssueId,
     pub key: String,
     pub summary: String,
     pub project: String,
@@ -40,6 +88,7 @@ impl IssueViewModel {
         };
 
         Self {
+            id: issue.id.clone(),
             key: issue.key.to_string(),
             summary: issue.summary.clone(),
             project: issue.project.name.clone(),
@@ -74,6 +123,71 @@ impl IssueViewModel {
                 .due_date
                 .map(format_date)
                 .unwrap_or_else(|| "Not set".to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueDetailViewModel {
+    pub description: String,
+    pub comments: Vec<CommentViewModel>,
+    pub attachments: Vec<AttachmentViewModel>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommentViewModel {
+    pub author: String,
+    pub body: String,
+    pub created: String,
+    pub updated: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttachmentViewModel {
+    pub filename: String,
+    pub mime_type: String,
+    pub size: String,
+}
+
+impl IssueDetailViewModel {
+    pub fn from_domain(detail: &IssueDetail) -> Self {
+        let comments = detail
+            .comments
+            .iter()
+            .map(|comment| CommentViewModel {
+                author: comment
+                    .author
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "Unknown author".to_owned()),
+                body: comment.body.clone(),
+                created: format_timestamp(comment.created_at),
+                updated: comment.updated_at.map(format_timestamp),
+            })
+            .collect();
+        let attachments = detail
+            .core
+            .attachments
+            .iter()
+            .map(|attachment| AttachmentViewModel {
+                filename: attachment.filename.clone(),
+                mime_type: attachment
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "Unknown type".to_owned()),
+                size: format_bytes(attachment.size_bytes),
+            })
+            .collect();
+
+        Self {
+            description: detail
+                .core
+                .issue
+                .description_text
+                .clone()
+                .unwrap_or_else(|| "No description supplied.".to_owned()),
+            comments,
+            attachments,
         }
     }
 }
@@ -163,6 +277,22 @@ fn format_date(value: Date) -> String {
     )
 }
 
+fn format_bytes(value: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value_f64 = value as f64;
+    if value_f64 >= GIB {
+        format!("{:.1} GiB", value_f64 / GIB)
+    } else if value_f64 >= MIB {
+        format!("{:.1} MiB", value_f64 / MIB)
+    } else if value_f64 >= KIB {
+        format!("{:.1} KiB", value_f64 / KIB)
+    } else {
+        format!("{value} B")
+    }
+}
+
 fn month_name(month: u8) -> &'static str {
     match month {
         1 => "Jan",
@@ -184,6 +314,8 @@ fn month_name(month: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::sample_data::{sample_issues, sample_users};
+    use jira_domain::{AttachmentMetadata, IssueComment, IssueDetail, IssueDetailCore};
+    use time::macros::datetime;
 
     #[test]
     fn maps_domain_identity_to_display_name() {
@@ -205,5 +337,63 @@ mod tests {
         let view = IssueViewModel::from_domain(&issues[0], &[]);
 
         assert_eq!(view.assignee, "unknown-account");
+    }
+
+    #[test]
+    fn status_filters_match_categories_case_insensitively_and_keep_uncategorized_separate() {
+        assert!(IssueStatusFilter::All.matches("anything"));
+        assert!(IssueStatusFilter::ToDo.matches("TO DO"));
+        assert!(IssueStatusFilter::InProgress.matches("in progress"));
+        assert!(IssueStatusFilter::Done.matches("Done"));
+        assert!(IssueStatusFilter::Uncategorized.matches(""));
+        assert!(!IssueStatusFilter::Uncategorized.matches("In Review"));
+        assert!(IssueStatusFilter::Uncategorized.matches("  "));
+    }
+
+    #[test]
+    fn filters_loaded_domain_issues_without_changing_their_display_mapping() {
+        let issues = sample_issues();
+        let users = sample_users();
+
+        let views = issue_views_for_filter(&issues, &users, IssueStatusFilter::Done);
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].key, "DESK-163");
+        assert_eq!(views[0].assignee, "Devon Park");
+    }
+
+    #[test]
+    fn maps_issue_detail_comments_and_attachment_metadata_for_display() {
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let detail = IssueDetail::new(
+            IssueDetailCore::new(
+                issue,
+                vec![
+                    AttachmentMetadata::new("attachment-1", "report.txt", 1024, Some("text/plain"))
+                        .expect("attachment"),
+                ],
+            )
+            .expect("detail core"),
+            vec![
+                IssueComment::new(
+                    "comment-1",
+                    Some(jira_domain::AccountId::new("account-1").expect("account")),
+                    "A comment body",
+                    datetime!(2026-01-03 00:00 UTC),
+                    None,
+                    Vec::new(),
+                )
+                .expect("comment"),
+            ],
+        )
+        .expect("detail");
+
+        let view = IssueDetailViewModel::from_domain(&detail);
+
+        assert_eq!(view.comments[0].author, "account-1");
+        assert_eq!(view.comments[0].body, "A comment body");
+        assert_eq!(view.attachments[0].filename, "report.txt");
+        assert_eq!(view.attachments[0].mime_type, "text/plain");
+        assert_eq!(view.attachments[0].size, "1.0 KiB");
     }
 }

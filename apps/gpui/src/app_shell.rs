@@ -6,7 +6,7 @@ use gpui::{
     Render, Styled as _, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, StyledExt as _, button::Button,
+    ActiveTheme as _, Disableable as _, StyledExt as _, TitleBar, button::Button,
     button::ButtonVariants as _, h_flex, input::Input, input::InputState,
     scroll::ScrollableElement as _, v_flex,
 };
@@ -251,13 +251,24 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(dashboard) = &self.dashboard {
-            return div()
-                .size_full()
+        let content = if let Some(dashboard) = &self.dashboard {
+            div()
+                .min_h_0()
+                .flex_1()
                 .child(dashboard.clone())
-                .into_any_element();
-        }
+                .into_any_element()
+        } else {
+            div()
+                .min_h_0()
+                .flex_1()
+                .child(self.render_connection_form(cx))
+                .into_any_element()
+        };
 
-        self.render_connection_form(cx).into_any_element()
+        v_flex()
+            .size_full()
+            .child(TitleBar::new().child(div().text_sm().font_semibold().child("Jira Desk")))
+            .child(content)
+            .into_any_element()
     }
 }
