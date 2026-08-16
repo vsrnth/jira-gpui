@@ -146,6 +146,21 @@ jobs:
           test -f squashfs-root/usr/share/applications/dev.jiradesk.JiraDesk.desktop
           test -f squashfs-root/usr/share/metainfo/dev.jiradesk.JiraDesk.metainfo.xml
           test -f squashfs-root/usr/share/licenses/jira-gpui/LICENSE
+          if ldd_output=$(ldd squashfs-root/usr/bin/jira-gpui 2>&1); then
+            ldd_status=0
+          else
+            ldd_status=$?
+          fi
+          printf '%s\n' "$ldd_output"
+          test "$ldd_status" -eq 0
+          if grep -Fq 'not found' <<<"$ldd_output"; then
+            echo 'Packaged binary has an unresolved shared-library dependency' >&2
+            exit 1
+          fi
+          if grep -Eq 'libX11|libxcb|libxkbcommon-x11' <<<"$ldd_output"; then
+            echo 'Packaged binary links an X11 dependency' >&2
+            exit 1
+          fi
 
       - name: Upload AppImage artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
