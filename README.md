@@ -43,11 +43,16 @@ endpoint, syncs all issues in the Jira Project project, and derives the
 authenticated account automatically; no account ID needs to be discovered or
 pasted. The token is masked, discarded from the input before connection starts,
 held only by the in-memory HTTP client, and never stored locally or logged.
-The workspace defaults to All issues. My issues is a local cache filter for the
-authenticated account and never refetches Jira. Live startup opens the local
-SQLite cache, uses an Jira Project/account-scoped workspace identity, and
-loads cached issues and in-app update events before contacting Jira. The first
-successful refresh establishes a
+The authenticated `/myself` user is also resolved during environment startup;
+interactive onboarding reuses the user it already verified, so neither path
+asks for an account ID. Assignee values use that user's Jira display name when
+available. The workspace defaults to All issues; My issues and the status
+category filters (All statuses, To do, In progress, Done, and Uncategorized)
+are local filters over the loaded cache and never refetch Jira. A client-side
+Wayland title bar provides minimize, maximize/restore, and close controls.
+Live startup opens the local SQLite cache, uses an Jira Project/account-scoped
+workspace identity, and loads cached issues and in-app update events before
+contacting Jira. The first successful refresh establishes a
 quiet baseline; later automatic polls are incremental and preserve membership,
 while manual refresh remains full reconciliation. The live Dashboard owns one
 cancellable polling task, starts its first automatic tick after five minutes,
@@ -81,9 +86,11 @@ project is fixed to Jira Project and no assignee variable is required:
 - `JIRA_API_TOKEN`: an API token consumed into the in-memory HTTP client; the
   app does not persist or log this environment value.
 
-The synchronous environment bootstrap does not call Jira's current-user
-endpoint, so it has no authenticated identity and disables My issues. Use
-interactive onboarding when the authenticated-account filter is needed.
+Both interactive and environment startup resolve Jira's authenticated `/myself`
+identity, and My issues is enabled after that check succeeds. A selected issue
+loads its description, paginated comments, and attachment metadata lazily; the
+detail request is memory-only, bounded, cancellable, and read-only. Attachment
+content is never downloaded or opened.
 
 This API-token flow is intended only for internal development and local
 testing; never commit or log these values. The current direct-site transport
@@ -100,8 +107,8 @@ The Linux release build will enable GPUI's Wayland backend only. X11 is not a
 supported runtime target. Production OAuth and the Linux runtime matrix remain
 outstanding; macOS is Phase 2.
 
-Validation includes 99 Linux-target workspace tests in an x86_64 Ubuntu 22.04
-container with Rust 1.95.0 (100 on the macOS host due to the non-Linux adapter
+Validation includes 123 Linux-target workspace tests in an x86_64 Ubuntu 22.04
+container with Rust 1.95.0 (124 on the macOS host due to the non-Linux adapter
 fallback test), rustfmt, warning-denied production Clippy, metadata checks, and
 the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
 pinned tools/runtime; its checksum, extracted contents, required files, and
