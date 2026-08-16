@@ -12,6 +12,7 @@ mod issue_pull;
 mod issues;
 mod model;
 mod notifications;
+mod polling;
 mod ports;
 mod sync;
 mod user_sets;
@@ -24,6 +25,7 @@ pub use issue_pull::{IssuePullConfig, IssuePullOutcome, IssuePullRequest, IssueP
 pub use issues::IssueCatalogService;
 pub use model::*;
 pub use notifications::DefaultDesktopNotificationPolicy;
+pub use polling::DefaultPollingPolicy;
 pub use ports::*;
 pub use sync::{SyncConfig, SyncService};
 pub use user_sets::UserSetService;
