@@ -62,6 +62,25 @@ fi
     printf '%s\n' "Missing executable release binary: $binary" >&2
     exit 1
 }
+ldd_output=$(ldd "$binary") || {
+    printf '%s\n' "Could not inspect shared libraries for release binary: $binary" >&2
+    exit 1
+}
+host_libxkbcommon=$(printf '%s\n' "$ldd_output" | awk '
+    $1 == "libxkbcommon.so.0" && $3 ~ /^\// { print $3; exit }
+    $1 ~ /\/libxkbcommon\.so\.0$/ { print $1; exit }
+')
+case "$host_libxkbcommon" in
+    /*) ;;
+    *)
+        printf '%s\n' "Could not resolve an absolute libxkbcommon.so.0 path from: $binary" >&2
+        exit 1
+        ;;
+esac
+[ -f "$host_libxkbcommon" ] && [ -r "$host_libxkbcommon" ] || {
+    printf '%s\n' "Resolved libxkbcommon.so.0 is not a readable file: $host_libxkbcommon" >&2
+    exit 1
+}
 
 if [ -L "$output_dir" ] || { [ -e "$output_dir" ] && [ ! -d "$output_dir" ]; }; then
     printf '%s\n' "Refusing to use a non-directory dist path: $output_dir" >&2
@@ -85,7 +104,15 @@ APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
     --executable "$binary" \
     --desktop-file "$desktop" \
     --icon-file "$icon" \
-    --custom-apprun "$apprun"
+    --custom-apprun "$apprun" \
+    --exclude-library libxkbcommon.so.0
+
+mkdir -p "$appdir/usr/lib"
+cp -L -- "$host_libxkbcommon" "$appdir/usr/lib/libxkbcommon.so.0"
+[ -f "$appdir/usr/lib/libxkbcommon.so.0" ] && [ -r "$appdir/usr/lib/libxkbcommon.so.0" ] || {
+    printf '%s\n' "Failed to copy libxkbcommon.so.0 into AppDir" >&2
+    exit 1
+}
 
 if [ -n "${APPIMAGE_RUNTIME:-}" ]; then
     [ -f "$APPIMAGE_RUNTIME" ] || { printf '%s\n' "APPIMAGE_RUNTIME is not a file" >&2; exit 1; }
