@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     mem::discriminant,
     sync::{Arc, RwLock},
@@ -317,7 +318,7 @@ impl UpdateFeedPort for InMemoryStore {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            events.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
+            events.sort_by_key(|event| Reverse(event.occurred_at));
             events.truncate(query.limit);
             Ok(events)
         })
