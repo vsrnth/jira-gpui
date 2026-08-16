@@ -3363,12 +3363,14 @@ name = "jira-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-lite",
  "gpui",
  "gpui-component",
  "gpui_platform",
  "jira-application",
  "jira-domain",
  "jira-http",
+ "jira-storage",
  "time",
 ]
 

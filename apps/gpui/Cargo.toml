@@ -13,10 +13,14 @@ gpui-component.workspace = true
 jira-application = { path = "../../crates/application" }
 jira-domain = { path = "../../crates/domain" }
 jira-http = { path = "../../crates/jira-http" }
+jira-storage = { path = "../../crates/storage" }
 time.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland"] }
+
+[dev-dependencies]
+futures-lite = "2.6.1"
 
 [lints]
 workspace = true

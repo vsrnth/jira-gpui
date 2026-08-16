@@ -1,0 +1,463 @@
+//! Headless composition for a live Jira workspace.
+//!
+//! This module deliberately has no GPUI types. It owns the presentation-adapter
+//! wiring needed by a shell, while the application services and storage ports
+//! remain reusable by a future Tauri frontend.
+
+use std::{collections::HashSet, sync::Arc};
+
+use jira_application::{
+    ApplicationError, Clock, DefaultIssueDiffer, ErrorKind, IssueCachePort, IssueCatalogService,
+    IssueListQuery, JiraReadPort, NoopEventSink, NotificationPolicy, NotificationPort,
+    NotificationRequest, PortFuture, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
+    UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
+};
+use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp, UpdateEvent, UserSetId};
+use jira_storage::SqliteStore;
+
+const WORKSPACE_NAME: &str = "Jira Desk workspace";
+const ISSUE_PAGE_SIZE: usize = 1_000;
+const MAX_CACHED_ISSUES: usize = 10_000;
+const MAX_FEED_EVENTS: usize = 500;
+
+/// The cache and update feed displayed by a workspace shell.
+#[derive(Clone, Debug)]
+pub struct CachedWorkspace {
+    pub issues: Vec<Issue>,
+    pub events: Vec<UpdateEvent>,
+}
+
+/// Result returned after a live synchronization and cache reload.
+#[derive(Clone, Debug)]
+pub struct RefreshResult {
+    pub cached: CachedWorkspace,
+    pub outcome: SyncOutcome,
+}
+
+/// Presentation-independent live workspace coordinator.
+pub struct LiveWorkspace {
+    site_id: JiraSiteId,
+    assignees: Vec<AccountId>,
+    user_set_id: UserSetId,
+    catalog: IssueCatalogService,
+    feed: UpdateFeedService,
+    cache: Arc<SqliteStore>,
+    sync: SyncService,
+}
+
+impl LiveWorkspace {
+    /// Open the configured workspace, reusing its local user set when present.
+    pub async fn initialize(
+        site_id: JiraSiteId,
+        assignees: Vec<AccountId>,
+        jira: Arc<dyn JiraReadPort>,
+        cache: Arc<SqliteStore>,
+    ) -> Result<Self, ApplicationError> {
+        validate_assignees(&assignees)?;
+        let mut assignees = assignees;
+        assignees.sort();
+
+        let user_sets = UserSetService::new(cache.clone() as Arc<dyn UserSetPort>);
+        let user_set_id = match user_sets
+            .list(&site_id)
+            .await?
+            .into_iter()
+            .find(|user_set| {
+                user_set.site_id == site_id
+                    && user_set.name == WORKSPACE_NAME
+                    && user_set.members == assignees
+            }) {
+            Some(user_set) => user_set.id,
+            None => {
+                user_sets
+                    .save(UserSetDraft {
+                        site_id: site_id.clone(),
+                        name: WORKSPACE_NAME.to_owned(),
+                        members: assignees.clone(),
+                    })
+                    .await?
+                    .id
+            }
+        };
+
+        let cache_port: Arc<dyn IssueCachePort> = cache.clone();
+        let catalog = IssueCatalogService::new(jira.clone(), cache_port.clone());
+        let events = Arc::new(NoopEventSink);
+        let feed = UpdateFeedService::new(
+            cache.clone() as Arc<dyn jira_application::UpdateFeedPort>,
+            events.clone(),
+        );
+        let sync = SyncService::new(
+            jira,
+            cache_port,
+            Arc::new(DefaultIssueDiffer),
+            Arc::new(UnavailableDesktopNotifications),
+            Arc::new(SuppressDesktopNotifications),
+            Arc::new(SystemClock),
+            events,
+            SyncConfig::default(),
+        );
+
+        Ok(Self {
+            site_id,
+            assignees,
+            user_set_id,
+            catalog,
+            feed,
+            cache,
+            sync,
+        })
+    }
+
+    pub fn site_id(&self) -> &JiraSiteId {
+        &self.site_id
+    }
+
+    pub fn assignees(&self) -> &[AccountId] {
+        &self.assignees
+    }
+
+    pub fn user_set_id(&self) -> &UserSetId {
+        &self.user_set_id
+    }
+
+    /// Load bounded cached data without contacting Jira.
+    pub async fn load_cached(&self) -> Result<CachedWorkspace, ApplicationError> {
+        let mut issues = Vec::new();
+        for offset in (0..MAX_CACHED_ISSUES).step_by(ISSUE_PAGE_SIZE) {
+            let page = self
+                .catalog
+                .list_cached(&IssueListQuery {
+                    site_id: self.site_id.clone(),
+                    user_set_id: self.user_set_id.clone(),
+                    text: None,
+                    assignees: Vec::new(),
+                    limit: ISSUE_PAGE_SIZE,
+                    offset,
+                })
+                .await?;
+            let page_len = page.len();
+            issues.extend(page);
+            if page_len < ISSUE_PAGE_SIZE {
+                break;
+            }
+        }
+
+        let events = self
+            .feed
+            .list(&UpdateFeedQuery {
+                site_id: self.site_id.clone(),
+                unread_only: false,
+                kinds: Vec::new(),
+                before: None,
+                limit: MAX_FEED_EVENTS,
+            })
+            .await?;
+        Ok(CachedWorkspace { issues, events })
+    }
+
+    /// Synchronize Jira and reload bounded local data.
+    pub async fn refresh(
+        &self,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<RefreshResult, ApplicationError> {
+        let mode = if self
+            .cache
+            .sync_state(&self.site_id, &self.user_set_id)
+            .await?
+            .is_some_and(|state| state.last_incremental_succeeded_at.is_some())
+        {
+            SyncMode::Reconciliation
+        } else {
+            SyncMode::Baseline
+        };
+        let outcome = self
+            .sync
+            .run(
+                SyncRequest {
+                    site_id: self.site_id.clone(),
+                    user_set_id: self.user_set_id.clone(),
+                    assignees: self.assignees.clone(),
+                    mode,
+                },
+                cancellation,
+            )
+            .await?;
+        let cached = self.load_cached().await?;
+        Ok(RefreshResult { cached, outcome })
+    }
+}
+
+fn validate_assignees(assignees: &[AccountId]) -> Result<(), ApplicationError> {
+    if assignees.is_empty() {
+        return Err(ApplicationError::invalid_input(
+            "workspace requires at least one assignee",
+        ));
+    }
+    if assignees.iter().collect::<HashSet<_>>().len() != assignees.len() {
+        return Err(ApplicationError::invalid_input(
+            "workspace assignees must be unique",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::now_utc()
+    }
+}
+
+#[derive(Debug)]
+struct SuppressDesktopNotifications;
+
+impl NotificationPolicy for SuppressDesktopNotifications {
+    fn should_notify(&self, _event: &UpdateEvent) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+struct UnavailableDesktopNotifications;
+
+impl NotificationPort for UnavailableDesktopNotifications {
+    fn deliver<'a>(&'a self, _request: NotificationRequest) -> PortFuture<'a, ()> {
+        Box::pin(async {
+            Err(ApplicationError::new(
+                ErrorKind::Notification,
+                "desktop notifications are unavailable",
+            ))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
+    use futures_lite::future::block_on;
+    use jira_application::{
+        ApplicationError, CancellationToken, ErrorKind, IssueFetchRequest, IssuePage, PortFuture,
+        UserSearchRequest,
+    };
+    use jira_domain::{IssueId, IssueKey, IssueType, JiraSiteId, Priority, Project, Status, User};
+    use time::macros::datetime;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeJira {
+        pages: Mutex<VecDeque<IssuePage>>,
+        request_count: Mutex<usize>,
+    }
+
+    impl FakeJira {
+        fn push_page(&self, page: IssuePage) {
+            self.pages.lock().expect("pages lock").push_back(page);
+        }
+
+        fn request_count(&self) -> usize {
+            *self.request_count.lock().expect("request count lock")
+        }
+    }
+
+    impl JiraReadPort for FakeJira {
+        fn search_users<'a>(
+            &'a self,
+            _request: &'a UserSearchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<User>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn fetch_issue_page<'a>(
+            &'a self,
+            _request: &'a IssueFetchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, IssuePage> {
+            *self.request_count.lock().expect("request count lock") += 1;
+            let result = self
+                .pages
+                .lock()
+                .expect("pages lock")
+                .pop_front()
+                .ok_or_else(|| ApplicationError::new(ErrorKind::Upstream, "missing fake page"));
+            Box::pin(async move { result })
+        }
+
+        fn fetch_issues_by_id<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _issue_ids: &'a [IssueId],
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<Issue>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    fn account(value: &str) -> AccountId {
+        AccountId::new(value).expect("valid account")
+    }
+
+    fn issue(summary: &str) -> Issue {
+        Issue::new(
+            JiraSiteId::new("site").expect("valid site"),
+            IssueId::new("10001").expect("valid issue"),
+            IssueKey::new("APP-1").expect("valid key"),
+            Project {
+                id: "10".into(),
+                key: "APP".into(),
+                name: "App".into(),
+            },
+            IssueType {
+                id: "1".into(),
+                name: "Task".into(),
+                icon_url: None,
+            },
+            summary,
+            Status {
+                id: "1".into(),
+                name: "Open".into(),
+                category: None,
+            },
+            Priority {
+                id: None,
+                name: None,
+                icon_url: None,
+            },
+            Some(account("account-a")),
+            None,
+            None,
+            Vec::new(),
+            datetime!(2026-01-01 00:00 UTC),
+            datetime!(2026-01-02 00:00 UTC),
+            None,
+        )
+    }
+
+    fn page(issue: Issue) -> IssuePage {
+        IssuePage {
+            issues: vec![issue],
+            next_cursor: None,
+            server_time: Some(datetime!(2026-01-03 00:00 UTC)),
+        }
+    }
+
+    fn make_workspace(jira: Arc<FakeJira>, cache: Arc<SqliteStore>) -> LiveWorkspace {
+        block_on(LiveWorkspace::initialize(
+            JiraSiteId::new("site").expect("valid site"),
+            vec![account("account-a"), account("account-b")],
+            jira,
+            cache,
+        ))
+        .expect("workspace initializes")
+    }
+
+    #[test]
+    fn initialization_reuses_exact_user_set() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("memory store"));
+        let first = make_workspace(jira.clone(), cache.clone());
+        let second = block_on(LiveWorkspace::initialize(
+            JiraSiteId::new("site").expect("valid site"),
+            vec![account("account-b"), account("account-a")],
+            jira,
+            cache.clone(),
+        ))
+        .expect("workspace initializes");
+        assert_eq!(first.user_set_id(), second.user_set_id());
+        assert_eq!(
+            second.assignees(),
+            &[account("account-a"), account("account-b")]
+        );
+        let sets =
+            block_on(cache.list(&JiraSiteId::new("site").expect("valid site"))).expect("list sets");
+        assert_eq!(sets.len(), 1);
+    }
+
+    #[test]
+    fn baseline_persists_issues_without_events_and_reconciliation_derives_changes() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue("Initial summary")));
+        jira.push_page(page(issue("Changed summary")));
+        let workspace = make_workspace(jira, Arc::new(SqliteStore::in_memory().expect("store")));
+        let cancellation = CancellationToken::new();
+
+        let baseline = block_on(workspace.refresh(&cancellation)).expect("baseline refresh");
+        assert_eq!(baseline.outcome.mode, SyncMode::Baseline);
+        assert_eq!(baseline.outcome.events_inserted, 0);
+        assert_eq!(baseline.cached.issues.len(), 1);
+        assert!(baseline.cached.events.is_empty());
+
+        let reconciliation = block_on(workspace.refresh(&cancellation)).expect("reconciliation");
+        assert_eq!(reconciliation.outcome.mode, SyncMode::Reconciliation);
+        assert_eq!(reconciliation.outcome.events_inserted, 1);
+        assert_eq!(reconciliation.cached.events.len(), 1);
+    }
+
+    #[test]
+    fn cached_loading_does_not_contact_jira() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira.clone(), cache);
+        let cached = block_on(workspace.load_cached()).expect("cached load");
+        assert!(cached.issues.is_empty());
+        assert!(cached.events.is_empty());
+        assert_eq!(jira.request_count(), 0);
+    }
+
+    #[test]
+    fn invalid_assignee_selection_is_rejected_before_persistence() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let result = block_on(LiveWorkspace::initialize(
+            JiraSiteId::new("site").expect("valid site"),
+            vec![account("account-a"), account("account-a")],
+            jira,
+            cache.clone(),
+        ));
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == ErrorKind::InvalidInput
+        ));
+        assert!(
+            block_on(cache.list(&JiraSiteId::new("site").expect("valid site")))
+                .expect("list sets")
+                .is_empty()
+        );
+
+        let empty_result = block_on(LiveWorkspace::initialize(
+            JiraSiteId::new("site").expect("valid site"),
+            Vec::new(),
+            Arc::new(FakeJira::default()),
+            cache,
+        ));
+        assert!(matches!(
+            empty_result,
+            Err(error) if error.kind() == ErrorKind::InvalidInput
+        ));
+    }
+
+    #[test]
+    fn failed_first_refresh_records_state_but_next_success_is_baseline() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira.clone(), cache);
+        let cancellation = CancellationToken::new();
+
+        let first = block_on(workspace.refresh(&cancellation));
+        assert!(matches!(
+            first,
+            Err(error) if error.kind() == ErrorKind::Upstream
+        ));
+
+        jira.push_page(page(issue("Recovered summary")));
+        let second = block_on(workspace.refresh(&cancellation)).expect("baseline retry");
+        assert_eq!(second.outcome.mode, SyncMode::Baseline);
+        assert_eq!(second.outcome.events_inserted, 0);
+        assert!(second.cached.events.is_empty());
+    }
+}
