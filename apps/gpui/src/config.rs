@@ -7,6 +7,7 @@
 
 use std::{env, fmt, sync::Arc};
 
+use jira_application::{CancellationToken, ErrorKind, JiraReadPort};
 use jira_domain::{AccountId, JiraSiteId};
 use jira_http::{ApiTokenCredentials, ConfigError, JiraBaseUrl, JiraHttpClient};
 use jira_storage::SqliteStore;
@@ -42,6 +43,7 @@ pub enum StartupError {
     InvalidSiteId,
     InvalidBaseUrl,
     InvalidCredentials,
+    CurrentUserUnavailable,
     InvalidAssignees,
     DuplicateAssignees,
     ClientUnavailable,
@@ -55,6 +57,9 @@ impl fmt::Display for StartupError {
             Self::InvalidSiteId => "Jira configuration has an invalid site ID",
             Self::InvalidBaseUrl => "Jira configuration has an invalid HTTPS Atlassian URL",
             Self::InvalidCredentials => "Jira configuration has invalid credentials",
+            Self::CurrentUserUnavailable => {
+                "Jira account could not be verified; check the site URL and credentials"
+            }
             Self::InvalidAssignees => "Jira configuration has invalid assignee account IDs",
             Self::DuplicateAssignees => "Jira configuration repeats an assignee account ID",
             Self::ClientUnavailable => "the Jira client could not be initialized",
@@ -94,22 +99,21 @@ pub fn startup_from_environment() -> StartupSelection {
 /// The site ID used by the local cache is derived from the validated Atlassian
 /// hostname. This keeps the UI independent of Jira's internal cloud ID while
 /// preserving a stable cache partition for each Jira site.
-pub fn live_session_from_manual_configuration(
+pub async fn live_session_from_manual_configuration(
     base_url: String,
     email: String,
     api_token: String,
-    assignees: String,
 ) -> Result<LiveSession, StartupError> {
-    live_session_from_manual_configuration_with_store(base_url, email, api_token, assignees, || {
+    live_session_from_manual_configuration_with_store(base_url, email, api_token, || {
         local_data::open_store().map_err(|_| StartupError::StorageUnavailable)
     })
+    .await
 }
 
-fn live_session_from_manual_configuration_with_store<F>(
+async fn live_session_from_manual_configuration_with_store<F>(
     base_url: String,
     email: String,
     api_token: String,
-    assignees: String,
     store_factory: F,
 ) -> Result<LiveSession, StartupError>
 where
@@ -122,14 +126,50 @@ where
         .ok_or(StartupError::InvalidBaseUrl)?;
     let site_id = JiraSiteId::new(host.to_owned()).map_err(|_| StartupError::InvalidBaseUrl)?;
 
-    build_live_session(
+    let credentials =
+        ApiTokenCredentials::new(email, api_token).map_err(|_| StartupError::InvalidCredentials)?;
+    let site_label = base_url.clone();
+    let jira = JiraHttpClient::new(site_id.clone(), base_url, credentials)
+        .map(Arc::new)
+        .map_err(|error| match error {
+            ConfigError::InvalidBaseUrl => StartupError::InvalidBaseUrl,
+            _ => StartupError::ClientUnavailable,
+        })?;
+    let assignee = resolve_initial_assignee(jira.as_ref(), &site_id).await?;
+    let cache = store_factory()?;
+
+    Ok(LiveSession {
         site_id,
-        base_url,
-        email,
-        api_token,
-        assignees,
-        store_factory,
-    )
+        site_label,
+        assignees: vec![assignee],
+        jira,
+        cache,
+    })
+}
+
+/// Resolves the one initial assignee used by interactive onboarding.
+///
+/// Keeping this operation at the application-port seam makes onboarding
+/// testable without an HTTP server and ensures the UI never asks users to
+/// discover or paste an Atlassian account ID.
+async fn resolve_initial_assignee(
+    jira: &dyn JiraReadPort,
+    site_id: &JiraSiteId,
+) -> Result<AccountId, StartupError> {
+    let cancellation = CancellationToken::new();
+    let user = jira
+        .fetch_current_user(site_id, &cancellation)
+        .await
+        .map_err(|error| match error.kind() {
+            ErrorKind::Authentication | ErrorKind::Authorization => {
+                StartupError::InvalidCredentials
+            }
+            _ => StartupError::CurrentUserUnavailable,
+        })?;
+    if user.site_id != *site_id {
+        return Err(StartupError::CurrentUserUnavailable);
+    }
+    Ok(user.account_id)
 }
 
 fn startup_from_values(values: EnvironmentValues) -> StartupSelection {
@@ -232,7 +272,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use futures_lite::future::block_on;
-    use jira_application::IssueCachePort;
+    use jira_application::{
+        ApplicationError, CancellationToken, IssueCachePort, IssueFetchRequest, IssuePage,
+        PortFuture, UserSearchRequest,
+    };
+    use jira_domain::{Issue, IssueId, User};
     use jira_storage::SqliteStore;
 
     use super::*;
@@ -273,81 +317,100 @@ mod tests {
         })
     }
 
-    fn in_memory_manual(
-        base_url: &str,
-        email: &str,
-        api_token: &str,
-        assignees: &str,
-    ) -> Result<LiveSession, StartupError> {
-        live_session_from_manual_configuration_with_store(
-            base_url.to_owned(),
-            email.to_owned(),
-            api_token.to_owned(),
-            assignees.to_owned(),
-            || {
-                SqliteStore::in_memory()
-                    .map(Arc::new)
-                    .map_err(|_| StartupError::StorageUnavailable)
-            },
-        )
+    #[derive(Clone)]
+    struct FakeCurrentUser {
+        result: Result<User, ApplicationError>,
+    }
+
+    impl JiraReadPort for FakeCurrentUser {
+        fn fetch_current_user<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, User> {
+            Box::pin(std::future::ready(self.result.clone()))
+        }
+
+        fn search_users<'a>(
+            &'a self,
+            _request: &'a UserSearchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<User>> {
+            Box::pin(std::future::ready(Ok(Vec::new())))
+        }
+
+        fn fetch_issue_page<'a>(
+            &'a self,
+            _request: &'a IssueFetchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, IssuePage> {
+            Box::pin(std::future::ready(Err(ApplicationError::new(
+                ErrorKind::Internal,
+                "not used by onboarding",
+            ))))
+        }
+
+        fn fetch_issues_by_id<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _issue_ids: &'a [IssueId],
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<Issue>> {
+            Box::pin(std::future::ready(Ok(Vec::new())))
+        }
     }
 
     #[test]
-    fn manual_configuration_builds_live_session() {
-        let session = in_memory_manual(
-            "https://example.atlassian.net",
-            "developer@example.com",
-            "token-that-must-not-escape",
-            "account-a, account-b",
-        )
-        .expect("manual configuration should build");
+    fn manual_onboarding_uses_authenticated_account_as_only_assignee() {
+        let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
+        let user = User::new(
+            site_id.clone(),
+            AccountId::new("712020:authenticated").expect("account"),
+            "Ada Lovelace",
+            None,
+            true,
+        );
+        let jira = FakeCurrentUser { result: Ok(user) };
 
-        assert_eq!(session.site_id.as_str(), "example.atlassian.net");
-        assert_eq!(session.site_label, "https://example.atlassian.net");
-        assert_eq!(session.assignees.len(), 2);
+        let assignee = block_on(resolve_initial_assignee(&jira, &site_id))
+            .expect("current user should resolve");
+        assert_eq!(assignee.as_str(), "712020:authenticated");
     }
 
     #[test]
-    fn manual_configuration_derives_site_id_from_url_host() {
-        let session = in_memory_manual(
-            "https://my-company.atlassian.net/",
-            "developer@example.com",
-            "token",
-            "account-a",
-        )
-        .expect("manual configuration should build");
+    fn manual_onboarding_reports_safe_identity_errors() {
+        let site_id = JiraSiteId::new("example.atlassian.net").expect("site");
+        let jira = FakeCurrentUser {
+            result: Err(ApplicationError::new(
+                ErrorKind::Authentication,
+                "request contained token-that-must-not-escape",
+            )),
+        };
 
-        assert_eq!(session.site_id.as_str(), "my-company.atlassian.net");
+        let error = block_on(resolve_initial_assignee(&jira, &site_id)).expect_err("auth error");
+        assert_eq!(error, StartupError::InvalidCredentials);
+        assert!(!error.to_string().contains("token-that-must-not-escape"));
     }
 
     #[test]
     fn manual_configuration_rejects_invalid_url_credentials_and_assignees() {
         assert!(matches!(
-            in_memory_manual(
-                "http://example.atlassian.net",
-                "developer@example.com",
-                "token",
-                "account-a",
-            ),
+            block_on(live_session_from_manual_configuration_with_store(
+                "http://example.atlassian.net".to_owned(),
+                "developer@example.com".to_owned(),
+                "token".to_owned(),
+                || Err(StartupError::StorageUnavailable),
+            )),
             Err(StartupError::InvalidBaseUrl)
         ));
         assert!(matches!(
-            in_memory_manual(
-                "https://example.atlassian.net",
-                "developer@example.com",
-                "",
-                "account-a",
-            ),
+            block_on(live_session_from_manual_configuration_with_store(
+                "https://example.atlassian.net".to_owned(),
+                "developer@example.com".to_owned(),
+                "".to_owned(),
+                || Err(StartupError::StorageUnavailable),
+            )),
             Err(StartupError::InvalidCredentials)
-        ));
-        assert!(matches!(
-            in_memory_manual(
-                "https://example.atlassian.net",
-                "developer@example.com",
-                "token",
-                "account-a,",
-            ),
-            Err(StartupError::InvalidAssignees)
         ));
     }
 
@@ -355,16 +418,15 @@ mod tests {
     fn manual_configuration_does_not_open_store_for_invalid_values() {
         let called = Arc::new(AtomicBool::new(false));
         let store_called = called.clone();
-        let result = live_session_from_manual_configuration_with_store(
+        let result = block_on(live_session_from_manual_configuration_with_store(
             "https://example.atlassian.net".to_owned(),
             "developer@example.com".to_owned(),
             "".to_owned(),
-            "account-a".to_owned(),
             move || {
                 store_called.store(true, Ordering::SeqCst);
                 Err(StartupError::StorageUnavailable)
             },
-        );
+        ));
 
         assert!(matches!(result, Err(StartupError::InvalidCredentials)));
         assert!(!called.load(Ordering::SeqCst));

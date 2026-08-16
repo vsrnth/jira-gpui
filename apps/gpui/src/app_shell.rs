@@ -6,8 +6,9 @@ use gpui::{
     Render, Styled as _, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _, button::Button, button::ButtonVariants as _, h_flex,
-    input::Input, input::InputState, scroll::ScrollableElement as _, v_flex,
+    ActiveTheme as _, Disableable as _, StyledExt as _, button::Button,
+    button::ButtonVariants as _, h_flex, input::Input, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 
 use crate::Dashboard;
@@ -19,8 +20,9 @@ pub struct AppShell {
     base_url: Entity<InputState>,
     email: Entity<InputState>,
     api_token: Entity<InputState>,
-    assignees: Entity<InputState>,
     connection_error: Option<String>,
+    connection_status: Option<String>,
+    connecting: bool,
 }
 
 impl AppShell {
@@ -29,13 +31,13 @@ impl AppShell {
             cx.new(|cx| InputState::new(window, cx).placeholder("https://your-team.atlassian.net"));
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
         let api_token = Self::new_api_token(window, cx);
-        let assignees =
-            cx.new(|cx| InputState::new(window, cx).placeholder("account-id-1, account-id-2"));
 
-        let (dashboard, connection_error) = match startup {
-            StartupSelection::Live(session) => (Some(Self::dashboard_from_live(session, cx)), None),
-            StartupSelection::Preview => (None, None),
-            StartupSelection::ConfigurationError(error) => (None, Some(error.to_string())),
+        let (dashboard, connection_error, connection_status) = match startup {
+            StartupSelection::Live(session) => {
+                (Some(Self::dashboard_from_live(session, cx)), None, None)
+            }
+            StartupSelection::Preview => (None, None, None),
+            StartupSelection::ConfigurationError(error) => (None, Some(error.to_string()), None),
         };
 
         Self {
@@ -43,8 +45,9 @@ impl AppShell {
             base_url,
             email,
             api_token,
-            assignees,
             connection_error,
+            connection_status,
+            connecting: false,
         }
     }
 
@@ -61,28 +64,42 @@ impl AppShell {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connecting {
+            return;
+        }
         let base_url = self.base_url.read(cx).unmask_value().to_string();
         let email = self.email.read(cx).unmask_value().to_string();
         let api_token = self.api_token.read(cx).unmask_value().to_string();
-        let assignees = self.assignees.read(cx).unmask_value().to_string();
 
-        match live_session_from_manual_configuration(base_url, email, api_token, assignees) {
-            Ok(session) => {
-                // Replace the control so the secret and its edit history are
-                // discarded before handing the session to the dashboard. The
-                // HTTP client owns the credential for this session.
-                let old_api_token =
-                    std::mem::replace(&mut self.api_token, Self::new_api_token(window, cx));
-                drop(old_api_token);
-                self.connection_error = None;
-                self.dashboard = Some(Self::dashboard_from_live(session, cx));
-            }
-            Err(error) => {
-                // StartupError's Display implementation is intentionally
-                // redacted; don't expose request or credential details here.
-                self.connection_error = Some(error.to_string());
-            }
-        }
+        // Replace the control before dispatching the async request. This drops
+        // the masked input's edit history even when connection fails; a retry
+        // must enter a fresh token.
+        let old_api_token = std::mem::replace(&mut self.api_token, Self::new_api_token(window, cx));
+        drop(old_api_token);
+        self.connection_error = None;
+        self.connection_status = Some("Verifying Jira account…".to_owned());
+        self.connecting = true;
+
+        cx.spawn(async move |this, cx| {
+            let result = live_session_from_manual_configuration(base_url, email, api_token).await;
+            let _ = this.update(cx, |this, cx| {
+                this.connecting = false;
+                this.connection_status = None;
+                match result {
+                    Ok(session) => {
+                        this.connection_error = None;
+                        this.dashboard = Some(Self::dashboard_from_live(session, cx));
+                    }
+                    Err(error) => {
+                        // StartupError's Display implementation is intentionally
+                        // redacted; don't expose request or credential details here.
+                        this.connection_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -159,7 +176,7 @@ impl AppShell {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira Desk pulls issues, epics, and updates for the account IDs you provide. It never writes to Jira."),
+                                    .child("Jira Desk pulls issues, epics, and updates assigned to your Jira account. It never writes to Jira."),
                             ),
                     )
                     .when_some(error, |this, error| this.child(error))
@@ -192,23 +209,30 @@ impl AppShell {
                                         div()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("Internal API-token mode · use a token created without scopes. Scoped tokens require a future cloud-ID gateway flow. Token kept in memory for this session; not written to local storage"),
+                                            .child("Use an unscoped API token. The token is kept in memory for this session, never written to local storage or logged."),
                                     ),
                             )
-                            .child(Self::labeled_input(
-                                "Assignee account IDs",
-                                "Comma-separated Atlassian account IDs to follow",
-                                &self.assignees,
-                                cx.theme().muted_foreground,
-                            )),
                     )
                     .child(
                         v_flex()
                             .gap_2()
+                            .when_some(self.connection_status.as_ref(), |this, status| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(status.clone()),
+                                )
+                            })
                             .child(
                                 Button::new("connect-jira")
-                                    .label("Connect read-only")
+                                    .label(if self.connecting {
+                                        "Connecting…"
+                                    } else {
+                                        "Connect read-only"
+                                    })
                                     .primary()
+                                    .disabled(self.connecting)
                                     .w_full()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.connect(window, cx);

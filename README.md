@@ -37,14 +37,15 @@ cargo run -p jira-gpui
 ```
 
 The desktop opens a native Jira setup form when no configuration is available.
-Enter the Jira Cloud site URL, Atlassian account email, an API token created
-without scopes, and comma-separated assignee account IDs. The site hostname and
-site identity are derived from the URL. The token is masked, used only for the
-current session, removed from the input after a successful connection, held
-only by the in-memory HTTP client, and never stored locally or logged. For an
-internal development build, setting all five variables below remains available
-as an environment bootstrap and enables a read-only live workspace for the
-configured assignee account IDs. Live startup
+Enter the Jira Cloud site URL, Atlassian account email, and an unscoped API
+token. Jira Desk verifies the credentials with the authenticated-current-user
+endpoint and follows that account's issues as the initial user set; no account
+ID needs to be discovered or pasted. The token is masked, discarded from the
+input before connection starts, held only by the in-memory HTTP client, and
+never stored locally or logged. For an internal development build, setting all
+five variables below remains available as an environment bootstrap and enables
+a read-only live workspace for the explicitly configured assignee account IDs.
+Live startup
 opens the local SQLite cache, reuses a saved user set whose canonical member
 list matches the configured accounts, and loads cached issues and in-app update
 events before contacting Jira. The first successful refresh establishes a
@@ -96,8 +97,8 @@ The Linux release build will enable GPUI's Wayland backend only. X11 is not a
 supported runtime target. Production OAuth and the Linux runtime matrix remain
 outstanding; macOS is Phase 2.
 
-Validation includes 92 Linux-target workspace tests in an x86_64 Ubuntu 22.04
-container with Rust 1.95.0 (93 on the macOS host due to the non-Linux adapter
+Validation includes 93 Linux-target workspace tests in an x86_64 Ubuntu 22.04
+container with Rust 1.95.0 (94 on the macOS host due to the non-Linux adapter
 fallback test), rustfmt, warning-denied production Clippy, metadata checks, and
 the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
 pinned tools/runtime; its checksum, extracted contents, required files, and
