@@ -18,6 +18,8 @@ jobs:
     name: Linux x86_64 Wayland AppImage
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,6 +55,17 @@ jobs:
           rustup default 1.95.0
           rustc --version
           cargo --version
+
+      - name: Cache Cargo dependencies and build output
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-
 
       - name: Validate desktop and AppStream metadata
         run: |
