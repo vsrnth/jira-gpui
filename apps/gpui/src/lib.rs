@@ -13,4 +13,4 @@ mod sample_data;
 
 pub use config::{StartupSelection, startup_from_environment};
 pub use dashboard::Dashboard;
-pub use live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult};
+pub use live_workspace::{CachedWorkspace, FeedActionResult, LiveWorkspace, RefreshResult};

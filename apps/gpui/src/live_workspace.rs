@@ -12,7 +12,7 @@ use jira_application::{
     NotificationRequest, PortFuture, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
     UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
 };
-use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp, UpdateEvent, UserSetId};
+use jira_domain::{AccountId, EventId, Issue, JiraSiteId, Timestamp, UpdateEvent, UserSetId};
 use jira_storage::SqliteStore;
 
 const WORKSPACE_NAME: &str = "Jira Desk workspace";
@@ -32,6 +32,13 @@ pub struct CachedWorkspace {
 pub struct RefreshResult {
     pub cached: CachedWorkspace,
     pub outcome: SyncOutcome,
+}
+
+/// Result returned after a local update-feed action and cache reload.
+#[derive(Clone, Debug)]
+pub struct FeedActionResult {
+    pub cached: CachedWorkspace,
+    pub changed: usize,
 }
 
 /// Presentation-independent live workspace coordinator.
@@ -186,6 +193,33 @@ impl LiveWorkspace {
         let cached = self.load_cached().await?;
         Ok(RefreshResult { cached, outcome })
     }
+
+    /// Mark every update in this workspace's site as read and reload local data.
+    ///
+    /// This action only updates the local cache; it never contacts Jira.
+    pub async fn mark_all_read(&self) -> Result<FeedActionResult, ApplicationError> {
+        let changed = self.feed.mark_all_read(&self.site_id).await?;
+        let cached = self.load_cached().await?;
+        Ok(FeedActionResult { cached, changed })
+    }
+
+    /// Set the read state for selected updates and reload local data.
+    ///
+    /// An empty selection is a harmless local no-op and avoids a feed mutation
+    /// call while still reloading cached data. This action never contacts Jira.
+    pub async fn mark_read(
+        &self,
+        event_ids: &[EventId],
+        read: bool,
+    ) -> Result<FeedActionResult, ApplicationError> {
+        let changed = if event_ids.is_empty() {
+            0
+        } else {
+            self.feed.mark_read(&self.site_id, event_ids, read).await?
+        };
+        let cached = self.load_cached().await?;
+        Ok(FeedActionResult { cached, changed })
+    }
 }
 
 fn validate_assignees(assignees: &[AccountId]) -> Result<(), ApplicationError> {
@@ -243,7 +277,9 @@ mod tests {
         ApplicationError, CancellationToken, ErrorKind, IssueFetchRequest, IssuePage, PortFuture,
         UserSearchRequest,
     };
-    use jira_domain::{IssueId, IssueKey, IssueType, JiraSiteId, Priority, Project, Status, User};
+    use jira_domain::{
+        IssueId, IssueKey, IssueType, JiraSiteId, Priority, Project, Status, UpdateReadState, User,
+    };
     use time::macros::datetime;
 
     use super::*;
@@ -396,6 +432,68 @@ mod tests {
         assert_eq!(reconciliation.outcome.mode, SyncMode::Reconciliation);
         assert_eq!(reconciliation.outcome.events_inserted, 1);
         assert_eq!(reconciliation.cached.events.len(), 1);
+    }
+
+    #[test]
+    fn feed_actions_are_local_and_persist_read_state() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue("Initial summary")));
+        jira.push_page(page(issue("Changed summary")));
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira.clone(), cache);
+        let cancellation = CancellationToken::new();
+
+        block_on(workspace.refresh(&cancellation)).expect("baseline refresh");
+        let reconciliation = block_on(workspace.refresh(&cancellation)).expect("reconciliation");
+        let event_id = reconciliation.cached.events[0].id.clone();
+        assert_eq!(
+            reconciliation.cached.events[0].read_state,
+            UpdateReadState::Unread
+        );
+        let requests_after_refresh = jira.request_count();
+
+        let marked_read = block_on(workspace.mark_read(std::slice::from_ref(&event_id), true))
+            .expect("mark read");
+        assert_eq!(marked_read.changed, 1);
+        assert_eq!(
+            marked_read.cached.events[0].read_state,
+            UpdateReadState::Read
+        );
+
+        let marked_read_again =
+            block_on(workspace.mark_read(std::slice::from_ref(&event_id), true)).expect("no-op");
+        assert_eq!(marked_read_again.changed, 0);
+        assert_eq!(
+            marked_read_again.cached.events[0].read_state,
+            UpdateReadState::Read
+        );
+
+        let marked_unread = block_on(workspace.mark_read(std::slice::from_ref(&event_id), false))
+            .expect("mark unread");
+        assert_eq!(marked_unread.changed, 1);
+        assert_eq!(
+            marked_unread.cached.events[0].read_state,
+            UpdateReadState::Unread
+        );
+
+        let marked_all_read = block_on(workspace.mark_all_read()).expect("mark all read");
+        assert_eq!(marked_all_read.changed, 1);
+        assert_eq!(
+            marked_all_read.cached.events[0].read_state,
+            UpdateReadState::Read
+        );
+
+        let empty = block_on(workspace.mark_read(&[], false)).expect("empty selection");
+        assert_eq!(empty.changed, 0);
+        assert_eq!(empty.cached.events[0].read_state, UpdateReadState::Read);
+        assert_eq!(
+            block_on(workspace.load_cached())
+                .expect("reload persisted feed")
+                .events[0]
+                .read_state,
+            UpdateReadState::Read
+        );
+        assert_eq!(jira.request_count(), requests_after_refresh);
     }
 
     #[test]
