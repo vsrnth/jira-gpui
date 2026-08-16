@@ -1,0 +1,22 @@
+//! Framework-independent vocabulary and invariants for the Jira desktop app.
+//!
+//! This crate intentionally contains no HTTP, database, or UI code. Adapters
+//! map their transport and persistence representations at the application edge.
+
+mod issue;
+mod update_event;
+mod user;
+mod user_set;
+mod value;
+
+pub use issue::{
+    Issue, IssueField, IssueLifecycle, IssueType, ParentIssue, Priority, Project, Status,
+};
+pub use update_event::{
+    ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,
+};
+pub use user::User;
+pub use user_set::{UserSet, UserSetError};
+pub use value::{
+    AccountId, DomainError, EventId, IssueId, IssueKey, JiraSiteId, Timestamp, UserSetId,
+};

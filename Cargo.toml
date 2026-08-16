@@ -1,0 +1,47 @@
+[workspace]
+members = [
+    "apps/gpui",
+    "crates/application",
+    "crates/domain",
+    "crates/jira",
+    "crates/storage",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# GPUI's compatible Zed revision uses std::hint::cold_path (stable in 1.95).
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+# Keep this source URL identical to gpui-component's declaration so Cargo
+# resolves one GPUI type universe. Cargo.lock pins it to the compatible commit.
+gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed" }
+gpui-component = { version = "0.5.2", git = "https://github.com/longbridge/gpui-component", rev = "bd833291311289f3468479d31b629d3de279d3d4" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+time = { version = "0.3.41", features = ["formatting", "macros", "parsing", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
+
+[profile.dev.package]
+gpui = { opt-level = 3 }
+gpui_platform = { opt-level = 3 }
+taffy = { opt-level = 3 }
