@@ -1,15 +1,18 @@
 //! Startup configuration for the native shell.
 //!
 //! The environment-backed API-token flow is intentionally an internal
-//! development bootstrap. The returned session owns only the constructed
-//! client; the token is consumed while building that client and is never kept
-//! as a separate application setting.
+//! development bootstrap. The returned session owns the constructed client
+//! and local cache; the token is consumed while building the client and is
+//! never kept as a separate application setting.
 
 use std::{env, fmt, sync::Arc};
 
 use jira_application::{IssuePullService, JiraReadPort};
 use jira_domain::{AccountId, JiraSiteId};
 use jira_http::{ApiTokenCredentials, ConfigError, JiraHttpClient};
+use jira_storage::SqliteStore;
+
+use crate::local_data;
 
 const ENV_BASE_URL: &str = "JIRA_BASE_URL";
 const ENV_SITE_ID: &str = "JIRA_SITE_ID";
@@ -30,6 +33,8 @@ pub struct LiveSession {
     pub(crate) site_label: String,
     pub(crate) assignees: Vec<AccountId>,
     pub(crate) jira: Arc<JiraHttpClient>,
+    #[allow(dead_code, reason = "dashboard cache wiring is a following slice")]
+    pub(crate) cache: Arc<SqliteStore>,
 }
 
 /// Safe, stable configuration errors suitable for display in the UI/logs.
@@ -42,6 +47,7 @@ pub enum StartupError {
     InvalidAssignees,
     DuplicateAssignees,
     ClientUnavailable,
+    StorageUnavailable,
 }
 
 impl fmt::Display for StartupError {
@@ -54,6 +60,7 @@ impl fmt::Display for StartupError {
             Self::InvalidAssignees => "Jira configuration has invalid assignee account IDs",
             Self::DuplicateAssignees => "Jira configuration repeats an assignee account ID",
             Self::ClientUnavailable => "the Jira client could not be initialized",
+            Self::StorageUnavailable => "local Jira Desk storage is unavailable",
         };
         formatter.write_str(message)
     }
@@ -92,6 +99,18 @@ pub fn startup_from_environment() -> StartupSelection {
 }
 
 fn startup_from_values(values: EnvironmentValues) -> StartupSelection {
+    startup_from_values_with_store(values, || {
+        local_data::open_store().map_err(|_| StartupError::StorageUnavailable)
+    })
+}
+
+fn startup_from_values_with_store<F>(
+    values: EnvironmentValues,
+    store_factory: F,
+) -> StartupSelection
+where
+    F: FnOnce() -> Result<Arc<SqliteStore>, StartupError>,
+{
     let configured = [
         values.base_url.is_some(),
         values.site_id.is_some(),
@@ -134,12 +153,17 @@ fn startup_from_values(values: EnvironmentValues) -> StartupSelection {
         }
         Err(_) => return StartupSelection::ConfigurationError(StartupError::ClientUnavailable),
     };
+    let cache = match store_factory() {
+        Ok(cache) => cache,
+        Err(error) => return StartupSelection::ConfigurationError(error),
+    };
 
     StartupSelection::Live(LiveSession {
         site_id,
         site_label,
         assignees,
         jira,
+        cache,
     })
 }
 
@@ -161,6 +185,12 @@ fn parse_assignees(value: &str) -> Result<Vec<AccountId>, StartupError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use futures_lite::future::block_on;
+    use jira_application::IssueCachePort;
+    use jira_storage::SqliteStore;
+
     use super::*;
 
     fn complete() -> EnvironmentValues {
@@ -183,15 +213,27 @@ mod tests {
 
     #[test]
     fn complete_configuration_builds_live_session() {
-        let selection = startup_from_values(complete());
+        let selection = startup_from_values_with_store(complete(), || {
+            SqliteStore::in_memory()
+                .map(Arc::new)
+                .map_err(|_| StartupError::StorageUnavailable)
+        });
         assert!(matches!(selection, StartupSelection::Live(_)));
+    }
+
+    fn in_memory_startup(values: EnvironmentValues) -> StartupSelection {
+        startup_from_values_with_store(values, || {
+            SqliteStore::in_memory()
+                .map(Arc::new)
+                .map_err(|_| StartupError::StorageUnavailable)
+        })
     }
 
     #[test]
     fn partial_configuration_is_rejected_without_values() {
         let mut values = complete();
         values.api_token = None;
-        let selection = startup_from_values(values);
+        let selection = in_memory_startup(values);
         assert!(matches!(
             selection,
             StartupSelection::ConfigurationError(StartupError::Incomplete)
@@ -203,14 +245,14 @@ mod tests {
         let mut empty = complete();
         empty.assignees = Some("account-a, ,account-b".to_owned());
         assert!(matches!(
-            startup_from_values(empty),
+            in_memory_startup(empty),
             StartupSelection::ConfigurationError(StartupError::InvalidAssignees)
         ));
 
         let mut duplicate = complete();
         duplicate.assignees = Some("account-a,account-a".to_owned());
         assert!(matches!(
-            startup_from_values(duplicate),
+            in_memory_startup(duplicate),
             StartupSelection::ConfigurationError(StartupError::DuplicateAssignees)
         ));
     }
@@ -219,12 +261,68 @@ mod tests {
     fn startup_errors_are_redacted() {
         let mut values = complete();
         values.site_id = None;
-        let selection = startup_from_values(values);
+        let selection = in_memory_startup(values);
         let StartupSelection::ConfigurationError(error) = selection else {
             panic!("expected configuration error");
         };
         let message = error.to_string();
         assert!(!message.contains("token-that-must-not-escape"));
         assert!(!message.contains("developer@example.com"));
+    }
+
+    #[test]
+    fn storage_factory_is_not_called_for_preview_or_invalid_configuration() {
+        let called = Arc::new(AtomicBool::new(false));
+        let preview_called = called.clone();
+        assert!(matches!(
+            startup_from_values_with_store(EnvironmentValues::default(), move || {
+                preview_called.store(true, Ordering::SeqCst);
+                Err(StartupError::StorageUnavailable)
+            }),
+            StartupSelection::Preview
+        ));
+        assert!(!called.load(Ordering::SeqCst));
+
+        let called = Arc::new(AtomicBool::new(false));
+        let invalid_called = called.clone();
+        let mut values = complete();
+        values.site_id = None;
+        assert!(matches!(
+            startup_from_values_with_store(values, move || {
+                invalid_called.store(true, Ordering::SeqCst);
+                Err(StartupError::StorageUnavailable)
+            }),
+            StartupSelection::ConfigurationError(StartupError::Incomplete)
+        ));
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn configured_live_session_contains_usable_cache() {
+        let StartupSelection::Live(session) = in_memory_startup(complete()) else {
+            panic!("expected live startup");
+        };
+        let site_id = JiraSiteId::new("cloud-site").expect("valid site");
+        let user_set_id = jira_domain::UserSetId::new("missing").expect("valid set");
+        assert!(
+            block_on(session.cache.sync_state(&site_id, &user_set_id))
+                .expect("cache query")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn storage_unavailable_is_safe_and_redacted() {
+        let selection =
+            startup_from_values_with_store(complete(), || Err(StartupError::StorageUnavailable));
+        let StartupSelection::ConfigurationError(error) = selection else {
+            panic!("expected storage configuration error");
+        };
+        assert_eq!(error, StartupError::StorageUnavailable);
+        let message = error.to_string();
+        assert_eq!(message, "local Jira Desk storage is unavailable");
+        assert!(!message.contains("token-that-must-not-escape"));
+        assert!(!message.contains("developer@example.com"));
+        assert!(!message.contains("/secret/jira-desk.sqlite3"));
     }
 }

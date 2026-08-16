@@ -8,6 +8,7 @@
 mod config;
 mod dashboard;
 mod live_workspace;
+mod local_data;
 mod presentation;
 mod sample_data;
 
