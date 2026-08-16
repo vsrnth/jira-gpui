@@ -331,6 +331,19 @@ mod tests {
     }
 
     impl JiraReadPort for FakeJira {
+        fn fetch_current_user<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, User> {
+            Box::pin(async {
+                Err(ApplicationError::new(
+                    ErrorKind::Internal,
+                    "fake does not implement current user",
+                ))
+            })
+        }
+
         fn search_users<'a>(
             &'a self,
             _request: &'a UserSearchRequest,

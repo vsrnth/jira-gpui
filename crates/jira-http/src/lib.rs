@@ -252,6 +252,38 @@ impl JiraHttpClient {
             .collect()
     }
 
+    async fn current_user_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        site_id: JiraSiteId,
+        max_response_bytes: usize,
+    ) -> Result<User, ApplicationError> {
+        let response = Self::current_user_request_builder(&client, url, &credentials)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let user: JiraUser = read_json(response, max_response_bytes).await?;
+        Self::map_current_user(site_id, user)
+    }
+
+    fn current_user_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+    ) -> reqwest::RequestBuilder {
+        client
+            .get(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "application/json")
+    }
+
+    fn map_current_user(site_id: JiraSiteId, user: JiraUser) -> Result<User, ApplicationError> {
+        IssueMapper.map_user(site_id, user).map_err(|_| {
+            ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid user data")
+        })
+    }
+
     async fn search_issue_page_request(
         client: Client,
         url: Url,
@@ -334,6 +366,30 @@ impl JiraHttpClient {
 }
 
 impl JiraReadPort for JiraHttpClient {
+    fn fetch_current_user<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, User> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.endpoint("rest/api/3/myself") {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let site_id = site_id.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::current_user_request(client, url, credentials, site_id, max).await
+        })
+    }
+
     fn search_users<'a>(
         &'a self,
         request: &'a UserSearchRequest,
@@ -668,5 +724,49 @@ mod tests {
     fn issue_id_pagination_has_a_finite_safety_bound() {
         assert!(MAX_ISSUE_ID_PAGES >= 2);
         assert!(MAX_ISSUE_ID_PAGES * 100 >= 1_000);
+    }
+
+    #[test]
+    fn current_user_request_targets_myself_and_maps_authenticated_identity() {
+        let site_id = JiraSiteId::new("example-site").expect("site");
+        let credentials =
+            ApiTokenCredentials::new("person@example.com", "token").expect("credentials");
+        let client = Client::new();
+        let request = JiraHttpClient::current_user_request_builder(
+            &client,
+            Url::parse("https://example.atlassian.net/rest/api/3/myself").expect("test URL"),
+            &credentials,
+        )
+        .build()
+        .expect("test request");
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(request.url().path(), "/rest/api/3/myself");
+        assert_eq!(
+            request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic cGVyc29uQGV4YW1wbGUuY29tOnRva2Vu")
+        );
+
+        let remote_user: JiraUser = serde_json::from_str(
+            r#"{
+                "accountId": "557058:abc-123",
+                "displayName": "Ada Lovelace",
+                "active": true,
+                "avatarUrls": {"48x48": "https://avatar.example.test/ada.png"}
+            }"#,
+        )
+        .expect("current user JSON");
+        let user = JiraHttpClient::map_current_user(site_id.clone(), remote_user)
+            .expect("current user mapping");
+        assert_eq!(user.site_id, site_id);
+        assert_eq!(user.account_id.as_str(), "557058:abc-123");
+        assert_eq!(user.display_name, "Ada Lovelace");
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://avatar.example.test/ada.png")
+        );
+        assert!(user.active);
     }
 }

@@ -15,6 +15,12 @@ pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationEr
 
 /// Read-only Jira gateway. Its implementation may own any async runtime it needs.
 pub trait JiraReadPort: Send + Sync {
+    fn fetch_current_user<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, User>;
+
     fn search_users<'a>(
         &'a self,
         request: &'a UserSearchRequest,
