@@ -3351,6 +3351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jira-desktop-notifications"
+version = "0.1.0"
+dependencies = [
+ "futures-lite",
+ "jira-application",
+ "jira-domain",
+ "notify-rust",
+ "time",
+]
+
+[[package]]
 name = "jira-domain"
 version = "0.1.0"
 dependencies = [

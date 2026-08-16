@@ -1,0 +1,21 @@
+[package]
+name = "jira-desktop-notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+jira-application = { path = "../application" }
+jira-domain = { path = "../domain" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust.workspace = true
+
+[dev-dependencies]
+futures-lite.workspace = true
+time.workspace = true
+
+[lints]
+workspace = true
