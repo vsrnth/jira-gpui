@@ -1,0 +1,156 @@
+name: Linux AppImage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    name: Linux x86_64 Wayland AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install Wayland build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            clang \
+            cmake \
+            desktop-file-utils \
+            jq \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libssl-dev \
+            libwayland-dev \
+            libvulkan1 \
+            libxkbcommon-dev \
+            libxml2-utils \
+            libzstd-dev \
+            pkg-config \
+            wayland-protocols
+
+      - name: Install Rust 1.95.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
+          rustup default 1.95.0
+          rustc --version
+          cargo --version
+
+      - name: Validate desktop and AppStream metadata
+        run: |
+          desktop-file-validate packaging/appimage/dev.jiradesk.JiraDesk.desktop
+          xmllint --noout \
+            assets/app-icon/dev.jiradesk.JiraDesk.svg \
+            packaging/appimage/dev.jiradesk.JiraDesk.metainfo.xml
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test workspace
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Check production code with Clippy
+        run: cargo clippy --workspace --lib --bins --locked -- -D warnings
+
+      - name: Guard against gpui_linux X11 feature
+        shell: bash
+        run: |
+          set -euo pipefail
+          tree=$(cargo tree --target x86_64-unknown-linux-gnu -e features --locked)
+          printf '%s\n' "$tree"
+          if grep -Fq 'gpui_linux feature "x11"' <<<"$tree"; then
+            echo 'gpui_linux x11 feature must not be enabled' >&2
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --locked -p jira-gpui
+
+      - name: Download and verify AppImage tools
+        shell: bash
+        env:
+          TOOL_DIR: ${{ runner.temp }}/jira-desk-appimage-tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOL_DIR"
+
+          download_and_verify() {
+            local url="$1"
+            local destination="$2"
+            local expected="$3"
+            curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+              "$url" --output "$destination"
+            printf '%s  %s\n' "$expected" "$destination" | sha256sum --check --status
+            chmod 755 "$destination"
+          }
+
+          download_and_verify \
+            'https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage' \
+            "$TOOL_DIR/linuxdeploy" \
+            'c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d'
+          download_and_verify \
+            'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage' \
+            "$TOOL_DIR/appimagetool" \
+            'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0'
+          download_and_verify \
+            'https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64' \
+            "$TOOL_DIR/runtime-x86_64" \
+            '1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf'
+
+      - name: Build AppImage
+        shell: bash
+        env:
+          TOOL_DIR: ${{ runner.temp }}/jira-desk-appimage-tools
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "jira-gpui") | .version')"
+          test -n "$VERSION"
+          LINUXDEPLOY="$TOOL_DIR/linuxdeploy" \
+          APPIMAGETOOL="$TOOL_DIR/appimagetool" \
+          APPIMAGE_RUNTIME="$TOOL_DIR/runtime-x86_64" \
+          VERSION="$VERSION" \
+          packaging/appimage/build-appimage.sh --skip-build
+
+      - name: Inspect AppImage without FUSE
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage=$(find dist -maxdepth 1 -type f -name 'Jira_Desk-*-x86_64.AppImage' -print -quit)
+          test -n "$appimage"
+          checksum="${appimage}.sha256"
+          (cd "$(dirname "$appimage")" && sha256sum --check "$(basename "$checksum")")
+          extract_dir=$(mktemp -d "$RUNNER_TEMP/jira-desk-appimage-extract.XXXXXXXX")
+          trap 'rm -rf -- "$extract_dir"' EXIT
+          cd "$extract_dir"
+          "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/jira-gpui
+          test -f squashfs-root/usr/share/applications/dev.jiradesk.JiraDesk.desktop
+          test -f squashfs-root/usr/share/metainfo/dev.jiradesk.JiraDesk.metainfo.xml
+          test -f squashfs-root/usr/share/licenses/jira-gpui/LICENSE
+
+      - name: Upload AppImage artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jira-desk-${{ github.sha }}-x86_64
+          path: |
+            dist/Jira_Desk-*-x86_64.AppImage
+            dist/Jira_Desk-*-x86_64.AppImage.sha256
+          if-no-files-found: error
