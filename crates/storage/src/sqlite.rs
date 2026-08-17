@@ -1266,7 +1266,8 @@ mod tests {
     };
     use jira_domain::{
         AccountId, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery,
-        Priority, Project, Status, Timestamp, UpdateEvent, UpdateKind, UpdateReadState, UserSetId,
+        Priority, Project, RichBlock, RichInline, RichTextDocument, Status, Timestamp, UpdateEvent,
+        UpdateKind, UpdateReadState, UserSetId,
     };
     use tempfile::tempdir;
     use time::macros::datetime;
@@ -1457,6 +1458,16 @@ mod tests {
             datetime!(2026-01-03 00:00:00.123 UTC),
         );
         cached_issue.description_text = Some("description".into());
+        cached_issue.assignee_display_name = Some("Amina Yusuf".into());
+        cached_issue.reporter = Some(AccountId::new("account-reporter").expect("valid account"));
+        cached_issue.reporter_display_name = Some("Nina Smith".into());
+        cached_issue.rich_description = Some(RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: "A bounded rich description.".into(),
+                marks: vec![],
+            }])],
+            false,
+        ));
         cached_issue.resolution_name = Some("Done".into());
         cached_issue.lifecycle = jira_domain::IssueLifecycle::RemovedFromView;
         let event = UpdateEvent::new(
@@ -1491,10 +1502,19 @@ mod tests {
                 .inserted_events
                 .is_empty()
         );
+        let restored = block_on(store.get_issue(&site_id, &cached_issue.id))
+            .expect("get issue")
+            .expect("stored issue");
         assert_eq!(
-            block_on(store.get_issue(&site_id, &cached_issue.id)).expect("get issue"),
-            Some(cached_issue.clone())
+            restored.assignee_display_name.as_deref(),
+            Some("Amina Yusuf")
         );
+        assert_eq!(
+            restored.reporter_display_name.as_deref(),
+            Some("Nina Smith")
+        );
+        assert_eq!(restored.rich_description, cached_issue.rich_description);
+        assert_eq!(restored, cached_issue);
         assert_eq!(
             block_on(store.issues_for_user_set(&site_id, &user_set_id)).expect("members"),
             vec![cached_issue]

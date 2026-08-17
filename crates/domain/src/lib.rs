@@ -5,6 +5,7 @@
 
 mod issue;
 mod issue_detail;
+mod rich_text;
 mod update_event;
 mod user;
 mod user_set;
@@ -16,6 +17,7 @@ pub use issue::{
 pub use issue_detail::{
     AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,
 };
+pub use rich_text::{PanelKind, RichBlock, RichInline, RichListItem, RichMark, RichTextDocument};
 pub use update_event::{
     ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,
 };

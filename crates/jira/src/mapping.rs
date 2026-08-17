@@ -5,11 +5,12 @@ use crate::models::{
 use jira_application::{IssueCommentsPage, PageCursor};
 use jira_domain::{
     AccountId, AttachmentMetadata, Issue, IssueComment, IssueCommentAuthor, IssueDetailCore,
-    IssueId, IssueKey, IssueType, JiraSiteId, ParentIssue, Priority, Project, Status, Timestamp,
-    User,
+    IssueId, IssueKey, IssueType, JiraSiteId, PanelKind, ParentIssue, Priority, Project, RichBlock,
+    RichInline, RichListItem, RichMark, RichTextDocument, Status, Timestamp, User,
 };
 use serde_json::Value;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
+use url::Url;
 
 /// Converts Jira transport values to portable records. These records have no HTTP, UI, or
 /// persistence concerns and are a deliberately narrow adapter seam for a future Tauri UI.
@@ -22,11 +23,11 @@ impl IssueMapper {
         site_id: JiraSiteId,
         issue: JiraIssue,
     ) -> Result<IssueDetailCore, MappingError> {
-        let description = issue
-            .fields
-            .description
+        let rich_description = issue.fields.description.as_ref().and_then(parse_adf);
+        let description = rich_description
             .as_ref()
-            .and_then(adf_to_plain_text);
+            .map(RichTextDocument::plain_text)
+            .filter(|text| !text.is_empty());
         let attachments = issue
             .fields
             .attachment
@@ -35,6 +36,7 @@ impl IssueMapper {
             .collect::<Result<Vec<_>, _>>()?;
         let mut domain_issue = self.map_domain_issue(site_id, issue)?;
         domain_issue.description_text = description;
+        domain_issue.rich_description = rich_description;
         IssueDetailCore::new(domain_issue, attachments).map_err(MappingError::InvalidDomainValue)
     }
 
@@ -122,8 +124,12 @@ impl IssueMapper {
             })
             .transpose()?;
 
-        let assignee = issue.fields.assignee.map(domain_account_id).transpose()?;
-        let reporter = issue.fields.reporter.map(domain_account_id).transpose()?;
+        let assignee_user = issue.fields.assignee;
+        let reporter_user = issue.fields.reporter;
+        let assignee = assignee_user.as_ref().map(domain_account_id).transpose()?;
+        let reporter = reporter_user.as_ref().map(domain_account_id).transpose()?;
+        let assignee_display_name = assignee_user.as_ref().and_then(valid_display_name);
+        let reporter_display_name = reporter_user.as_ref().and_then(valid_display_name);
         let priority = issue
             .fields
             .priority
@@ -167,16 +173,18 @@ impl IssueMapper {
             updated_at,
             due_date,
         );
+        domain_issue.assignee_display_name = assignee_display_name;
+        domain_issue.reporter_display_name = reporter_display_name;
         domain_issue.resolution_name = issue.fields.resolution.map(|resolution| resolution.name);
         Ok(domain_issue)
     }
 
     pub fn map_user(&self, site_id: JiraSiteId, user: JiraUser) -> Result<User, MappingError> {
-        let account_id = domain_account_id(user.clone())?;
+        let account_id = domain_account_id(&user)?;
         Ok(User::new(
             site_id,
             account_id,
-            user.display_name,
+            valid_display_name(&user).unwrap_or_else(|| "Unknown user".to_owned()),
             avatar_url(&user.avatar_urls),
             user.active,
         ))
@@ -226,6 +234,11 @@ impl IssueMapper {
 }
 
 const MAX_ADF_TEXT: usize = 1_000_000;
+const MAX_ADF_DEPTH: usize = 64;
+const MAX_ADF_NODES: usize = 10_000;
+const MAX_LINK_HREF_BYTES: usize = 2_048;
+const MAX_LINK_TITLE_BYTES: usize = 512;
+const UNSUPPORTED_CONTENT: &str = "[unsupported Jira content]";
 
 fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, MappingError> {
     AttachmentMetadata::new(
@@ -238,108 +251,437 @@ fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, Map
 }
 
 fn map_comment(comment: JiraComment) -> Result<IssueComment, MappingError> {
-    let body = comment
-        .body
+    let rich_body = comment.body.as_ref().and_then(parse_adf);
+    let body = rich_body
         .as_ref()
-        .and_then(adf_comment_text)
+        .map(RichTextDocument::plain_text)
+        .filter(|text| !text.is_empty())
+        .or_else(|| comment.body.as_ref().and_then(adf_comment_text))
         .ok_or(MappingError::MissingRequiredField("comment body"))?;
     let author = comment.author.map(map_comment_author).transpose()?;
     let created_at = parse_timestamp(comment.created)?;
     let updated_at = comment.updated.map(parse_timestamp).transpose()?;
-    IssueComment::new(comment.id, author, body, created_at, updated_at, Vec::new())
-        .map_err(MappingError::InvalidDomainValue)
+    let mut mapped =
+        IssueComment::new(comment.id, author, body, created_at, updated_at, Vec::new())
+            .map_err(MappingError::InvalidDomainValue)?;
+    mapped.rich_body = rich_body;
+    Ok(mapped)
 }
 
 fn map_comment_author(user: JiraUser) -> Result<IssueCommentAuthor, MappingError> {
-    let display_name = user.display_name.trim();
-    // Display names are optional metadata. Invalid or oversized values must not discard a
-    // comment whose stable account ID is valid.
-    let display_name =
-        (!display_name.is_empty() && display_name.len() <= 255).then_some(display_name.to_owned());
-    let account_id = domain_account_id(user)?;
+    let display_name = valid_display_name(&user);
+    let account_id = domain_account_id(&user)?;
     IssueCommentAuthor::new(account_id, display_name).map_err(MappingError::InvalidDomainValue)
 }
 
-/// Extracts only user-visible ADF text, preserving block boundaries while ignoring links,
-/// mentions, embedded media, and all other raw JSON. The output is bounded before it reaches
-/// the domain/cache boundary.
+/// Extracts the safe plain-text projection of a bounded ADF document.
 pub fn adf_to_plain_text(value: &Value) -> Option<String> {
-    if !value.is_object() {
-        return None;
-    }
-    let mut output = String::new();
-    append_adf_text(value, &mut output);
-    let mut normalized = String::with_capacity(output.len());
-    for character in output.chars() {
-        if character == '\n' && normalized.ends_with('\n') {
-            continue;
-        }
-        normalized.push(character);
-    }
-    let trimmed = normalized.trim().to_owned();
-    (!trimmed.is_empty()).then_some(trimmed)
+    parse_adf(value)
+        .map(|document| document.plain_text())
+        .filter(|text| !text.is_empty())
 }
 
 fn adf_comment_text(value: &Value) -> Option<String> {
     adf_to_plain_text(value).or_else(|| {
         let object = value.as_object()?;
         let content = object.get("content")?.as_array()?;
-        (!content.is_empty()).then(|| "[unsupported Jira content]".to_owned())
+        (!content.is_empty()).then(|| UNSUPPORTED_CONTENT.to_owned())
     })
 }
 
-fn append_adf_text(value: &Value, output: &mut String) {
-    if output.len() >= MAX_ADF_TEXT {
-        return;
+/// Parses a Jira ADF document into a bounded transport-neutral representation.
+///
+/// Invalid roots are rejected. Unsupported nodes become safe placeholders, and no raw attrs,
+/// URLs, or account IDs are ever copied into visible fallback text.
+pub fn parse_adf(value: &Value) -> Option<RichTextDocument> {
+    let object = value.as_object()?;
+    if object.get("type").and_then(Value::as_str) != Some("doc")
+        || object.get("version").and_then(Value::as_u64) != Some(1)
+    {
+        return None;
     }
-    let Some(object) = value.as_object() else {
-        return;
-    };
-    match object.get("type").and_then(Value::as_str) {
-        Some("text") => {
-            if let Some(text) = object.get("text").and_then(Value::as_str) {
-                append_limited(output, text);
-            }
+    let content = object.get("content")?.as_array()?;
+    let mut state = AdfParserState::default();
+    let blocks = parse_blocks(content, 1, &mut state);
+    Some(RichTextDocument::new(blocks, state.truncated))
+}
+
+#[derive(Default)]
+struct AdfParserState {
+    nodes: usize,
+    text_bytes: usize,
+    truncated: bool,
+}
+
+impl AdfParserState {
+    fn visit(&mut self) -> bool {
+        if self.nodes >= MAX_ADF_NODES {
+            self.truncated = true;
+            return false;
         }
-        Some("hardBreak") => append_limited(output, "\n"),
-        Some("mention") => {
-            if let Some(attrs) = object.get("attrs").and_then(Value::as_object) {
-                for key in ["displayText", "displayName", "text"] {
-                    if let Some(text) = attrs.get(key).and_then(Value::as_str) {
-                        append_limited(output, text);
-                        break;
-                    }
-                }
-            }
+        self.nodes += 1;
+        true
+    }
+
+    fn text(&mut self, value: &str) -> String {
+        let remaining = MAX_ADF_TEXT.saturating_sub(self.text_bytes);
+        if remaining == 0 {
+            self.truncated = true;
+            return String::new();
         }
-        _ => {
-            if let Some(content) = object.get("content").and_then(Value::as_array) {
-                for child in content {
-                    append_adf_text(child, output);
-                }
-                if matches!(
-                    object.get("type").and_then(Value::as_str),
-                    Some("paragraph" | "heading" | "blockquote" | "listItem" | "codeBlock")
-                ) {
-                    append_limited(output, "\n");
-                }
-            }
+        let end = value
+            .char_indices()
+            .take_while(|(index, character)| index + character.len_utf8() <= remaining)
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        self.text_bytes += end;
+        if end < value.len() {
+            self.truncated = true;
         }
+        value[..end].to_owned()
     }
 }
 
-fn append_limited(output: &mut String, value: &str) {
-    let remaining = MAX_ADF_TEXT.saturating_sub(output.len());
-    if remaining == 0 {
-        return;
+fn parse_blocks(values: &[Value], depth: usize, state: &mut AdfParserState) -> Vec<RichBlock> {
+    values
+        .iter()
+        .filter_map(|value| parse_block(value, depth, state))
+        .collect()
+}
+
+fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState) -> Option<RichBlock> {
+    if depth > MAX_ADF_DEPTH || !state.visit() {
+        state.truncated = true;
+        return None;
     }
-    let end = value
-        .char_indices()
-        .take_while(|(index, character)| index + character.len_utf8() <= remaining)
-        .map(|(index, character)| index + character.len_utf8())
-        .last()
-        .unwrap_or(0);
-    output.push_str(&value[..end]);
+    let Some(object) = value.as_object() else {
+        state.truncated = true;
+        return Some(RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        });
+    };
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content = object.get("content").and_then(Value::as_array);
+    let block = match kind {
+        "paragraph" => match content {
+            Some(content) => RichBlock::Paragraph(parse_inlines(content, depth + 1, state)),
+            None => malformed_block(state),
+        },
+        "heading" => match content {
+            Some(content) => RichBlock::Heading {
+                level: object
+                    .get("attrs")
+                    .and_then(Value::as_object)
+                    .and_then(|attrs| attrs.get("level"))
+                    .and_then(Value::as_u64)
+                    .and_then(|level| u8::try_from(level).ok())
+                    .filter(|level| (1..=6).contains(level))
+                    .unwrap_or(1),
+                content: parse_inlines(content, depth + 1, state),
+            },
+            None => malformed_block(state),
+        },
+        "bulletList" => match content {
+            Some(content) => RichBlock::BulletList(parse_list_items(content, depth + 1, state)),
+            None => malformed_block(state),
+        },
+        "orderedList" => match content {
+            Some(content) => RichBlock::OrderedList {
+                order: object
+                    .get("attrs")
+                    .and_then(Value::as_object)
+                    .and_then(|attrs| attrs.get("order"))
+                    .and_then(Value::as_u64)
+                    .and_then(|order| u32::try_from(order).ok())
+                    .unwrap_or(1),
+                items: parse_list_items(content, depth + 1, state),
+            },
+            None => malformed_block(state),
+        },
+        "listItem" => match content {
+            Some(content) => RichBlock::BlockQuote(parse_blocks(content, depth + 1, state)),
+            None => malformed_block(state),
+        },
+        "codeBlock" => match content {
+            Some(content) => RichBlock::CodeBlock {
+                language: object
+                    .get("attrs")
+                    .and_then(Value::as_object)
+                    .and_then(|attrs| attrs.get("language"))
+                    .and_then(Value::as_str)
+                    .map(|language| state.text(language))
+                    .filter(|language| !language.is_empty()),
+                text: parse_code_text(content, depth + 1, state),
+            },
+            None => malformed_block(state),
+        },
+        "blockquote" => match content {
+            Some(content) => RichBlock::BlockQuote(parse_blocks(content, depth + 1, state)),
+            None => malformed_block(state),
+        },
+        "panel" => {
+            let kind = object
+                .get("attrs")
+                .and_then(Value::as_object)
+                .and_then(|attrs| attrs.get("panelType"))
+                .and_then(Value::as_str)
+                .and_then(panel_kind);
+            match (kind, content) {
+                (Some(kind), Some(content)) => RichBlock::Panel {
+                    kind,
+                    content: parse_blocks(content, depth + 1, state),
+                },
+                _ => malformed_block(state),
+            }
+        }
+        "doc" => RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        },
+        "media" | "mediaSingle" | "mediaGroup" | "mediaInline" => RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        },
+        "rule" | "table" | "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date"
+        | "status" | "inlineCard" | "expand" | "nestedExpand" => RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        },
+        _ => RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        },
+    };
+    Some(block)
+}
+
+fn malformed_block(state: &mut AdfParserState) -> RichBlock {
+    state.truncated = true;
+    RichBlock::Placeholder {
+        label: UNSUPPORTED_CONTENT.to_owned(),
+    }
+}
+
+fn parse_list_items(
+    values: &[Value],
+    depth: usize,
+    state: &mut AdfParserState,
+) -> Vec<RichListItem> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let Some(object) = value.as_object() else {
+                state.truncated = true;
+                return Some(RichListItem {
+                    blocks: vec![RichBlock::Placeholder {
+                        label: UNSUPPORTED_CONTENT.to_owned(),
+                    }],
+                });
+            };
+            if object.get("type").and_then(Value::as_str) != Some("listItem") {
+                state.truncated = true;
+                return Some(RichListItem {
+                    blocks: vec![RichBlock::Placeholder {
+                        label: UNSUPPORTED_CONTENT.to_owned(),
+                    }],
+                });
+            }
+            if depth > MAX_ADF_DEPTH || !state.visit() {
+                state.truncated = true;
+                return None;
+            }
+            let Some(content) = object.get("content").and_then(Value::as_array) else {
+                state.truncated = true;
+                return Some(RichListItem {
+                    blocks: vec![RichBlock::Placeholder {
+                        label: UNSUPPORTED_CONTENT.to_owned(),
+                    }],
+                });
+            };
+            Some(RichListItem {
+                blocks: parse_blocks(content, depth + 1, state),
+            })
+        })
+        .collect()
+}
+
+fn parse_code_text(values: &[Value], depth: usize, state: &mut AdfParserState) -> String {
+    let mut text = String::new();
+    for value in values {
+        if depth > MAX_ADF_DEPTH || !state.visit() {
+            state.truncated = true;
+            break;
+        }
+        if value.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(value) = value.get("text").and_then(Value::as_str) {
+                text.push_str(&state.text(value));
+            }
+        } else {
+            state.truncated = true;
+        }
+    }
+    text
+}
+
+fn parse_inlines(values: &[Value], depth: usize, state: &mut AdfParserState) -> Vec<RichInline> {
+    values
+        .iter()
+        .filter_map(|value| parse_inline(value, depth, state))
+        .collect()
+}
+
+fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState) -> Option<RichInline> {
+    if depth > MAX_ADF_DEPTH || !state.visit() {
+        state.truncated = true;
+        return None;
+    }
+    let Some(object) = value.as_object() else {
+        state.truncated = true;
+        return Some(RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        });
+    };
+    match object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "text" => match object.get("text").and_then(Value::as_str) {
+            Some(text) => Some(RichInline::Text {
+                text: state.text(text),
+                marks: parse_marks(object.get("marks").and_then(Value::as_array)),
+            }),
+            None => {
+                state.truncated = true;
+                Some(RichInline::Placeholder {
+                    label: UNSUPPORTED_CONTENT.to_owned(),
+                })
+            }
+        },
+        "hardBreak" => Some(RichInline::HardBreak),
+        "mention" => {
+            let attrs = object.get("attrs").and_then(Value::as_object);
+            let normalized_id = attrs
+                .and_then(|attrs| attrs.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            let account_id = normalized_id.and_then(|id| AccountId::new(id.to_owned()).ok());
+            let label = attrs
+                .and_then(|attrs| {
+                    ["text", "displayText", "displayName"]
+                        .into_iter()
+                        .find_map(|key| attrs.get(key).and_then(Value::as_str))
+                })
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .filter(|text| Some(*text) != normalized_id)
+                .filter(|text| !looks_like_opaque_account_id(text))
+                .map(|text| state.text(text))
+                .unwrap_or_else(|| "Mentioned user".to_owned());
+            Some(RichInline::Mention { account_id, label })
+        }
+        "emoji" | "date" | "status" | "inlineCard" | "mediaInline" => {
+            Some(RichInline::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            })
+        }
+        _ => Some(RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        }),
+    }
+}
+
+fn parse_marks(values: Option<&Vec<Value>>) -> Vec<RichMark> {
+    values
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let object = value.as_object()?;
+            match object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "code" => Some(RichMark::Code),
+                "em" => Some(RichMark::Emphasis),
+                "strong" => Some(RichMark::Strong),
+                "strike" => Some(RichMark::Strike),
+                "link" => {
+                    let attrs = object.get("attrs").and_then(Value::as_object)?;
+                    let href = attrs
+                        .get("href")
+                        .and_then(Value::as_str)
+                        .and_then(safe_uri)?;
+                    let title = attrs
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .filter(|title| title.len() <= MAX_LINK_TITLE_BYTES)
+                        .map(str::to_owned);
+                    Some(RichMark::Link { href, title })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn panel_kind(value: &str) -> Option<PanelKind> {
+    match value {
+        "info" => Some(PanelKind::Info),
+        "note" => Some(PanelKind::Note),
+        "warning" => Some(PanelKind::Warning),
+        "success" => Some(PanelKind::Success),
+        "error" => Some(PanelKind::Error),
+        _ => None,
+    }
+}
+
+/// Jira Cloud account IDs commonly use a six-digit tenant prefix followed by an opaque token.
+/// This deliberately recognizes only that narrow shape so ordinary human labels containing a
+/// colon remain visible while an id-less mention cannot leak an account identifier.
+fn looks_like_opaque_account_id(value: &str) -> bool {
+    let value = value.trim();
+    let Some((prefix, suffix)) = value.split_once(':') else {
+        return false;
+    };
+    prefix.len() == 6
+        && prefix.bytes().all(|byte| byte.is_ascii_digit())
+        && suffix.len() >= 6
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn safe_uri(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.len() > MAX_LINK_HREF_BYTES {
+        return None;
+    }
+    let parsed = Url::parse(value).ok()?;
+    let authority_start = value.find("://")? + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |offset| authority_start + offset);
+    if value[authority_start..authority_end].contains('@') {
+        return None;
+    }
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none_or(str::is_empty)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn valid_display_name(user: &JiraUser) -> Option<String> {
+    let display_name = user.display_name.trim();
+    (!display_name.is_empty()
+        && display_name.len() <= 255
+        && display_name != user.account_id.trim())
+    .then_some(display_name.to_owned())
 }
 
 fn map_named_entity(entity: JiraNamedEntity) -> RemoteNamedEntity {
@@ -358,15 +700,16 @@ fn map_project(project: JiraProject) -> RemoteProject {
 }
 
 fn map_user(user: JiraUser) -> RemoteUser {
+    let display_name = valid_display_name(&user).unwrap_or_else(|| "Unknown user".to_owned());
     RemoteUser {
         account_id: user.account_id,
-        display_name: user.display_name,
+        display_name,
         active: user.active,
     }
 }
 
-fn domain_account_id(user: JiraUser) -> Result<AccountId, MappingError> {
-    AccountId::new(user.account_id).map_err(MappingError::InvalidDomainValue)
+fn domain_account_id(user: &JiraUser) -> Result<AccountId, MappingError> {
+    AccountId::new(user.account_id.clone()).map_err(MappingError::InvalidDomainValue)
 }
 
 fn avatar_url(urls: &std::collections::BTreeMap<String, String>) -> Option<String> {
@@ -520,6 +863,45 @@ mod tests {
     }
 
     #[test]
+    fn preserves_valid_issue_assignee_and_reporter_display_names() {
+        let mut page: EnhancedSearchPage =
+            serde_json::from_str(include_str!("../tests/fixtures/enhanced-search-page.json"))
+                .unwrap();
+        let mut issue = page.issues.pop().expect("issue fixture");
+        issue.fields.reporter = Some(JiraUser {
+            account_id: "712020:reporter".to_owned(),
+            display_name: "Nina Smith".to_owned(),
+            active: true,
+            avatar_urls: Default::default(),
+        });
+        let mapped = IssueMapper
+            .map_domain_issue(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+
+        assert_eq!(mapped.assignee_display_name.as_deref(), Some("Asha Patel"));
+        assert_eq!(mapped.reporter_display_name.as_deref(), Some("Nina Smith"));
+        assert_eq!(
+            mapped.reporter.as_ref().unwrap().as_str(),
+            "712020:reporter"
+        );
+    }
+
+    #[test]
+    fn map_user_never_exposes_account_id_as_display_name() {
+        let user = JiraUser {
+            account_id: "account-1".to_owned(),
+            display_name: " account-1 ".to_owned(),
+            active: true,
+            avatar_urls: Default::default(),
+        };
+        let mapped = IssueMapper
+            .map_user(JiraSiteId::new("site").expect("site"), user)
+            .expect("user should retain stable identity");
+
+        assert_eq!(mapped.display_name, "Unknown user");
+    }
+
+    #[test]
     fn rejects_a_blank_issue_key() {
         let issue: JiraIssue = serde_json::from_str(
             r#"{"id":"10001","key":" ","fields":{"summary":"A real summary"}}"#,
@@ -544,6 +926,7 @@ mod tests {
             detail.issue.description_text.as_deref(),
             Some("First line\nSecond line\nA link label")
         );
+        assert!(detail.issue.rich_description.is_some());
         assert_eq!(detail.attachments.len(), 1);
         assert_eq!(detail.attachments[0].id, "10001");
         assert_eq!(detail.attachments[0].size_bytes, 2048);
@@ -577,6 +960,7 @@ mod tests {
             Some("Asha")
         );
         assert_eq!(mapped.comments[0].body, "Looks good");
+        assert!(mapped.comments[0].rich_body.is_some());
         assert!(
             serde_json::to_string(&mapped.comments[0])
                 .unwrap()
@@ -622,6 +1006,199 @@ mod tests {
             IssueMapper.map_comment_page(page),
             Err(MappingError::MissingRequiredField("comment body"))
         ));
+    }
+
+    #[test]
+    fn rejects_non_document_adf_roots_and_versions() {
+        assert!(parse_adf(&serde_json::json!({"type":"paragraph","content":[]})).is_none());
+        assert!(
+            parse_adf(&serde_json::json!({
+                "type":"doc", "version": 2, "content": []
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn maps_supported_rich_text_and_safe_placeholders() {
+        let document = serde_json::json!({
+            "type": "doc", "version": 1, "content": [
+                {"type":"heading", "attrs":{"level":2}, "content":[
+                    {"type":"text", "text":"Title", "marks":[{"type":"strong"}]}
+                ]},
+                {"type":"paragraph", "content":[
+                    {"type":"text", "text":"styled", "marks":[
+                        {"type":"em"}, {"type":"strike"}, {"type":"code"},
+                        {"type":"link", "attrs":{"href":"javascript:alert(1)","title":"bad"}}
+                    ]},
+                    {"type":"hardBreak"},
+                    {"type":"mention", "attrs":{"id":"712020:secret","text":"@Asha"}}
+                ]},
+                {"type":"bulletList", "content":[{"type":"listItem", "content":[
+                    {"type":"paragraph", "content":[{"type":"text","text":"one"}]}
+                ]}]},
+                {"type":"orderedList", "attrs":{"order":3}, "content":[{"type":"listItem", "content":[
+                    {"type":"paragraph", "content":[{"type":"text","text":"two"}]}
+                ]}]},
+                {"type":"codeBlock", "attrs":{"language":"rust"}, "content":[
+                    {"type":"text", "text":"let answer = 42;"}
+                ]},
+                {"type":"blockquote", "content":[{"type":"paragraph", "content":[
+                    {"type":"text","text":"quoted"}
+                ]}]},
+                {"type":"panel", "attrs":{"panelType":"warning"}, "content":[
+                    {"type":"paragraph", "content":[{"type":"text","text":"careful"}]}
+                ]},
+                {"type":"mediaSingle", "content":[{"type":"media", "attrs":{"id":"private"}}]},
+                {"type":"table", "content":[]}
+            ]
+        });
+
+        let parsed = parse_adf(&document).expect("valid ADF");
+        assert!(!parsed.truncated);
+        assert!(matches!(
+            parsed.blocks[0],
+            RichBlock::Heading { level: 2, .. }
+        ));
+        assert!(matches!(parsed.blocks[2], RichBlock::BulletList(_)));
+        assert!(matches!(
+            parsed.blocks[3],
+            RichBlock::OrderedList { order: 3, .. }
+        ));
+        assert!(matches!(parsed.blocks[4], RichBlock::CodeBlock { .. }));
+        assert!(matches!(parsed.blocks[5], RichBlock::BlockQuote(_)));
+        assert!(matches!(
+            parsed.blocks[6],
+            RichBlock::Panel {
+                kind: PanelKind::Warning,
+                ..
+            }
+        ));
+        assert!(matches!(parsed.blocks[7], RichBlock::Placeholder { .. }));
+        let plain = parsed.plain_text();
+        assert!(plain.contains("@Asha"));
+        assert!(!plain.contains("712020:secret"));
+        assert!(!plain.contains("javascript:"));
+    }
+
+    #[test]
+    fn id_only_mentions_never_project_account_ids() {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+                {"type":"mention", "attrs":{"id":"712020:secret"}}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF");
+        assert_eq!(parsed.plain_text(), "Mentioned user");
+        assert!(!parsed.plain_text().contains("712020:secret"));
+    }
+
+    #[test]
+    fn mention_labels_equal_to_account_ids_use_a_safe_fallback() {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+                {"type":"mention", "attrs":{"id":" 712020:secret ", "text":"712020:secret"}},
+                {"type":"mention", "attrs":{"id":"account-2", "displayName":"account-2"}}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert_eq!(parsed.plain_text(), "Mentioned userMentioned user");
+        assert!(!parsed.plain_text().contains("712020:secret"));
+        assert!(!parsed.plain_text().contains("account-2"));
+    }
+
+    #[test]
+    fn idless_opaque_mention_labels_use_a_safe_fallback() {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+                {"type":"mention", "attrs":{"displayText":"712020:d98ae2"}},
+                {"type":"mention", "attrs":{"displayText":"Team: Platform"}}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert_eq!(parsed.plain_text(), "Mentioned userTeam: Platform");
+        assert!(!parsed.plain_text().contains("712020:d98ae2"));
+    }
+
+    #[test]
+    fn malformed_and_oversized_links_drop_only_the_mark() {
+        let oversized_href = format!("https://example.test/{}", "x".repeat(2_048));
+        let oversized_title = "t".repeat(513);
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+                {"type":"text", "text":"bad-scheme", "marks":[{"type":"link", "attrs":{"href":"javascript:alert(1)"}}]},
+                {"type":"text", "text":"credentials", "marks":[{"type":"link", "attrs":{"href":"https://user:pass@example.test"}}]},
+                {"type":"text", "text":"bad-authority", "marks":[{"type":"link", "attrs":{"href":"https://example.test:bad"}}]},
+                {"type":"text", "text":"long-href", "marks":[{"type":"link", "attrs":{"href":oversized_href}}]},
+                {"type":"text", "text":"long-title", "marks":[{"type":"link", "attrs":{"href":"https://example.test", "title":oversized_title}}]}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert_eq!(
+            parsed.plain_text(),
+            "bad-schemecredentialsbad-authoritylong-hreflong-title"
+        );
+        let RichBlock::Paragraph(inlines) = &parsed.blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert!(inlines.iter().all(|inline| matches!(inline, RichInline::Text { marks, .. } if marks.is_empty() || marks.iter().all(|mark| matches!(mark, RichMark::Link { title: None, .. })) )));
+    }
+
+    #[test]
+    fn malformed_recognized_nodes_emit_placeholders_and_truncation() {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[
+                {"type":"paragraph"},
+                {"type":"heading", "content": [{"type":"text"}]},
+                {"type":"bulletList", "content": [{"type":"listItem"}]}
+            ]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert!(parsed.truncated);
+        assert!(parsed.plain_text().contains("[unsupported Jira content]"));
+    }
+
+    #[test]
+    fn deep_and_large_adf_is_deterministically_truncated() {
+        let mut nested = serde_json::json!({
+            "type":"paragraph", "content":[{"type":"text", "text":"deep"}]
+        });
+        for _ in 0..70 {
+            nested = serde_json::json!({"type":"blockquote", "content":[nested]});
+        }
+        let deep = serde_json::json!({"type":"doc", "version":1, "content":[nested]});
+        let parsed = parse_adf(&deep).expect("valid root");
+        assert!(parsed.truncated);
+        assert!(parsed.plain_text().contains("content truncated"));
+
+        let many = (0..10_100)
+            .map(|_| serde_json::json!({"type":"paragraph","content":[]}))
+            .collect::<Vec<_>>();
+        let parsed = parse_adf(&serde_json::json!({
+            "type":"doc", "version":1, "content":many
+        }))
+        .expect("valid root");
+        assert!(parsed.truncated);
+        assert!(parsed.plain_text().contains("content truncated"));
+    }
+
+    #[test]
+    fn text_limit_is_bounded_without_splitting_utf8() {
+        let text = "é".repeat(600_000);
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+                {"type":"text", "text":text}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert!(parsed.truncated);
+        assert!(parsed.plain_text().contains("content truncated"));
+        assert!(
+            parsed
+                .plain_text()
+                .is_char_boundary(parsed.plain_text().len())
+        );
+        assert!(parsed.plain_text().len() <= 1_000_100);
     }
 
     #[test]

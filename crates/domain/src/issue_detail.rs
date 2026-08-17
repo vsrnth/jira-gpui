@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, DomainError, Issue, Timestamp};
+use crate::{AccountId, DomainError, Issue, RichTextDocument, Timestamp};
 
 const MAX_DETAIL_TEXT: usize = 1_000_000;
 
@@ -66,6 +66,9 @@ pub struct IssueComment {
     pub id: String,
     pub author: Option<IssueCommentAuthor>,
     pub body: String,
+    /// Structured comment body; old cached comments may only contain `body`.
+    #[serde(default)]
+    pub rich_body: Option<RichTextDocument>,
     pub created_at: Timestamp,
     pub updated_at: Option<Timestamp>,
     pub attachments: Vec<AttachmentMetadata>,
@@ -122,6 +125,7 @@ impl IssueComment {
             id: validate_text(id.into(), "comment id", 255)?,
             author,
             body: validate_text(body.into(), "comment body", MAX_DETAIL_TEXT)?,
+            rich_body: None,
             created_at,
             updated_at,
             attachments,

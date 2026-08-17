@@ -23,8 +23,8 @@ pub use models::{
 
 /// The fields requested by the initial assigned-issues sync.
 ///
-/// Keeping this list here prevents the UI from accidentally coupling itself to Jira's field
-/// names. More detail fields can be requested by a separate issue-detail operation later.
+/// Keeping reporter here ensures list/cached issues retain the identity metadata needed for
+/// presentation. More detail fields can be requested by a separate issue-detail operation later.
 pub const ASSIGNED_ISSUE_FIELDS: &[&str] = &[
     "summary",
     "issuetype",
@@ -32,6 +32,7 @@ pub const ASSIGNED_ISSUE_FIELDS: &[&str] = &[
     "status",
     "priority",
     "assignee",
+    "reporter",
     "parent",
     "labels",
     "created",
@@ -40,8 +41,8 @@ pub const ASSIGNED_ISSUE_FIELDS: &[&str] = &[
     "resolution",
 ];
 
-/// Fields that are only needed in addition to the lean baseline fields for an issue detail fetch.
-pub const ISSUE_DETAIL_ONLY_FIELDS: &[&str] = &["reporter", "description", "attachment"];
+/// Fields that are only needed in addition to the baseline fields for an issue detail fetch.
+pub const ISSUE_DETAIL_ONLY_FIELDS: &[&str] = &["description", "attachment"];
 
 /// Returns the complete field set required to construct the core domain issue plus detail data.
 /// Building this from the baseline prevents the two request shapes from silently drifting.
@@ -59,7 +60,10 @@ pub fn issue_detail_fields_query() -> String {
 
 #[cfg(test)]
 mod detail_field_tests {
-    use super::{ISSUE_DETAIL_ONLY_FIELDS, issue_detail_fields, issue_detail_fields_query};
+    use super::{
+        ASSIGNED_ISSUE_FIELDS, ISSUE_DETAIL_ONLY_FIELDS, issue_detail_fields,
+        issue_detail_fields_query,
+    };
 
     #[test]
     fn detail_fields_cover_every_core_mapper_field_and_detail_payload() {
@@ -82,10 +86,15 @@ mod detail_field_tests {
         ] {
             assert!(issue_detail_fields().contains(&field), "missing {field}");
         }
+        assert!(ASSIGNED_ISSUE_FIELDS.contains(&"reporter"));
         assert_eq!(issue_detail_fields_query(), issue_detail_fields().join(","));
+        assert_eq!(ISSUE_DETAIL_ONLY_FIELDS, &["description", "attachment"]);
         assert_eq!(
-            ISSUE_DETAIL_ONLY_FIELDS,
-            &["reporter", "description", "attachment"]
+            issue_detail_fields().len(),
+            issue_detail_fields()
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
         );
     }
 }

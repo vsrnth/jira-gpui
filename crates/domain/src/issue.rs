@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use time::Date;
 
-use crate::{AccountId, IssueId, IssueKey, JiraSiteId, Timestamp};
+use crate::{AccountId, IssueId, IssueKey, JiraSiteId, RichTextDocument, Timestamp};
 
 /// A Jira project attached to an issue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,12 +64,21 @@ pub struct Issue {
     pub status: Status,
     pub priority: Priority,
     pub assignee: Option<AccountId>,
+    /// Optional display metadata retained from the Jira issue payload. The account ID remains
+    /// authoritative for matching and persistence.
+    #[serde(default)]
+    pub assignee_display_name: Option<String>,
     pub reporter: Option<AccountId>,
+    #[serde(default)]
+    pub reporter_display_name: Option<String>,
     pub parent: Option<ParentIssue>,
     pub labels: Vec<String>,
-    /// The raw ADF document is kept at the transport/cache edge. The domain
-    /// stores only an optional read-only textual representation for searching.
+    /// Compatibility plain-text projection of the bounded structured description.
+    /// Raw Jira ADF JSON is never stored in the domain model.
     pub description_text: Option<String>,
+    /// Structured issue description; old cached snapshots may not contain it.
+    #[serde(default)]
+    pub rich_description: Option<RichTextDocument>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub due_date: Option<Date>,
@@ -106,10 +115,13 @@ impl Issue {
             status,
             priority,
             assignee,
+            assignee_display_name: None,
             reporter,
+            reporter_display_name: None,
             parent,
             labels,
             description_text: None,
+            rich_description: None,
             created_at,
             updated_at,
             due_date,

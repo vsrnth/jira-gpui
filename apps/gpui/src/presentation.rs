@@ -3,8 +3,11 @@
 //! Keeping this mapping free of GPUI types means a future Tauri presentation
 //! adapter can reuse the same decisions without depending on the native UI.
 
+use std::collections::HashMap;
+
 use jira_domain::{
-    ChangeValue, Issue, IssueDetail, IssueKey, UpdateEvent, UpdateKind, UpdateReadState, User,
+    ChangeValue, Issue, IssueCommentAuthor, IssueDetail, IssueKey, RichTextDocument, UpdateEvent,
+    UpdateKind, UpdateReadState, User,
 };
 use time::{Date, OffsetDateTime};
 
@@ -48,6 +51,10 @@ pub fn issue_views_for_filter(
     search: &str,
 ) -> Vec<IssueViewModel> {
     let search = search.trim().to_ascii_lowercase();
+    let mut identities = IdentityDirectory::from_users(users);
+    for issue in issues {
+        identities.include_issue(issue);
+    }
     issues
         .iter()
         .filter(|issue| filter.matches(issue.status.category.as_deref().unwrap_or_default()))
@@ -56,8 +63,100 @@ pub fn issue_views_for_filter(
                 || issue.key.to_string().to_ascii_lowercase().contains(&search)
                 || issue.summary.to_ascii_lowercase().contains(&search)
         })
-        .map(|issue| IssueViewModel::from_domain(issue, users))
+        .map(|issue| IssueViewModel::from_domain_with_directory(issue, &identities))
         .collect()
+}
+
+/// Display-only directory for stable Jira identities.
+///
+/// Account IDs remain the domain identity and are never suitable UI labels. The directory starts
+/// with the authenticated/user-search catalog, then fills missing entries from display metadata
+/// carried by issue and comment payloads. Catalog entries win when the same account is present in
+/// more than one source; embedded metadata still makes otherwise unknown users useful.
+#[derive(Clone, Debug, Default)]
+pub struct IdentityDirectory {
+    names: HashMap<jira_domain::AccountId, String>,
+}
+
+impl IdentityDirectory {
+    pub fn from_users(users: &[User]) -> Self {
+        let mut directory = Self::default();
+        for user in users {
+            directory.insert(user.account_id.clone(), &user.display_name);
+        }
+        directory
+    }
+
+    pub fn include_issue(&mut self, issue: &Issue) {
+        if let (Some(account_id), Some(display_name)) = (
+            issue.assignee.as_ref(),
+            issue.assignee_display_name.as_deref(),
+        ) {
+            self.insert_if_missing(account_id.clone(), display_name);
+        }
+        if let (Some(account_id), Some(display_name)) = (
+            issue.reporter.as_ref(),
+            issue.reporter_display_name.as_deref(),
+        ) {
+            self.insert_if_missing(account_id.clone(), display_name);
+        }
+    }
+
+    pub fn include_comment_author(&mut self, author: Option<&IssueCommentAuthor>) {
+        let Some(author) = author else {
+            return;
+        };
+        if let Some(display_name) = author.display_name.as_deref() {
+            self.insert_if_missing(author.account_id.clone(), display_name);
+        }
+    }
+
+    fn insert(&mut self, account_id: jira_domain::AccountId, display_name: &str) {
+        let display_name = display_name.trim();
+        if !display_name.is_empty()
+            && display_name != account_id.as_str().trim()
+            && display_name.len() <= 255
+        {
+            self.names
+                .entry(account_id)
+                .or_insert_with(|| display_name.to_owned());
+        }
+    }
+
+    fn insert_if_missing(&mut self, account_id: jira_domain::AccountId, display_name: &str) {
+        self.insert(account_id, display_name);
+    }
+
+    pub fn display(&self, account_id: Option<&jira_domain::AccountId>, unassigned: &str) -> String {
+        self.display_with_unknown(account_id, unassigned, "Unknown user")
+    }
+
+    fn display_with_unknown(
+        &self,
+        account_id: Option<&jira_domain::AccountId>,
+        unassigned: &str,
+        unknown: &str,
+    ) -> String {
+        let Some(account_id) = account_id else {
+            return unassigned.to_owned();
+        };
+        self.names
+            .get(account_id)
+            .cloned()
+            .unwrap_or_else(|| unknown.to_owned())
+    }
+
+    fn display_author(&self, author: Option<&IssueCommentAuthor>) -> String {
+        author
+            .map(|author| {
+                self.display_with_unknown(
+                    Some(&author.account_id),
+                    "Unknown author",
+                    "Unknown author",
+                )
+            })
+            .unwrap_or_else(|| "Unknown author".to_owned())
+    }
 }
 
 /// Normalize a user-entered exact-key lookup without allowing arbitrary text
@@ -85,6 +184,7 @@ pub struct IssueViewModel {
     pub parent: Option<String>,
     pub labels: Vec<String>,
     pub description: String,
+    pub rich_description: Option<RichTextDocument>,
     pub created: String,
     pub updated: String,
     pub due_date: String,
@@ -92,18 +192,12 @@ pub struct IssueViewModel {
 
 impl IssueViewModel {
     pub fn from_domain(issue: &Issue, users: &[User]) -> Self {
-        let display_user = |account_id: Option<&jira_domain::AccountId>| {
-            account_id
-                .and_then(|account_id| {
-                    users
-                        .iter()
-                        .find(|user| &user.account_id == account_id)
-                        .map(|user| user.display_name.clone())
-                })
-                .or_else(|| account_id.map(ToString::to_string))
-                .unwrap_or_else(|| "Unassigned".to_owned())
-        };
+        let mut identities = IdentityDirectory::from_users(users);
+        identities.include_issue(issue);
+        Self::from_domain_with_directory(issue, &identities)
+    }
 
+    fn from_domain_with_directory(issue: &Issue, identities: &IdentityDirectory) -> Self {
         Self {
             id: issue.id.clone(),
             key: issue.key.to_string(),
@@ -121,8 +215,8 @@ impl IssueViewModel {
                 .name
                 .clone()
                 .unwrap_or_else(|| "None".to_owned()),
-            assignee: display_user(issue.assignee.as_ref()),
-            reporter: display_user(issue.reporter.as_ref()),
+            assignee: identities.display(issue.assignee.as_ref(), "Unassigned"),
+            reporter: identities.display(issue.reporter.as_ref(), "Unassigned"),
             parent: issue.parent.as_ref().map(|parent| {
                 parent.summary.as_ref().map_or_else(
                     || parent.key.to_string(),
@@ -134,6 +228,7 @@ impl IssueViewModel {
                 .description_text
                 .clone()
                 .unwrap_or_else(|| "No description supplied.".to_owned()),
+            rich_description: issue.rich_description.clone(),
             created: format_timestamp(issue.created_at),
             updated: format_timestamp(issue.updated_at),
             due_date: issue
@@ -147,6 +242,7 @@ impl IssueViewModel {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IssueDetailViewModel {
     pub description: String,
+    pub rich_description: Option<RichTextDocument>,
     pub comments: Vec<CommentViewModel>,
     pub attachments: Vec<AttachmentViewModel>,
 }
@@ -155,6 +251,7 @@ pub struct IssueDetailViewModel {
 pub struct CommentViewModel {
     pub author: String,
     pub body: String,
+    pub rich_body: Option<RichTextDocument>,
     pub created: String,
     pub updated: Option<String>,
 }
@@ -168,30 +265,18 @@ pub struct AttachmentViewModel {
 
 impl IssueDetailViewModel {
     pub fn from_domain(detail: &IssueDetail, users: &[User]) -> Self {
+        let mut identities = IdentityDirectory::from_users(users);
+        identities.include_issue(&detail.core.issue);
+        for comment in &detail.comments {
+            identities.include_comment_author(comment.author.as_ref());
+        }
         let comments = detail
             .comments
             .iter()
             .map(|comment| CommentViewModel {
-                author: comment
-                    .author
-                    .as_ref()
-                    .and_then(|author| author.display_name.clone())
-                    .or_else(|| {
-                        comment.author.as_ref().and_then(|author| {
-                            users
-                                .iter()
-                                .find(|user| user.account_id == author.account_id)
-                                .map(|user| user.display_name.clone())
-                        })
-                    })
-                    .or_else(|| {
-                        comment
-                            .author
-                            .as_ref()
-                            .map(|author| author.account_id.to_string())
-                    })
-                    .unwrap_or_else(|| "Unknown author".to_owned()),
+                author: identities.display_author(comment.author.as_ref()),
                 body: comment.body.clone(),
+                rich_body: comment.rich_body.clone(),
                 created: format_timestamp(comment.created_at),
                 updated: comment.updated_at.map(format_timestamp),
             })
@@ -217,6 +302,7 @@ impl IssueDetailViewModel {
                 .description_text
                 .clone()
                 .unwrap_or_else(|| "No description supplied.".to_owned()),
+            rich_description: detail.core.issue.rich_description.clone(),
             comments,
             attachments,
         }
@@ -234,59 +320,65 @@ pub struct UpdateViewModel {
 
 impl UpdateViewModel {
     pub fn from_domain(event: &UpdateEvent, issue: Option<&Issue>, users: &[User]) -> Self {
+        let mut identities = IdentityDirectory::from_users(users);
+        if let Some(issue) = issue {
+            identities.include_issue(issue);
+        }
         Self {
             issue_key: event.issue_key.to_string(),
             issue_summary: issue
                 .map(|issue| issue.summary.clone())
                 .unwrap_or_else(|| "Issue no longer in this view".to_owned()),
-            change: describe_change(&event.kind, users),
+            change: describe_change(&event.kind, &identities),
             occurred_at: format_timestamp(event.occurred_at),
             unread: event.read_state == UpdateReadState::Unread,
         }
     }
 }
 
-fn describe_change(kind: &UpdateKind, users: &[User]) -> String {
+fn describe_change(kind: &UpdateKind, identities: &IdentityDirectory) -> String {
     match kind {
         UpdateKind::IssueAddedToView => "Added to this user set".to_owned(),
         UpdateKind::IssueRemovedFromView => "Removed from this user set".to_owned(),
         UpdateKind::IssueUpdated => "Issue activity changed".to_owned(),
-        UpdateKind::StatusChanged { old, new } => change_sentence("Status", old, new),
-        UpdateKind::AssigneeChanged { old, new } => change_sentence("Assignee", old, new),
-        UpdateKind::PriorityChanged { old, new } => change_sentence("Priority", old, new),
-        UpdateKind::DueDateChanged { old, new } => change_sentence("Due date", old, new),
-        UpdateKind::SummaryChanged { old, new } => change_sentence("Summary", old, new),
-        UpdateKind::ParentChanged { old, new } => change_sentence("Parent", old, new),
+        UpdateKind::StatusChanged { old, new } => change_sentence("Status", old, new, identities),
+        UpdateKind::AssigneeChanged { old, new } => {
+            change_sentence("Assignee", old, new, identities)
+        }
+        UpdateKind::PriorityChanged { old, new } => {
+            change_sentence("Priority", old, new, identities)
+        }
+        UpdateKind::DueDateChanged { old, new } => {
+            change_sentence("Due date", old, new, identities)
+        }
+        UpdateKind::SummaryChanged { old, new } => change_sentence("Summary", old, new, identities),
+        UpdateKind::ParentChanged { old, new } => change_sentence("Parent", old, new, identities),
         UpdateKind::CommentAdded {
             author, excerpt, ..
         } => {
-            let author = author
-                .as_ref()
-                .and_then(|account_id| {
-                    users
-                        .iter()
-                        .find(|user| &user.account_id == account_id)
-                        .map(|user| user.display_name.as_str())
-                })
-                .or_else(|| author.as_ref().map(jira_domain::AccountId::as_str))
-                .unwrap_or("Unknown author");
+            let author = identities.display(author.as_ref(), "Unknown author");
             format!("{author} commented: {excerpt}")
         }
     }
 }
 
-fn change_sentence(field: &str, old: &ChangeValue, new: &ChangeValue) -> String {
+fn change_sentence(
+    field: &str,
+    old: &ChangeValue,
+    new: &ChangeValue,
+    identities: &IdentityDirectory,
+) -> String {
     format!(
         "{field}: {} → {}",
-        display_change_value(old),
-        display_change_value(new)
+        display_change_value(old, identities),
+        display_change_value(new, identities)
     )
 }
 
-fn display_change_value(value: &ChangeValue) -> String {
+fn display_change_value(value: &ChangeValue, identities: &IdentityDirectory) -> String {
     match value {
         ChangeValue::Text(value) => value.clone(),
-        ChangeValue::Account(value) => value.to_string(),
+        ChangeValue::Account(value) => identities.display(Some(value), "Unknown user"),
         ChangeValue::Date(value) => value.clone().unwrap_or_else(|| "not set".to_owned()),
         ChangeValue::Parent(value) => value
             .as_ref()
@@ -370,14 +462,44 @@ mod tests {
     }
 
     #[test]
-    fn preserves_unknown_account_ids_instead_of_calling_them_unassigned() {
+    fn never_renders_an_unknown_account_id_as_a_display_label() {
         let mut issues = sample_issues();
         issues[0].assignee = Some(
             jira_domain::AccountId::new("unknown-account").expect("test account ID must be valid"),
         );
         let view = IssueViewModel::from_domain(&issues[0], &[]);
 
-        assert_eq!(view.assignee, "unknown-account");
+        assert_eq!(view.assignee, "Unknown user");
+        assert!(!view.assignee.contains("unknown-account"));
+    }
+
+    #[test]
+    fn prefers_issue_embedded_display_names_for_assignee_and_reporter() {
+        let mut issue = sample_issues().into_iter().next().expect("sample issue");
+        issue.assignee_display_name = Some("Asha Patel".to_owned());
+        issue.reporter_display_name = Some("Nina Smith".to_owned());
+
+        let view = IssueViewModel::from_domain(&issue, &[]);
+
+        assert_eq!(view.assignee, "Asha Patel");
+        assert_eq!(view.reporter, "Nina Smith");
+        assert!(!view.reporter.contains("marco"));
+    }
+
+    #[test]
+    fn rejects_embedded_account_ids_as_display_names() {
+        let mut issue = sample_issues().into_iter().next().expect("sample issue");
+        let assignee = issue.assignee.clone().expect("sample assignee");
+        let reporter = issue.reporter.clone().expect("sample reporter");
+        issue.assignee_display_name = Some(format!("  {assignee}  "));
+        issue.reporter_display_name = Some(reporter.to_string());
+
+        let view = IssueViewModel::from_domain(&issue, &[]);
+
+        assert_eq!(view.assignee, "Unknown user");
+        assert_eq!(view.reporter, "Unknown user");
+        assert!(!view.assignee.contains(assignee.as_str()));
+        assert!(!view.reporter.contains(reporter.as_str()));
     }
 
     #[test]
@@ -483,7 +605,8 @@ mod tests {
 
         let view = IssueDetailViewModel::from_domain(&detail, &[]);
 
-        assert_eq!(view.comments[0].author, "account-1");
+        assert_eq!(view.comments[0].author, "Unknown author");
+        assert!(!view.comments[0].author.contains("account-1"));
         assert_eq!(view.comments[0].body, "A comment body");
         assert_eq!(view.attachments[0].filename, "report.txt");
         assert_eq!(view.attachments[0].mime_type, "text/plain");
@@ -521,6 +644,136 @@ mod tests {
 
         assert_eq!(view.comments[0].author, "Asha");
         assert_ne!(view.comments[0].author, "account-1");
+    }
+
+    #[test]
+    fn maps_comment_embedded_display_name_without_a_user_catalog() {
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let detail = IssueDetail::new(
+            IssueDetailCore::new(issue, Vec::new()).expect("detail core"),
+            vec![
+                IssueComment::new(
+                    "comment-1",
+                    Some(
+                        IssueCommentAuthor::new(
+                            jira_domain::AccountId::new("commenter-account").expect("account"),
+                            Some("Asha Patel"),
+                        )
+                        .expect("author"),
+                    ),
+                    "A comment body",
+                    datetime!(2026-01-03 00:00 UTC),
+                    None,
+                    Vec::new(),
+                )
+                .expect("comment"),
+            ],
+        )
+        .expect("detail");
+
+        let view = IssueDetailViewModel::from_domain(&detail, &[]);
+
+        assert_eq!(view.comments[0].author, "Asha Patel");
+    }
+
+    #[test]
+    fn maps_assignee_change_accounts_through_the_identity_directory() {
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let old = jira_domain::AccountId::new("old-account").expect("account");
+        let new = jira_domain::AccountId::new("new-account").expect("account");
+        let users = vec![
+            User::new(issue.site_id.clone(), old.clone(), "Old Name", None, true),
+            User::new(issue.site_id.clone(), new.clone(), "New Name", None, true),
+        ];
+        let event = UpdateEvent::new(
+            jira_domain::EventId::new("event-assignee").expect("event"),
+            issue.site_id.clone(),
+            issue.id.clone(),
+            issue.key.clone(),
+            UpdateKind::AssigneeChanged {
+                old: ChangeValue::Account(old),
+                new: ChangeValue::Account(new),
+            },
+            issue.updated_at,
+            Vec::new(),
+        );
+
+        let view = UpdateViewModel::from_domain(&event, Some(&issue), &users);
+
+        assert_eq!(view.change, "Assignee: Old Name → New Name");
+        assert!(!view.change.contains("account"));
+    }
+
+    #[test]
+    fn maps_comment_added_authors_without_exposing_account_ids() {
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let author = jira_domain::AccountId::new("amina").expect("account");
+        let event = UpdateEvent::new(
+            jira_domain::EventId::new("event-comment").expect("event"),
+            issue.site_id.clone(),
+            issue.id.clone(),
+            issue.key.clone(),
+            UpdateKind::CommentAdded {
+                comment_id: "comment-1".to_owned(),
+                author: Some(author),
+                excerpt: "A useful update".to_owned(),
+            },
+            issue.updated_at,
+            Vec::new(),
+        );
+
+        let view = UpdateViewModel::from_domain(&event, Some(&issue), &sample_users());
+
+        assert_eq!(view.change, "Amina Yusuf commented: A useful update");
+        assert!(!view.change.contains("amina"));
+    }
+
+    #[test]
+    fn propagates_structured_issue_and_comment_content_with_plain_text_compatibility() {
+        use jira_domain::{RichBlock, RichInline, RichTextDocument};
+
+        let mut issue = sample_issues().into_iter().next().expect("sample issue");
+        let rich_description = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: "Structured description".to_owned(),
+                marks: Vec::new(),
+            }])],
+            false,
+        );
+        issue.rich_description = Some(rich_description.clone());
+        issue.description_text = Some("Plain description fallback".to_owned());
+        let mut comment = IssueComment::new(
+            "comment-rich",
+            None,
+            "Plain comment fallback",
+            datetime!(2026-01-03 00:00 UTC),
+            None,
+            Vec::new(),
+        )
+        .expect("comment");
+        let rich_body = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: "Structured comment".to_owned(),
+                marks: Vec::new(),
+            }])],
+            false,
+        );
+        comment.rich_body = Some(rich_body.clone());
+        let detail = IssueDetail::new(
+            IssueDetailCore::new(issue.clone(), Vec::new()).expect("detail core"),
+            vec![comment],
+        )
+        .expect("detail");
+
+        let issue_view = IssueViewModel::from_domain(&issue, &[]);
+        let detail_view = IssueDetailViewModel::from_domain(&detail, &[]);
+
+        assert_eq!(issue_view.description, "Plain description fallback");
+        assert_eq!(issue_view.rich_description, Some(rich_description.clone()));
+        assert_eq!(detail_view.description, "Plain description fallback");
+        assert_eq!(detail_view.rich_description, Some(rich_description));
+        assert_eq!(detail_view.comments[0].body, "Plain comment fallback");
+        assert_eq!(detail_view.comments[0].rich_body, Some(rich_body));
     }
 
     #[test]
