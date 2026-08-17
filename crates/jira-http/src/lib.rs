@@ -42,6 +42,11 @@ struct AttachmentReadOptions {
     thumbnail: bool,
 }
 
+enum AttachmentMimeResolution {
+    Declared(String),
+    InferFromBody,
+}
+
 #[derive(Debug, Serialize)]
 struct JiraCommentCreateRequest {
     body: JiraAdfDocument,
@@ -584,7 +589,15 @@ impl JiraHttpClient {
         if !status.is_success() {
             return Err(attachment_status_error(status, response.headers(), attempt));
         }
-        let mime_type = attachment_mime_type(response.headers(), attempt, options.thumbnail)?;
+        let mime_type = if options.thumbnail {
+            attachment_thumbnail_mime_type(response.headers(), attempt)?
+        } else {
+            AttachmentMimeResolution::Declared(attachment_mime_type(
+                response.headers(),
+                attempt,
+                false,
+            )?)
+        };
         if response
             .content_length()
             .is_some_and(|length| length > options.max_bytes as u64)
@@ -618,6 +631,12 @@ impl JiraHttpClient {
             return Err(attachment_body_error(attempt, AttachmentBodyClass::Empty));
         }
         let body = finish_attachment_body(body, options.max_bytes, &options.cancellation)?;
+        let mime_type = match mime_type {
+            AttachmentMimeResolution::Declared(mime_type) => mime_type,
+            AttachmentMimeResolution::InferFromBody => image_mime_from_signature(&body)
+                .map(str::to_owned)
+                .ok_or_else(|| attachment_signature_error(attempt))?,
+        };
         Ok(AttachmentContent {
             attachment_id: options.attachment_id,
             mime_type,
@@ -1077,6 +1096,36 @@ fn attachment_mime_type(
     attempt: AttachmentReadAttempt,
     thumbnail: bool,
 ) -> Result<String, ApplicationError> {
+    let mime_type = parsed_attachment_mime_type(headers, attempt)?;
+    if thumbnail && !is_allowed_image_mime(&mime_type) {
+        return Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira attachment response was not an image",
+        )
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
+            attempt,
+            AttachmentMimeClass::Other,
+        )));
+    }
+    Ok(mime_type)
+}
+
+fn attachment_thumbnail_mime_type(
+    headers: &header::HeaderMap,
+    attempt: AttachmentReadAttempt,
+) -> Result<AttachmentMimeResolution, ApplicationError> {
+    let mime_type = parsed_attachment_mime_type(headers, attempt)?;
+    if is_allowed_image_mime(&mime_type) {
+        Ok(AttachmentMimeResolution::Declared(mime_type))
+    } else {
+        Ok(AttachmentMimeResolution::InferFromBody)
+    }
+}
+
+fn parsed_attachment_mime_type(
+    headers: &header::HeaderMap,
+    attempt: AttachmentReadAttempt,
+) -> Result<String, ApplicationError> {
     let Some(value) = headers.get(header::CONTENT_TYPE) else {
         return Err(ApplicationError::new(
             ErrorKind::Upstream,
@@ -1107,26 +1156,49 @@ fn attachment_mime_type(
             AttachmentMimeClass::Malformed,
         ))
     })?;
-    if thumbnail && !is_allowed_image_mime(&mime_type) {
-        return Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira attachment response was not an image",
-        )
-        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
-            attempt,
-            AttachmentMimeClass::Other,
-        )));
-    }
     Ok(mime_type)
+}
+
+fn attachment_signature_error(attempt: AttachmentReadAttempt) -> ApplicationError {
+    ApplicationError::new(
+        ErrorKind::Upstream,
+        "Jira attachment response bytes did not match an image format",
+    )
+    .with_attachment_diagnostic(AttachmentReadDiagnostic::validation(attempt))
+}
+
+fn image_mime_from_signature(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 fn media_type(value: &str) -> Option<String> {
     let media_type = value.split(';').next()?.trim().to_ascii_lowercase();
-    if media_type.is_empty() || !media_type.contains('/') {
-        None
-    } else {
-        Some(media_type)
+    let (kind, subtype) = media_type.split_once('/')?;
+    if kind.is_empty()
+        || subtype.is_empty()
+        || subtype.contains('/')
+        || !kind.bytes().all(is_media_type_token)
+        || !subtype.bytes().all(is_media_type_token)
+    {
+        return None;
     }
+    Some(media_type)
+}
+
+fn is_media_type_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 fn attachment_url_with_query(mut url: Url, width: usize, height: usize, thumbnail: bool) -> Url {
@@ -1626,6 +1698,9 @@ mod tests {
             Some("application/pdf".to_owned())
         );
         assert_eq!(media_type("missing"), None);
+        assert_eq!(media_type("/"), None);
+        assert_eq!(media_type("image/png/extra"), None);
+        assert_eq!(media_type("image png"), None);
         assert!(is_allowed_image_mime("image/webp"));
         assert!(is_allowed_image_mime("application/octet-stream"));
         assert!(is_allowed_image_mime("image/jpg"));
@@ -1634,6 +1709,25 @@ mod tests {
             status_error(StatusCode::FOUND, &header::HeaderMap::new()).kind(),
             ErrorKind::Upstream
         );
+    }
+
+    #[test]
+    fn unknown_thumbnail_mimes_use_strict_image_signatures() {
+        assert_eq!(
+            image_mime_from_signature(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_mime_from_signature(b"\xff\xd8\xffrest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(image_mime_from_signature(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(
+            image_mime_from_signature(b"RIFF\x00\x00\x00\x00WEBPrest"),
+            Some("image/webp")
+        );
+        assert_eq!(image_mime_from_signature(b"RIFF\x00\x00\x00\x00PNG"), None);
+        assert_eq!(image_mime_from_signature(b"not an image"), None);
     }
 
     #[test]
@@ -1847,6 +1941,143 @@ mod tests {
 
             assert_eq!(content.mime_type, "application/octet-stream");
             assert_eq!(content.bytes, png);
+        });
+    }
+
+    #[test]
+    fn attachment_thumbnail_accepts_a_valid_png_with_an_unknown_mime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82";
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let responder = async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-atlassian-image\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    png.len()
+                );
+                let mut response = response.into_bytes();
+                response.extend_from_slice(png);
+                let mut written = 0;
+                while written < response.len() {
+                    stream.writable().await.unwrap();
+                    match stream.try_write(&response[written..]) {
+                        Ok(count) => written += count,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("responder write failed: {error}"),
+                    }
+                }
+            };
+            let responder = tokio::spawn(responder);
+
+            let credentials = ApiTokenCredentials::new("person@example.com", "secret-token")
+                .unwrap();
+            let client = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let content = JiraHttpClient::attachment_image_request(
+                client,
+                Url::parse(&format!(
+                    "http://{address}/rest/api/3/attachment/thumbnail/42"
+                ))
+                .unwrap(),
+                credentials,
+                AttachmentReadOptions {
+                    attachment_id: "42".to_owned(),
+                    cancellation: CancellationToken::new(),
+                    max_bytes: 1024,
+                    width: 640,
+                    height: 480,
+                    thumbnail: true,
+                },
+            )
+            .await
+            .unwrap();
+            responder.await.unwrap();
+
+            assert_eq!(content.mime_type, "image/png");
+            assert_eq!(content.bytes, png);
+        });
+    }
+
+    #[test]
+    fn attachment_thumbnail_rejects_invalid_bytes_with_an_unknown_mime_safely() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = b"not an image";
+        let raw_mime = "application/x-atlassian-image";
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let responder = async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {raw_mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let mut response = response.into_bytes();
+                response.extend_from_slice(body);
+                let mut written = 0;
+                while written < response.len() {
+                    stream.writable().await.unwrap();
+                    match stream.try_write(&response[written..]) {
+                        Ok(count) => written += count,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("responder write failed: {error}"),
+                    }
+                }
+            };
+            let responder = tokio::spawn(responder);
+
+            let credentials = ApiTokenCredentials::new("person@example.com", "secret-token")
+                .unwrap();
+            let client = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let error = JiraHttpClient::attachment_image_request(
+                client,
+                Url::parse(&format!(
+                    "http://{address}/rest/api/3/attachment/thumbnail/42"
+                ))
+                .unwrap(),
+                credentials,
+                AttachmentReadOptions {
+                    attachment_id: "42".to_owned(),
+                    cancellation: CancellationToken::new(),
+                    max_bytes: 1024,
+                    width: 640,
+                    height: 480,
+                    thumbnail: true,
+                },
+            )
+            .await
+            .expect_err("invalid image bytes must be rejected");
+            responder.await.unwrap();
+
+            assert_eq!(error.kind(), ErrorKind::Upstream);
+            assert_eq!(
+                error.message(),
+                "Jira attachment response bytes did not match an image format"
+            );
+            assert!(!error.message().contains(raw_mime));
+            assert!(!error.message().contains("not an image"));
+            let diagnostic = error.attachment_diagnostic().expect("validation diagnostic");
+            assert_eq!(diagnostic.stage(), jira_application::AttachmentReadStage::Validation);
+            assert_eq!(diagnostic.attempt(), AttachmentReadAttempt::Thumbnail);
         });
     }
 
