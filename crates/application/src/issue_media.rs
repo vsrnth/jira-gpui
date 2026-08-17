@@ -341,6 +341,7 @@ mod tests {
         download: Mutex<Option<Result<AttachmentContent, ApplicationError>>>,
         image_request: Mutex<Option<AttachmentImageRequest>>,
         download_request: Mutex<Option<AttachmentDownloadRequest>>,
+        download_calls: Mutex<usize>,
         cancellation: Mutex<Option<CancellationToken>>,
     }
 
@@ -367,6 +368,7 @@ mod tests {
             _cancellation: &'a CancellationToken,
         ) -> PortFuture<'a, AttachmentContent> {
             *self.download_request.lock().expect("download request lock") = Some(request.clone());
+            *self.download_calls.lock().expect("download calls lock") += 1;
             let result = self
                 .download
                 .lock()
@@ -434,6 +436,7 @@ mod tests {
                 download: Mutex::new(None),
                 image_request: Mutex::new(None),
                 download_request: Mutex::new(None),
+                download_calls: Mutex::new(0),
                 cancellation: Mutex::new(None),
             }),
             IssueMediaConfig {
@@ -484,6 +487,7 @@ mod tests {
                 download: Mutex::new(None),
                 image_request: Mutex::new(None),
                 download_request: Mutex::new(None),
+                download_calls: Mutex::new(0),
                 cancellation: Mutex::new(None),
             }),
             IssueMediaConfig::default(),
@@ -505,6 +509,7 @@ mod tests {
                 download: Mutex::new(None),
                 image_request: Mutex::new(None),
                 download_request: Mutex::new(None),
+                download_calls: Mutex::new(0),
                 cancellation: Mutex::new(None),
             }),
             IssueMediaConfig::default(),
@@ -523,10 +528,14 @@ mod tests {
             image: Mutex::new(Some(Err(ApplicationError::new(
                 ErrorKind::NotFound,
                 "thumbnail unavailable",
-            )))),
+            )
+            .with_attachment_diagnostic(AttachmentReadDiagnostic::validation(
+                AttachmentReadAttempt::Thumbnail,
+            ))))),
             download: Mutex::new(Some(Ok(content("att-1", "IMAGE/PNG", b"png")))),
             image_request: Mutex::new(None),
             download_request: Mutex::new(None),
+            download_calls: Mutex::new(0),
             cancellation: Mutex::new(None),
         });
         let fallback_service = IssueMediaService::new(
@@ -556,6 +565,11 @@ mod tests {
                 max_bytes: 4,
             }
         );
+        assert_eq!(
+            *fake.download_calls.lock().expect("download calls lock"),
+            1,
+            "thumbnail fallback must issue exactly one bounded original request"
+        );
     }
 
     #[test]
@@ -572,6 +586,7 @@ mod tests {
             )))),
             image_request: Mutex::new(None),
             download_request: Mutex::new(None),
+            download_calls: Mutex::new(0),
             cancellation: Mutex::new(None),
         });
         let fallback_service = IssueMediaService::new(
@@ -618,6 +633,7 @@ mod tests {
             download: Mutex::new(Some(Err(ApplicationError::cancelled()))),
             image_request: Mutex::new(None),
             download_request: Mutex::new(None),
+            download_calls: Mutex::new(0),
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
@@ -648,6 +664,7 @@ mod tests {
             ))))),
             image_request: Mutex::new(None),
             download_request: Mutex::new(None),
+            download_calls: Mutex::new(0),
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
@@ -679,6 +696,7 @@ mod tests {
             download: Mutex::new(None),
             image_request: Mutex::new(None),
             download_request: Mutex::new(None),
+            download_calls: Mutex::new(0),
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
@@ -792,6 +810,7 @@ mod tests {
             download: Mutex::new(None),
             image_request: Mutex::new(None),
             download_request: Mutex::new(None),
+            download_calls: Mutex::new(0),
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
@@ -816,6 +835,7 @@ mod tests {
                 download: Mutex::new(Some(Ok(content("att-1", "application/pdf", b"pdf")))),
                 image_request: Mutex::new(None),
                 download_request: Mutex::new(None),
+                download_calls: Mutex::new(0),
                 cancellation: Mutex::new(None),
             }),
             IssueMediaConfig::default(),

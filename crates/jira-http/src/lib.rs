@@ -1161,7 +1161,7 @@ fn parsed_attachment_mime_type(
 
 fn attachment_signature_error(attempt: AttachmentReadAttempt) -> ApplicationError {
     ApplicationError::new(
-        ErrorKind::Upstream,
+        ErrorKind::NotFound,
         "Jira attachment response bytes did not match an image format",
     )
     .with_attachment_diagnostic(AttachmentReadDiagnostic::validation(attempt))
@@ -1738,6 +1738,7 @@ mod tests {
                 &header::HeaderMap::new(),
                 AttachmentReadAttempt::Thumbnail,
             );
+            assert_eq!(error.kind(), ErrorKind::Upstream);
             let diagnostic = error.attachment_diagnostic().expect("status diagnostic");
             assert_eq!(
                 diagnostic.stage(),
@@ -1756,6 +1757,7 @@ mod tests {
             true,
         )
         .expect_err("missing content type");
+        assert_eq!(missing.kind(), ErrorKind::Upstream);
         assert_eq!(
             missing
                 .attachment_diagnostic()
@@ -1772,6 +1774,7 @@ mod tests {
         let unsupported =
             attachment_mime_type(&unsupported_headers, AttachmentReadAttempt::Thumbnail, true)
                 .expect_err("unsupported content type");
+        assert_eq!(unsupported.kind(), ErrorKind::Upstream);
         assert_eq!(
             unsupported
                 .attachment_diagnostic()
@@ -1780,6 +1783,23 @@ mod tests {
             Some(AttachmentMimeClass::Other)
         );
         assert!(!unsupported.message().contains("text/plain"));
+
+        let mut malformed_headers = header::HeaderMap::new();
+        malformed_headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_bytes(b"image/\xff").unwrap(),
+        );
+        let malformed =
+            attachment_mime_type(&malformed_headers, AttachmentReadAttempt::Thumbnail, true)
+                .expect_err("malformed content type");
+        assert_eq!(malformed.kind(), ErrorKind::Upstream);
+        assert_eq!(
+            malformed
+                .attachment_diagnostic()
+                .expect("malformed MIME diagnostic")
+                .mime_class(),
+            Some(AttachmentMimeClass::Malformed)
+        );
     }
 
     #[test]
@@ -1806,6 +1826,7 @@ mod tests {
         ] {
             let error = attachment_body_error(AttachmentReadAttempt::ExplicitDownload, body_class);
             let diagnostic = error.attachment_diagnostic().expect("body diagnostic");
+            assert_eq!(error.kind(), ErrorKind::Upstream);
             assert_eq!(
                 diagnostic.stage(),
                 jira_application::AttachmentReadStage::Body
@@ -2068,7 +2089,7 @@ mod tests {
             .expect_err("invalid image bytes must be rejected");
             responder.await.unwrap();
 
-            assert_eq!(error.kind(), ErrorKind::Upstream);
+            assert_eq!(error.kind(), ErrorKind::NotFound);
             assert_eq!(
                 error.message(),
                 "Jira attachment response bytes did not match an image format"
