@@ -75,8 +75,21 @@ display fallback.
 Issue descriptions and comment bodies may be Jira ADF. Jira Desk accepts a
 bounded safe subset of paragraphs, headings, lists, code blocks, quotes, panels,
 text marks, and mentions. Unsupported nodes show a placeholder. HTTP(S) links
-are validated and styled but remain inert, and media nodes are placeholders:
-the client does not download or open media or attachments.
+are validated and styled but remain inert. Description media is resolved only
+when its attachment reference is unambiguous: a unique alt/filename match, or
+the one-media/one-image case. Thumbnails are authenticated reads from the
+configured Jira origin, capped at 8 MiB each, 16 references, and 32 MiB
+aggregate; arbitrary Media Services URLs and redirects are never followed.
+Thumbnail bytes are memory-only and are not written to SQLite or another
+automatic cache.
+
+An attachment download is explicit and separate from description rendering.
+It reads the configured authenticated Jira origin, rejects redirect behavior,
+and caps the original content at 64 MiB. The user selects the destination via
+the XDG document portal; only then does a background local write begin. Cancel
+or success is reported to the UI, no automatic download or retry is performed,
+and no Jira attachment or issue mutation occurs. The remote Jira state and the
+local destination are intentionally separate.
 
 Issue snapshots, including display metadata and rich descriptions, are retained
 in the local SQLite cache. Selected issue details and comments are fetched
@@ -112,4 +125,10 @@ descriptions and comments use the bounded read-only ADF renderer; unsupported
 nodes and empty documents use safe fallbacks.
 
 No Jira issue edits, deletions, transitions, assignments, worklogs, attachment
-uploads, or background writes are supported.
+uploads, or background Jira writes are supported. A local attachment download
+is the sole exception to the “no background write” wording: it is a user-
+selected local file write, never a Jira mutation or an automatic action.
+
+Freedesktop OS alerts remain enabled for update delivery independently of the
+in-app notification layer. Media loading, local download cancellation, and
+file-write errors must not disable or replace those OS alerts.

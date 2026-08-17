@@ -74,6 +74,23 @@ categories and clear them back to All, verify the issue-list scrollbar and
 refresh spinner, and confirm that in-app notifications appear. Verify that OS
 Freedesktop desktop alerts are still delivered independently of the in-app
 notification layer. Verify display-name-only identity labels, and confirm that
-rich-text placeholders and inert links remain safe. Comments/details are remote
-and memory-only, so a restart test should expect cached issue snapshots but not
-cached comment bodies.
+rich-text placeholders and inert links remain safe.
+
+Media and attachment smoke must cover:
+
+- an unambiguous description image loading as an authenticated Jira thumbnail;
+- an ambiguous image reference falling back safely without a remote read;
+- cancellation before and during thumbnail loading, including stale-selection
+  protection;
+- per-image 8 MiB, 16-reference, and 32 MiB aggregate rejection boundaries;
+- an explicit attachment download showing the XDG portal, cancellation, and
+  successful local destination write;
+- rejection of oversize or redirected content and verification of downloaded
+  contents; and
+- isolation between remote Jira/cache state and the selected local file.
+
+No media action should be automatic or mutate Jira. Comments/details and
+thumbnails are remote and memory-only, so a restart test should expect cached
+issue snapshots but not cached comment bodies or thumbnail bytes. Confirm that
+OS Freedesktop alerts remain delivered independently throughout media loads and
+local download activity.

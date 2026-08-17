@@ -11,7 +11,7 @@ Tokio, or SQLite.
 | --- | --- |
 | `apps/gpui` | Linux desktop shell, onboarding, dashboard, detail views, and window controls |
 | `crates/domain` | Jira-independent identifiers, issues, comments, users, and update values |
-| `crates/application` | Use cases, ports, cancellation, sync, detail loading, comments, and polling policy |
+| `crates/application` | Use cases, ports, cancellation, sync, detail/media loading, comments, and polling policy |
 | `crates/jira` | Pure Jira JSON/JQL mapping and bounded request construction |
 | `crates/jira-http` | Jira Cloud transport, pagination, cancellation, response limits, and safe error mapping |
 | `crates/storage` | Worker-thread SQLite adapter, migrations, cache, membership, cursors, and local feed state |
@@ -23,7 +23,7 @@ Tokio, or SQLite.
 ```text
 GPUI shell
   -> application services and ports
-      -> Jira HTTP adapter       (remote read, plus confirmed comment creation)
+      -> Jira HTTP adapter       (remote read/media, plus confirmed comment creation)
       -> SQLite storage adapter  (local cache and update state)
       -> desktop notification adapter (best effort)
 ```
@@ -51,9 +51,20 @@ membership.
 
 Selecting an issue starts a separate cancellable detail request. The request
 loads the description, all bounded comment pages, and attachment metadata.
-Results are applied only when the selected issue and request generation still
-match. Detail data is memory-only. Comment creation uses a separate confirmed
-request path and does not share retry behavior with reads.
+Description media is resolved conservatively: only a unique alt/filename
+match, or the one-media/one-image case, can trigger an authenticated Jira
+thumbnail read. Each thumbnail is capped at 8 MiB, with at most 16 references
+and 32 MiB aggregate per detail load. Results are applied only when the
+selected issue and request generation still match; detail and thumbnail bytes
+are memory-only. Arbitrary Media Services URLs and redirects are never
+followed.
+
+An explicit attachment download is a separate user action. It reads the
+configured Jira origin with authentication, caps the response at 64 MiB, and
+writes only to the destination selected through the XDG portal. The local
+write runs in the background after selection; it is not automatic, is not
+retried automatically, and does not mutate Jira. Comment creation uses a
+separate confirmed request path and does not share retry behavior with reads.
 
 The local update feed is derived from cache transitions. It is Jira Desk's
 view of detected changes, not Jira's bell or inbox notification stream. The
@@ -111,9 +122,11 @@ Issue descriptions and comments may arrive as Jira ADF. The adapter retains a
 bounded, transport-neutral subset: paragraphs, headings, lists, code blocks,
 quotes, panels, plain text marks, mentions, and validated HTTP(S) link marks.
 Unsupported nodes become an explicit placeholder. Links are styled but inert in
-the current shell, and media is never downloaded or opened. Parser and renderer
-bounds apply independently so cached content cannot force unbounded rich-text
-work in the UI.
+the current shell. Media references follow the conservative resolution and
+thumbnail bounds above; no arbitrary Media Services URL is treated as a
+download target. Parser, renderer, and aggregate media bounds apply
+independently so cached content cannot force unbounded rich-text work in the
+UI.
 
 Issue snapshots are stored in the local SQLite cache, including display metadata
 and rich descriptions. Details and comments are fetched remotely on selection
@@ -133,8 +146,9 @@ not implied by the Textarea.
 
 Descriptions and received comments are rendered from the bounded, supported ADF
 subset described above. Empty ADF documents fall back to the normal empty-state
-copy, and unsupported or media-only content remains visible through safe
-placeholders rather than producing a blank panel or triggering a download.
+copy, and unsupported or unresolved media-only content remains visible through
+safe placeholders rather than producing a blank panel or triggering an
+implicit attachment download.
 
 ## Boundaries worth preserving
 
@@ -143,5 +157,9 @@ placeholders rather than producing a blank panel or triggering a download.
 - SQLite schema and migrations stay behind storage ports.
 - UI state owns cancellation and stale-result guards, not transport code.
 - The only Jira write port is dedicated to explicitly confirmed comment
-  creation; issue edits, transitions, assignments, attachments, and automatic
-  writes remain prohibited.
+  creation; issue edits, transitions, assignments, attachment mutations, and
+  automatic writes remain prohibited. Attachment reads are authenticated and
+  bounded; local download destinations are selected explicitly by the user.
+
+For the component inventory and upgrade decisions, see
+[`ui-component-audit.md`](ui-component-audit.md).

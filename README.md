@@ -18,8 +18,12 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   and can perform a cancellable exact-key Jira lookup for an issue outside the
   local cache.
 - Loads selected-issue descriptions, paginated comments, and attachment
-  metadata lazily. Rich Jira text is displayed through a safe subset; media is
-  represented as a placeholder and is never downloaded.
+  metadata lazily. Rich Jira text is displayed through a safe subset. A
+  description image is fetched only when its attachment reference resolves
+  unambiguously (a unique alt/filename, or the one-media/one-image case), as a
+  bounded authenticated thumbnail held in memory. Explicit attachment
+  downloads use a user-selected XDG portal destination and are separate from
+  description rendering.
 - Shows user display names in the interface while retaining stable Jira
   account IDs only for matching and local application state.
 - Keeps a durable local update feed, in-app refresh/comment feedback, and
@@ -30,6 +34,13 @@ Jira operations are read-only except for one deliberate action: creating a
 comment after the user explicitly confirms the exact issue and body. Comment
 creation is sent once, with no automatic retry; an uncertain result requires
 refreshing comments before retrying.
+
+Media reads do not mutate Jira. Description thumbnails are limited to 8 MiB
+each, 16 references, and 32 MiB aggregate, with no arbitrary Media Services
+URLs, redirects, or persistence. An explicit attachment download is limited
+to 64 MiB, reads only from the configured authenticated Jira origin, writes in
+the background only after the user selects a destination, and never starts
+automatically or retries itself.
 
 ## Prerequisites
 
