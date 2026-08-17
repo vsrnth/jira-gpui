@@ -737,6 +737,16 @@ async fn fetch_rich_image_states(
             }
             Err(error) => {
                 let error_kind = DiagnosticErrorKind::from(error.kind());
+                if let Some(attachment_diagnostic) = error.attachment_diagnostic() {
+                    diagnostics.attachment_read_diagnostic(
+                        flow,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        attachment_diagnostic,
+                    );
+                }
                 diagnostics.image_fetch_result(
                     flow,
                     load_token,

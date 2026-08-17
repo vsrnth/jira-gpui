@@ -4,6 +4,7 @@
 //! desktop-notification, GPUI, and (potentially) Tauri adapters. It deliberately
 //! contains no executor, database, HTTP, or UI dependencies.
 
+mod attachment_diagnostics;
 mod cancellation;
 mod comment;
 mod error;
@@ -20,6 +21,10 @@ mod ports;
 mod sync;
 mod user_sets;
 
+pub use attachment_diagnostics::{
+    AttachmentBodyClass, AttachmentMimeClass, AttachmentReadAttempt, AttachmentReadDiagnostic,
+    AttachmentReadStage, AttachmentTransportClass,
+};
 pub use cancellation::CancellationToken;
 pub use comment::{CommentService, MAX_COMMENT_BYTES, MAX_COMMENT_CHARS};
 pub use error::{ApplicationError, ErrorKind};

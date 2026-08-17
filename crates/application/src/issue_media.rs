@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    ApplicationError, AttachmentContent, AttachmentDownloadRequest, AttachmentImage,
-    AttachmentImageRequest, CancellationToken, ErrorKind, JiraReadPort,
+    ApplicationError, AttachmentBodyClass, AttachmentContent, AttachmentDownloadRequest,
+    AttachmentImage, AttachmentImageRequest, AttachmentMimeClass, AttachmentReadAttempt,
+    AttachmentReadDiagnostic, CancellationToken, ErrorKind, JiraReadPort,
 };
 
 pub const DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -58,12 +59,12 @@ impl IssueMediaService {
             ..request
         };
 
-        let image = match self
+        let (attempt, image) = match self
             .jira
             .fetch_attachment_image(&port_request, cancellation)
             .await
         {
-            Ok(image) => image,
+            Ok(image) => (AttachmentReadAttempt::Thumbnail, image),
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 cancellation.check()?;
                 let content_request = AttachmentDownloadRequest {
@@ -78,18 +79,31 @@ impl IssueMediaService {
                 let content = self
                     .jira
                     .fetch_attachment_content(&content_request, cancellation)
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        error.with_attachment_attempt(AttachmentReadAttempt::OriginalFallback)
+                    })?;
                 cancellation.check()?;
-                AttachmentImage {
-                    attachment_id: content.attachment_id,
-                    mime_type: content.mime_type,
-                    bytes: content.bytes,
-                }
+                (
+                    AttachmentReadAttempt::OriginalFallback,
+                    AttachmentImage {
+                        attachment_id: content.attachment_id,
+                        mime_type: content.mime_type,
+                        bytes: content.bytes,
+                    },
+                )
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(error.with_attachment_attempt(AttachmentReadAttempt::Thumbnail));
+            }
         };
 
-        validate_image(&image, &requested_attachment_id, self.config.max_bytes)?;
+        validate_image(
+            &image,
+            &requested_attachment_id,
+            self.config.max_bytes,
+            attempt,
+        )?;
 
         cancellation.check()?;
         Ok(image)
@@ -131,21 +145,43 @@ impl IssueMediaService {
         let attachment = self
             .jira
             .fetch_attachment_content(&port_request, cancellation)
-            .await?;
+            .await
+            .map_err(|error| {
+                error.with_attachment_attempt(AttachmentReadAttempt::ExplicitDownload)
+            })?;
         cancellation.check()?;
 
         if attachment.attachment_id != requested_attachment_id {
-            return Err(upstream("Jira returned a different attachment"));
+            return Err(validation_error(
+                "Jira returned a different attachment",
+                AttachmentReadAttempt::ExplicitDownload,
+            ));
         }
-        validate_attachment_id(&attachment.attachment_id)?;
+        validate_attachment_id(&attachment.attachment_id).map_err(|error| {
+            error.with_attachment_diagnostic(AttachmentReadDiagnostic::validation(
+                AttachmentReadAttempt::ExplicitDownload,
+            ))
+        })?;
         if attachment.mime_type.trim().is_empty() {
-            return Err(upstream("Jira returned an attachment without a media type"));
+            return Err(content_type_error(
+                "Jira returned an attachment without a media type",
+                AttachmentReadAttempt::ExplicitDownload,
+                AttachmentMimeClass::Missing,
+            ));
         }
         if attachment.bytes.is_empty() {
-            return Err(upstream("Jira returned an empty attachment"));
+            return Err(body_error(
+                "Jira returned an empty attachment",
+                AttachmentReadAttempt::ExplicitDownload,
+                AttachmentBodyClass::Empty,
+            ));
         }
         if attachment.bytes.len() > port_request.max_bytes {
-            return Err(upstream("Jira attachment exceeded the size limit"));
+            return Err(body_error(
+                "Jira attachment exceeded the size limit",
+                AttachmentReadAttempt::ExplicitDownload,
+                AttachmentBodyClass::TooLarge,
+            ));
         }
 
         cancellation.check()?;
@@ -206,25 +242,82 @@ fn validate_image(
     image: &AttachmentImage,
     requested_attachment_id: &str,
     max_bytes: usize,
+    attempt: AttachmentReadAttempt,
 ) -> Result<(), ApplicationError> {
     if image.attachment_id != requested_attachment_id {
-        return Err(upstream("Jira returned a different attachment"));
+        return Err(validation_error(
+            "Jira returned a different attachment",
+            attempt,
+        ));
     }
-    validate_attachment_id(&image.attachment_id)?;
+    validate_attachment_id(&image.attachment_id).map_err(|error| {
+        error.with_attachment_diagnostic(AttachmentReadDiagnostic::validation(attempt))
+    })?;
     if !is_allowed_image_mime(&image.mime_type) {
-        return Err(upstream("Jira returned an unsupported image type"));
+        return Err(content_type_error(
+            "Jira returned an unsupported image type",
+            attempt,
+            classify_mime(&image.mime_type),
+        ));
     }
     if image.bytes.is_empty() {
-        return Err(upstream("Jira returned an empty attachment image"));
+        return Err(body_error(
+            "Jira returned an empty attachment image",
+            attempt,
+            AttachmentBodyClass::Empty,
+        ));
     }
     if image.bytes.len() > max_bytes {
-        return Err(upstream("Jira attachment image exceeded the size limit"));
+        return Err(body_error(
+            "Jira attachment image exceeded the size limit",
+            attempt,
+            AttachmentBodyClass::TooLarge,
+        ));
     }
     Ok(())
 }
 
 fn upstream(message: &'static str) -> ApplicationError {
     ApplicationError::new(ErrorKind::Upstream, message)
+}
+
+fn validation_error(message: &'static str, attempt: AttachmentReadAttempt) -> ApplicationError {
+    upstream(message).with_attachment_diagnostic(AttachmentReadDiagnostic::validation(attempt))
+}
+
+fn content_type_error(
+    message: &'static str,
+    attempt: AttachmentReadAttempt,
+    mime_class: AttachmentMimeClass,
+) -> ApplicationError {
+    upstream(message)
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(attempt, mime_class))
+}
+
+fn body_error(
+    message: &'static str,
+    attempt: AttachmentReadAttempt,
+    body_class: AttachmentBodyClass,
+) -> ApplicationError {
+    upstream(message)
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::body(attempt, body_class))
+}
+
+fn classify_mime(value: &str) -> AttachmentMimeClass {
+    let value = value.trim();
+    if value.is_empty() {
+        return AttachmentMimeClass::Missing;
+    }
+
+    match value.to_ascii_lowercase().as_str() {
+        "image/png" => AttachmentMimeClass::Png,
+        "image/jpeg" | "image/jpg" => AttachmentMimeClass::Jpeg,
+        "image/gif" => AttachmentMimeClass::Gif,
+        "image/webp" => AttachmentMimeClass::Webp,
+        "application/octet-stream" => AttachmentMimeClass::OctetStream,
+        value if value.contains('/') => AttachmentMimeClass::Other,
+        _ => AttachmentMimeClass::Malformed,
+    }
 }
 
 #[cfg(test)]
@@ -238,7 +331,10 @@ mod tests {
     use jira_domain::{IssueId, JiraSiteId, User};
 
     use super::*;
-    use crate::{IssueFetchRequest, IssuePage, PortFuture, UserSearchRequest};
+    use crate::{
+        AttachmentReadAttempt, AttachmentReadStage, IssueFetchRequest, IssuePage, PortFuture,
+        UserSearchRequest,
+    };
 
     struct FakeJira {
         image: Mutex<Option<Result<AttachmentImage, ApplicationError>>>,
@@ -536,6 +632,47 @@ mod tests {
     }
 
     #[test]
+    fn relabels_original_fallback_error_without_changing_error_semantics() {
+        let fake = Arc::new(FakeJira {
+            image: Mutex::new(Some(Err(ApplicationError::new(
+                ErrorKind::NotFound,
+                "thumbnail unavailable",
+            )))),
+            download: Mutex::new(Some(Err(ApplicationError::new(
+                ErrorKind::Upstream,
+                "content failed",
+            )
+            .with_attachment_diagnostic(AttachmentReadDiagnostic::body(
+                AttachmentReadAttempt::ExplicitDownload,
+                AttachmentBodyClass::ReadFailed,
+            ))))),
+            image_request: Mutex::new(None),
+            download_request: Mutex::new(None),
+            cancellation: Mutex::new(None),
+        });
+        let service = IssueMediaService::new(
+            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            IssueMediaConfig::default(),
+        );
+
+        let error = block_on(service.fetch(request("att-1"), &CancellationToken::new()))
+            .expect_err("failed original fallback");
+
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+        assert_eq!(error.message(), "content failed");
+        let diagnostic = error.attachment_diagnostic().expect("fallback diagnostic");
+        assert_eq!(
+            diagnostic.attempt(),
+            AttachmentReadAttempt::OriginalFallback
+        );
+        assert_eq!(diagnostic.stage(), AttachmentReadStage::Body);
+        assert_eq!(
+            diagnostic.body_class(),
+            Some(AttachmentBodyClass::ReadFailed)
+        );
+    }
+
+    #[test]
     fn service_materializes_non_default_thumbnail_bounds_for_the_port() {
         let fake = Arc::new(FakeJira {
             image: Mutex::new(Some(Ok(image("att-1", "image/png", b"png")))),
@@ -595,6 +732,47 @@ mod tests {
             )
             .expect_err("invalid attachment image should be rejected");
             assert_eq!(error.kind(), kind);
+        }
+    }
+
+    #[test]
+    fn validation_failures_report_safe_attachment_context() {
+        let cases = [
+            (
+                image("different", "image/png", b"x"),
+                AttachmentReadStage::Validation,
+                None,
+                None,
+            ),
+            (
+                image("att-1", "text/plain", b"x"),
+                AttachmentReadStage::ContentType,
+                Some(AttachmentMimeClass::Other),
+                None,
+            ),
+            (
+                image("att-1", "image/png", b""),
+                AttachmentReadStage::Body,
+                None,
+                Some(AttachmentBodyClass::Empty),
+            ),
+            (
+                image("att-1", "image/png", b"12345"),
+                AttachmentReadStage::Body,
+                None,
+                Some(AttachmentBodyClass::TooLarge),
+            ),
+        ];
+
+        for (response, stage, mime_class, body_class) in cases {
+            let error =
+                block_on(service(Ok(response)).fetch(request("att-1"), &CancellationToken::new()))
+                    .expect_err("invalid attachment image should be rejected");
+            let diagnostic = error.attachment_diagnostic().expect("diagnostic");
+            assert_eq!(diagnostic.attempt(), AttachmentReadAttempt::Thumbnail);
+            assert_eq!(diagnostic.stage(), stage);
+            assert_eq!(diagnostic.mime_class(), mime_class);
+            assert_eq!(diagnostic.body_class(), body_class);
         }
     }
 

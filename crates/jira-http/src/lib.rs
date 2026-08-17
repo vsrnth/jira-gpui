@@ -12,12 +12,14 @@ use std::{
 
 use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraCommentPage, JiraIssue, JiraUser};
 use jira_application::{
-    AddCommentRequest, ApplicationError, AttachmentContent, AttachmentDownloadRequest,
-    AttachmentImage, AttachmentImageRequest, CancellationToken, DEFAULT_ATTACHMENT_IMAGE_HEIGHT,
-    DEFAULT_ATTACHMENT_IMAGE_WIDTH, DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
-    DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind, IssueCommentsPage, IssueCommentsPageRequest,
-    IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, JiraCommentWritePort,
-    JiraReadPort, PageCursor, PortFuture, UserSearchRequest,
+    AddCommentRequest, ApplicationError, AttachmentBodyClass, AttachmentContent,
+    AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest, AttachmentMimeClass,
+    AttachmentReadAttempt, AttachmentReadDiagnostic, AttachmentTransportClass, CancellationToken,
+    DEFAULT_ATTACHMENT_IMAGE_HEIGHT, DEFAULT_ATTACHMENT_IMAGE_WIDTH,
+    DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind,
+    IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
+    IssueLocator, IssuePage, JiraCommentWritePort, JiraReadPort, PageCursor, PortFuture,
+    UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, User};
 use reqwest::{Client, Response, StatusCode, header};
@@ -576,35 +578,20 @@ impl JiraHttpClient {
         let response = Self::attachment_request_builder(&client, url, &credentials)
             .send()
             .await
-            .map_err(transport_error)?;
+            .map_err(|error| attachment_transport_error(error, attachment_attempt(&options)))?;
+        let attempt = attachment_attempt(&options);
         let status = response.status();
         if !status.is_success() {
-            return Err(status_error(status, response.headers()));
+            return Err(attachment_status_error(status, response.headers(), attempt));
         }
-        let mime_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(media_type)
-            .ok_or_else(|| {
-                ApplicationError::new(
-                    ErrorKind::Upstream,
-                    "Jira attachment response had an invalid media type",
-                )
-            })?;
-        if options.thumbnail && !is_allowed_image_mime(&mime_type) {
-            return Err(ApplicationError::new(
-                ErrorKind::Upstream,
-                "Jira attachment response was not an image",
-            ));
-        }
+        let mime_type = attachment_mime_type(response.headers(), attempt, options.thumbnail)?;
         if response
             .content_length()
             .is_some_and(|length| length > options.max_bytes as u64)
         {
-            return Err(ApplicationError::new(
-                ErrorKind::Upstream,
-                "Jira attachment exceeded the size limit",
+            return Err(attachment_body_error(
+                attempt,
+                AttachmentBodyClass::TooLarge,
             ));
         }
 
@@ -612,17 +599,24 @@ impl JiraHttpClient {
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| {
             ApplicationError::new(ErrorKind::Offline, "could not read Jira attachment")
+                .with_attachment_diagnostic(AttachmentReadDiagnostic::body(
+                    attempt,
+                    AttachmentBodyClass::ReadFailed,
+                ))
         })? {
             options.cancellation.check()?;
             if body.len().saturating_add(chunk.len()) > options.max_bytes {
-                return Err(ApplicationError::new(
-                    ErrorKind::Upstream,
-                    "Jira attachment exceeded the size limit",
+                return Err(attachment_body_error(
+                    attempt,
+                    AttachmentBodyClass::TooLarge,
                 ));
             }
             body.extend_from_slice(&chunk);
         }
         options.cancellation.check()?;
+        if body.is_empty() {
+            return Err(attachment_body_error(attempt, AttachmentBodyClass::Empty));
+        }
         let body = finish_attachment_body(body, options.max_bytes, &options.cancellation)?;
         Ok(AttachmentContent {
             attachment_id: options.attachment_id,
@@ -1027,6 +1021,103 @@ fn transport_error(error: reqwest::Error) -> ApplicationError {
     } else {
         ApplicationError::new(ErrorKind::Upstream, "Jira request failed")
     }
+}
+
+fn attachment_attempt(options: &AttachmentReadOptions) -> AttachmentReadAttempt {
+    if options.thumbnail {
+        AttachmentReadAttempt::Thumbnail
+    } else {
+        AttachmentReadAttempt::ExplicitDownload
+    }
+}
+
+fn attachment_transport_error(
+    error: reqwest::Error,
+    attempt: AttachmentReadAttempt,
+) -> ApplicationError {
+    let transport_class = if error.is_timeout() {
+        AttachmentTransportClass::TimedOut
+    } else if error.is_connect() {
+        AttachmentTransportClass::ConnectFailed
+    } else {
+        AttachmentTransportClass::RequestFailed
+    };
+    transport_error(error).with_attachment_diagnostic(AttachmentReadDiagnostic::transport(
+        attempt,
+        transport_class,
+    ))
+}
+
+fn attachment_status_error(
+    status: StatusCode,
+    headers: &header::HeaderMap,
+    attempt: AttachmentReadAttempt,
+) -> ApplicationError {
+    status_error(status, headers)
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::status(attempt, status.as_u16()))
+}
+
+fn attachment_body_error(
+    attempt: AttachmentReadAttempt,
+    body_class: AttachmentBodyClass,
+) -> ApplicationError {
+    ApplicationError::new(
+        ErrorKind::Upstream,
+        match body_class {
+            AttachmentBodyClass::Empty => "Jira returned an empty attachment",
+            AttachmentBodyClass::TooLarge => "Jira attachment exceeded the size limit",
+            AttachmentBodyClass::ReadFailed => "could not read Jira attachment",
+        },
+    )
+    .with_attachment_diagnostic(AttachmentReadDiagnostic::body(attempt, body_class))
+}
+
+fn attachment_mime_type(
+    headers: &header::HeaderMap,
+    attempt: AttachmentReadAttempt,
+    thumbnail: bool,
+) -> Result<String, ApplicationError> {
+    let Some(value) = headers.get(header::CONTENT_TYPE) else {
+        return Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira attachment response had an invalid media type",
+        )
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
+            attempt,
+            AttachmentMimeClass::Missing,
+        )));
+    };
+    let raw_value = value.to_str().map_err(|_| {
+        ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira attachment response had an invalid media type",
+        )
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
+            attempt,
+            AttachmentMimeClass::Malformed,
+        ))
+    })?;
+    let mime_type = media_type(raw_value).ok_or_else(|| {
+        ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira attachment response had an invalid media type",
+        )
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
+            attempt,
+            AttachmentMimeClass::Malformed,
+        ))
+    })?;
+    if thumbnail && !is_allowed_image_mime(&mime_type) {
+        return Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira attachment response was not an image",
+        )
+        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
+            attempt,
+            AttachmentMimeClass::Other,
+        )));
+    }
+    Ok(mime_type)
 }
 
 fn media_type(value: &str) -> Option<String> {
@@ -1546,6 +1637,58 @@ mod tests {
     }
 
     #[test]
+    fn attachment_status_diagnostic_preserves_exact_http_status() {
+        for status in [StatusCode::FOUND, StatusCode::BAD_REQUEST] {
+            let error = attachment_status_error(
+                status,
+                &header::HeaderMap::new(),
+                AttachmentReadAttempt::Thumbnail,
+            );
+            let diagnostic = error.attachment_diagnostic().expect("status diagnostic");
+            assert_eq!(
+                diagnostic.stage(),
+                jira_application::AttachmentReadStage::Status
+            );
+            assert_eq!(diagnostic.attempt(), AttachmentReadAttempt::Thumbnail);
+            assert_eq!(diagnostic.status_code(), Some(status.as_u16()));
+        }
+    }
+
+    #[test]
+    fn attachment_mime_diagnostics_use_only_safe_classes() {
+        let missing = attachment_mime_type(
+            &header::HeaderMap::new(),
+            AttachmentReadAttempt::Thumbnail,
+            true,
+        )
+        .expect_err("missing content type");
+        assert_eq!(
+            missing
+                .attachment_diagnostic()
+                .expect("missing MIME diagnostic")
+                .mime_class(),
+            Some(AttachmentMimeClass::Missing)
+        );
+
+        let mut unsupported_headers = header::HeaderMap::new();
+        unsupported_headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/plain"),
+        );
+        let unsupported =
+            attachment_mime_type(&unsupported_headers, AttachmentReadAttempt::Thumbnail, true)
+                .expect_err("unsupported content type");
+        assert_eq!(
+            unsupported
+                .attachment_diagnostic()
+                .expect("unsupported MIME diagnostic")
+                .mime_class(),
+            Some(AttachmentMimeClass::Other)
+        );
+        assert!(!unsupported.message().contains("text/plain"));
+    }
+
+    #[test]
     fn attachment_body_limits_reject_empty_and_oversized_responses_without_details() {
         let empty = finish_attachment_body(Vec::new(), 4, &CancellationToken::new()).unwrap_err();
         assert_eq!(empty.kind(), ErrorKind::Upstream);
@@ -1553,6 +1696,33 @@ mod tests {
             finish_attachment_body(b"12345".to_vec(), 4, &CancellationToken::new()).unwrap_err();
         assert_eq!(oversized.kind(), ErrorKind::Upstream);
         assert!(!oversized.message().contains("12345"));
+    }
+
+    #[test]
+    fn attachment_body_diagnostics_distinguish_empty_and_size_failures() {
+        for (body_class, message) in [
+            (
+                AttachmentBodyClass::Empty,
+                "Jira returned an empty attachment",
+            ),
+            (
+                AttachmentBodyClass::TooLarge,
+                "Jira attachment exceeded the size limit",
+            ),
+        ] {
+            let error = attachment_body_error(AttachmentReadAttempt::ExplicitDownload, body_class);
+            let diagnostic = error.attachment_diagnostic().expect("body diagnostic");
+            assert_eq!(
+                diagnostic.stage(),
+                jira_application::AttachmentReadStage::Body
+            );
+            assert_eq!(
+                diagnostic.attempt(),
+                AttachmentReadAttempt::ExplicitDownload
+            );
+            assert_eq!(diagnostic.body_class(), Some(body_class));
+            assert_eq!(error.message(), message);
+        }
     }
 
     #[test]

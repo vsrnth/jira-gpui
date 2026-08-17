@@ -240,6 +240,105 @@ pub(crate) enum DecodeFallbackReason {
     DecodeFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AttachmentDiagnosticAttempt {
+    Thumbnail,
+    OriginalFallback,
+    ExplicitDownload,
+}
+
+impl AttachmentDiagnosticAttempt {
+    const fn as_json(self) -> &'static str {
+        match self {
+            Self::Thumbnail => "thumbnail",
+            Self::OriginalFallback => "original_fallback",
+            Self::ExplicitDownload => "explicit_download",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AttachmentDiagnosticStage {
+    Transport,
+    Status,
+    ContentType,
+    Body,
+    Validation,
+}
+
+impl AttachmentDiagnosticStage {
+    const fn as_json(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Status => "status",
+            Self::ContentType => "content_type",
+            Self::Body => "body",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AttachmentDiagnosticMime {
+    Missing,
+    Malformed,
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    OctetStream,
+    Other,
+}
+
+impl AttachmentDiagnosticMime {
+    const fn as_json(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Malformed => "malformed",
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+            Self::Gif => "gif",
+            Self::Webp => "webp",
+            Self::OctetStream => "octet_stream",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AttachmentDiagnosticBody {
+    Empty,
+    TooLarge,
+    ReadFailed,
+}
+
+impl AttachmentDiagnosticBody {
+    const fn as_json(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLarge => "too_large",
+            Self::ReadFailed => "read_failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AttachmentDiagnosticTransport {
+    ConnectFailed,
+    TimedOut,
+    RequestFailed,
+}
+
+impl AttachmentDiagnosticTransport {
+    const fn as_json(self) -> &'static str {
+        match self {
+            Self::ConnectFailed => "connect_failed",
+            Self::TimedOut => "timed_out",
+            Self::RequestFailed => "request_failed",
+        }
+    }
+}
+
 impl DecodeFallbackReason {
     const fn as_json(self) -> &'static str {
         match self {
@@ -294,6 +393,19 @@ pub(crate) enum DiagnosticEvent {
         surface_ordinal: u8,
         source: ImageSource,
         reason: DecodeFallbackReason,
+    },
+    AttachmentReadDiagnostic {
+        flow: DiagnosticFlow,
+        load_token: u64,
+        candidate_ordinal: u8,
+        surface_ordinal: u8,
+        source: ImageSource,
+        attempt: AttachmentDiagnosticAttempt,
+        stage: AttachmentDiagnosticStage,
+        status_code: Option<u16>,
+        mime_class: Option<AttachmentDiagnosticMime>,
+        body_class: Option<AttachmentDiagnosticBody>,
+        transport_class: Option<AttachmentDiagnosticTransport>,
     },
 }
 
@@ -390,6 +502,102 @@ impl DiagnosticEvent {
             surface_ordinal: bounded_candidate(surface_ordinal),
             source,
             reason,
+        }
+    }
+
+    pub(crate) fn attachment_read_diagnostic(
+        flow: DiagnosticFlow,
+        load_token: u64,
+        candidate_ordinal: usize,
+        surface_ordinal: usize,
+        source: ImageSource,
+        diagnostic: jira_application::AttachmentReadDiagnostic,
+    ) -> Self {
+        Self::AttachmentReadDiagnostic {
+            flow,
+            load_token,
+            candidate_ordinal: bounded_candidate(candidate_ordinal),
+            surface_ordinal: bounded_candidate(surface_ordinal),
+            source,
+            attempt: attachment_diagnostic_attempt(diagnostic.attempt()),
+            stage: attachment_diagnostic_stage(diagnostic.stage()),
+            status_code: diagnostic.status_code(),
+            mime_class: diagnostic.mime_class().map(attachment_diagnostic_mime),
+            body_class: diagnostic.body_class().map(attachment_diagnostic_body),
+            transport_class: diagnostic
+                .transport_class()
+                .map(attachment_diagnostic_transport),
+        }
+    }
+}
+
+fn attachment_diagnostic_attempt(
+    attempt: jira_application::AttachmentReadAttempt,
+) -> AttachmentDiagnosticAttempt {
+    match attempt {
+        jira_application::AttachmentReadAttempt::Thumbnail => {
+            AttachmentDiagnosticAttempt::Thumbnail
+        }
+        jira_application::AttachmentReadAttempt::OriginalFallback => {
+            AttachmentDiagnosticAttempt::OriginalFallback
+        }
+        jira_application::AttachmentReadAttempt::ExplicitDownload => {
+            AttachmentDiagnosticAttempt::ExplicitDownload
+        }
+    }
+}
+
+fn attachment_diagnostic_stage(
+    stage: jira_application::AttachmentReadStage,
+) -> AttachmentDiagnosticStage {
+    match stage {
+        jira_application::AttachmentReadStage::Transport => AttachmentDiagnosticStage::Transport,
+        jira_application::AttachmentReadStage::Status => AttachmentDiagnosticStage::Status,
+        jira_application::AttachmentReadStage::ContentType => {
+            AttachmentDiagnosticStage::ContentType
+        }
+        jira_application::AttachmentReadStage::Body => AttachmentDiagnosticStage::Body,
+        jira_application::AttachmentReadStage::Validation => AttachmentDiagnosticStage::Validation,
+    }
+}
+
+fn attachment_diagnostic_mime(
+    mime: jira_application::AttachmentMimeClass,
+) -> AttachmentDiagnosticMime {
+    match mime {
+        jira_application::AttachmentMimeClass::Missing => AttachmentDiagnosticMime::Missing,
+        jira_application::AttachmentMimeClass::Malformed => AttachmentDiagnosticMime::Malformed,
+        jira_application::AttachmentMimeClass::Png => AttachmentDiagnosticMime::Png,
+        jira_application::AttachmentMimeClass::Jpeg => AttachmentDiagnosticMime::Jpeg,
+        jira_application::AttachmentMimeClass::Gif => AttachmentDiagnosticMime::Gif,
+        jira_application::AttachmentMimeClass::Webp => AttachmentDiagnosticMime::Webp,
+        jira_application::AttachmentMimeClass::OctetStream => AttachmentDiagnosticMime::OctetStream,
+        jira_application::AttachmentMimeClass::Other => AttachmentDiagnosticMime::Other,
+    }
+}
+
+fn attachment_diagnostic_body(
+    body: jira_application::AttachmentBodyClass,
+) -> AttachmentDiagnosticBody {
+    match body {
+        jira_application::AttachmentBodyClass::Empty => AttachmentDiagnosticBody::Empty,
+        jira_application::AttachmentBodyClass::TooLarge => AttachmentDiagnosticBody::TooLarge,
+        jira_application::AttachmentBodyClass::ReadFailed => AttachmentDiagnosticBody::ReadFailed,
+    }
+}
+
+fn attachment_diagnostic_transport(
+    transport: jira_application::AttachmentTransportClass,
+) -> AttachmentDiagnosticTransport {
+    match transport {
+        jira_application::AttachmentTransportClass::ConnectFailed => {
+            AttachmentDiagnosticTransport::ConnectFailed
+        }
+        jira_application::AttachmentTransportClass::TimedOut => {
+            AttachmentDiagnosticTransport::TimedOut
+        }
+        jira_application::AttachmentTransportClass::RequestFailed => {
+            AttachmentDiagnosticTransport::RequestFailed
         }
     }
 }
@@ -627,6 +835,25 @@ impl DiagnosticsSink {
             surface_ordinal,
             source,
             reason,
+        ));
+    }
+
+    pub(crate) fn attachment_read_diagnostic(
+        &self,
+        flow: DiagnosticFlow,
+        load_token: u64,
+        candidate_ordinal: usize,
+        surface_ordinal: usize,
+        source: ImageSource,
+        diagnostic: jira_application::AttachmentReadDiagnostic,
+    ) {
+        self.record(DiagnosticEvent::attachment_read_diagnostic(
+            flow,
+            load_token,
+            candidate_ordinal,
+            surface_ordinal,
+            source,
+            diagnostic,
         ));
     }
 }
@@ -868,6 +1095,40 @@ fn serialize_event(event: DiagnosticEvent, sequence: u64, timestamp: u64) -> Opt
             surface_ordinal,
             source.as_json(),
             reason.as_json()
+        ),
+        DiagnosticEvent::AttachmentReadDiagnostic {
+            flow,
+            load_token,
+            candidate_ordinal,
+            surface_ordinal,
+            source,
+            attempt,
+            stage,
+            status_code,
+            mime_class,
+            body_class,
+            transport_class,
+        } => format!(
+            r#"{prefix}attachment_read_diagnostic","flow":"{}","load_token":{},"candidate":{},"surface":{},"source":"{}","attempt":"{}","stage":"{}","status_code":{},"mime_class":{},"body_class":{},"transport_class":{}}}"#,
+            flow.as_json(),
+            load_token,
+            candidate_ordinal,
+            surface_ordinal,
+            source.as_json(),
+            attempt.as_json(),
+            stage.as_json(),
+            status_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_owned()),
+            mime_class
+                .map(|value| format!(r#""{}""#, value.as_json()))
+                .unwrap_or_else(|| "null".to_owned()),
+            body_class
+                .map(|value| format!(r#""{}""#, value.as_json()))
+                .unwrap_or_else(|| "null".to_owned()),
+            transport_class
+                .map(|value| format!(r#""{}""#, value.as_json()))
+                .unwrap_or_else(|| "null".to_owned()),
         ),
     };
     let bytes = json.into_bytes();
@@ -1146,6 +1407,94 @@ mod tests {
             assert!(!line.contains("attachment"));
             assert!(!line.contains("filename"));
         }
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn attachment_diagnostic_is_fixed_schema_enum_only_and_bounded() {
+        let root = temporary_root("attachment-diagnostic");
+        let sink = DiagnosticsSink::for_directory(&root);
+        sink.attachment_read_diagnostic(
+            DiagnosticFlow::RemoteLookup,
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+            ImageSource::FallbackCandidate,
+            jira_application::AttachmentReadDiagnostic::status(
+                jira_application::AttachmentReadAttempt::OriginalFallback,
+                599,
+            ),
+        );
+        sink.attachment_read_diagnostic(
+            DiagnosticFlow::RemoteLookup,
+            2,
+            0,
+            1,
+            ImageSource::FallbackCandidate,
+            jira_application::AttachmentReadDiagnostic::content_type(
+                jira_application::AttachmentReadAttempt::Thumbnail,
+                jira_application::AttachmentMimeClass::OctetStream,
+            ),
+        );
+        sink.attachment_read_diagnostic(
+            DiagnosticFlow::SelectedDetail,
+            3,
+            1,
+            0,
+            ImageSource::ResolvedAdf,
+            jira_application::AttachmentReadDiagnostic::body(
+                jira_application::AttachmentReadAttempt::OriginalFallback,
+                jira_application::AttachmentBodyClass::TooLarge,
+            ),
+        );
+        sink.attachment_read_diagnostic(
+            DiagnosticFlow::SelectedDetail,
+            4,
+            2,
+            1,
+            ImageSource::ResolvedAdf,
+            jira_application::AttachmentReadDiagnostic::transport(
+                jira_application::AttachmentReadAttempt::ExplicitDownload,
+                jira_application::AttachmentTransportClass::TimedOut,
+            ),
+        );
+
+        let lines = read_lines(&root.join(DIAGNOSTICS_FILENAME));
+        assert_eq!(lines.len(), 4);
+        let status_line = &lines[0];
+        assert!(is_json_line(status_line));
+        assert!(status_line.len() <= MAX_LINE_BYTES);
+        assert!(status_line.contains(r#""event":"attachment_read_diagnostic""#));
+        assert!(status_line.contains(r#""attempt":"original_fallback""#));
+        assert!(status_line.contains(r#""stage":"status""#));
+        assert!(status_line.contains(r#""status_code":599"#));
+        assert!(status_line.contains(r#""mime_class":null"#));
+        assert!(status_line.contains(r#""body_class":null"#));
+        assert!(status_line.contains(r#""transport_class":null"#));
+        assert!(!status_line.contains("https://jira.example"));
+        assert!(!status_line.contains("attachment-123"));
+        assert!(!status_line.contains("secret.png"));
+        assert!(!status_line.contains("Content-Type"));
+        assert!(!status_line.contains("image/octet-stream"));
+        assert!(!status_line.contains("raw response body"));
+
+        let mime_line = &lines[1];
+        assert!(is_json_line(mime_line));
+        assert!(mime_line.contains(r#""stage":"content_type""#));
+        assert!(mime_line.contains(r#""status_code":null"#));
+        assert!(mime_line.contains(r#""mime_class":"octet_stream""#));
+        assert!(mime_line.contains(r#""body_class":null"#));
+        assert!(mime_line.contains(r#""transport_class":null"#));
+
+        let body_line = &lines[2];
+        assert!(is_json_line(body_line));
+        assert!(body_line.contains(r#""stage":"body""#));
+        assert!(body_line.contains(r#""body_class":"too_large""#));
+
+        let transport_line = &lines[3];
+        assert!(is_json_line(transport_line));
+        assert!(transport_line.contains(r#""stage":"transport""#));
+        assert!(transport_line.contains(r#""transport_class":"timed_out""#));
         fs::remove_dir_all(root).expect("cleanup");
     }
 
