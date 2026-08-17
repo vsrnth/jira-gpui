@@ -63,6 +63,29 @@ Cancellation is propagated through Jira pagination, detail loading, and exact
 key lookup. A failed remote refresh leaves the last committed cache available.
 Mark-read operations change only local state.
 
+## Identity and rich content
+
+Jira account IDs are retained internally because they are the stable keys used
+for assignment, filtering, and update-event matching. The UI uses display names
+from `/myself`, the authenticated user catalog, and embedded issue/comment
+metadata. An unknown identity is shown as `Unknown user` or `Unknown author`,
+and an empty assignment as `Unassigned`; an account ID is never used as a
+display fallback.
+
+Issue descriptions and comment bodies may be Jira ADF. Jira Desk accepts a
+bounded safe subset of paragraphs, headings, lists, code blocks, quotes, panels,
+text marks, and mentions. Unsupported nodes show a placeholder. HTTP(S) links
+are validated and styled but remain inert, and media nodes are placeholders:
+the client does not download or open media or attachments.
+
+Issue snapshots, including display metadata and rich descriptions, are retained
+in the local SQLite cache. Selected issue details and comments are fetched
+remotely and held in memory; comment bodies are not persisted across restart.
+
+The dashboard is responsive: below 720 px it shows one mobile pane at a time;
+720–959 px uses a compact navigation rail; 960–1,199 px uses the standard
+desktop columns; and 1,200 px or wider uses the expanded desktop layout.
+
 ## Comment policy
 
 Creating a comment is the sole Jira write. The composer is memory-only and

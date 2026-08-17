@@ -1,9 +1,8 @@
 # Jira Desk
 
-Jira Desk is a small Jira Cloud desktop client for keeping an authenticated
-user's assigned issues visible. It keeps a local SQLite cache, detects changes,
-and presents a local update feed without turning Jira into a second system of
-record.
+Jira Desk is a focused Jira Cloud desktop client for keeping an authenticated
+user's assigned issues visible. It keeps a local cache, detects changes, and
+shows a local update feed without turning Jira into a second system of record.
 
 Phase 1 targets Linux on native Wayland and ships as an x86_64 AppImage.
 macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
@@ -14,10 +13,14 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   `/myself` endpoint; onboarding never asks for an account ID.
 - Synchronizes the Jira Project project, then shows only the authenticated
   user's issues in the dashboard.
+- Adapts from a mobile single-pane view to compact and full desktop layouts.
 - Filters status, searches issue keys/summaries locally, and can perform a
   cancellable exact-key Jira lookup for an issue outside the local cache.
 - Loads selected-issue descriptions, paginated comments, and attachment
-  metadata lazily. Attachment content is never downloaded or opened.
+  metadata lazily. Rich Jira text is displayed through a safe subset; media is
+  represented as a placeholder and is never downloaded.
+- Shows user display names in the interface while retaining stable Jira
+  account IDs only for matching and local application state.
 - Keeps a durable local update feed and best-effort desktop notifications.
 - Provides client-side Wayland title-bar controls and a local SQLite cache.
 
@@ -41,12 +44,9 @@ cargo run -p jira-gpui
 ```
 
 On first launch, enter the Jira URL, Atlassian email, and unscoped API token.
-Jira Desk validates them through `/myself`, discards the token input before
-connection work begins, and keeps credentials only in the in-memory client.
-Environment bootstrap first constructs the client and opens SQLite; Dashboard
-initialization then resolves `/myself` before creating the authenticated
-workspace and loading its scoped cache. See [operations and
-security](docs/operations.md).
+Jira Desk derives your Jira identity from the authenticated connection; you do
+not need to find or enter an account ID. See [operations and
+security](docs/operations.md) for credential handling and local data.
 
 ## Development commands
 

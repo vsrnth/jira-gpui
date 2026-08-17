@@ -56,6 +56,48 @@ The local update feed is derived from cache transitions. It is Jira Desk's
 view of detected changes, not Jira's bell or inbox notification stream.
 Desktop delivery is best effort and never makes a sync fail.
 
+## Responsive presentation
+
+The GPUI shell adapts at the window width rather than assuming a fixed desktop
+canvas:
+
+| Width | Layout |
+| --- | --- |
+| below 720 px | Mobile navigation with one visible pane; selecting an issue opens its detail view and a back action returns to the list |
+| 720–959 px | Compact desktop layout with a 64 px navigation rail, issue list, and detail pane |
+| 960–1,199 px | Standard desktop layout with full navigation and narrower list/detail columns |
+| 1,200 px and wider | Wide desktop layout with full navigation and expanded list/detail columns |
+
+List rows, detail fields, comments, and rich text use constrained flex children
+and wrapping/truncation so long Jira content does not determine the window
+width.
+
+## Identity and rich content
+
+Account IDs are stable typed identities used for matching, filtering, and local
+state. They are not UI labels. The presentation directory resolves display
+names from the authenticated user catalog and issue/comment metadata; missing
+names use `Unknown user`, `Unknown author`, or `Unassigned` rather than falling
+back to an opaque account ID.
+
+Issue descriptions and comments may arrive as Jira ADF. The adapter retains a
+bounded, transport-neutral subset: paragraphs, headings, lists, code blocks,
+quotes, panels, plain text marks, mentions, and validated HTTP(S) link marks.
+Unsupported nodes become an explicit placeholder. Links are styled but inert in
+the current shell, and media is never downloaded or opened. Parser and renderer
+bounds apply independently so cached content cannot force unbounded rich-text
+work in the UI.
+
+Issue snapshots are stored in the local SQLite cache, including display metadata
+and rich descriptions. Details and comments are fetched remotely on selection
+and held in memory; comment bodies are not persisted by the current cache.
+
+Issue-type and priority labels remain the source of truth. The dashboard adds
+small embedded `gpui-component` semantic icons as secondary cues: generic icons
+cover Story, Initiative, Task, Sub-task, Bug, Epic, and unknown types, while
+priority arrows/minus communicate Highest through Lowest with restrained theme
+tones.
+
 ## Boundaries worth preserving
 
 - Jira locators and account IDs are typed in application/domain contracts.
