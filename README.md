@@ -32,6 +32,9 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
 - Keeps a durable local update feed, in-app refresh/comment feedback, and
   best-effort OS desktop notifications.
 - Provides client-side Wayland title-bar controls and a local SQLite cache.
+- Keeps bounded, privacy-safe image diagnostics in the local state directory;
+  diagnostic setup and write failures never prevent startup, and logging is
+  best-effort.
 
 Jira operations are read-only except for one deliberate action: creating a
 comment after the user explicitly confirms the exact issue and body. Comment
@@ -52,7 +55,10 @@ The GPUI asset bundle is registered at application startup so title-bar and
 semantic icons render without a hover-only discovery dependency. Window
 minimize, maximize, and close controls remain client-side Wayland controls;
 hover may provide emphasis, but idle controls remain discoverable. OS alerts
-remain unchanged and independent of in-app notifications.
+remain unchanged and independent of in-app notifications. Image diagnostics use
+only safe structured enums and integers, rotate within 256 KiB plus one backup,
+and exclude credentials, URLs, Jira identifiers, user content, payloads, and
+raw errors.
 
 ## Prerequisites
 

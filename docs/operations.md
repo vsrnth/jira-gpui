@@ -63,6 +63,26 @@ Cancellation is propagated through Jira pagination, detail loading, and exact
 key lookup. A failed remote refresh leaves the last committed cache available.
 Mark-read operations change only local state.
 
+## Image diagnostics
+
+Image decode and rendering diagnostics are best-effort. They are written as
+JSON Lines to `$XDG_STATE_HOME/jira-desk/diagnostics.jsonl`
+when `XDG_STATE_HOME` is a non-empty absolute path, otherwise to
+`$HOME/.local/state/jira-desk/diagnostics.jsonl`. The state directory is mode
+`0700`; the active log and its single backup are mode `0600`. Rotation keeps at
+most 256 KiB in the active file plus one 256 KiB backup. A missing, unreadable,
+or unwritable diagnostics log must not prevent the application from starting or
+serving Jira data; diagnostic setup and write failures are isolated from normal
+Jira operation.
+
+Each record contains only structured safe enums and integers describing the
+diagnostic stage, outcome, bounded image limits, and decode/fallback category.
+Diagnostics never include tokens or `Authorization`, URLs or hosts, issue or
+attachment IDs, filenames or alt text, descriptions or comments, response
+bodies or raw bytes, or raw error text. In particular, a decode fallback
+diagnostic identifies the safe `gpui_decode_fallback` category without copying
+the remote payload or error into the log.
+
 ## Identity and rich content
 
 Jira account IDs are retained internally because they are the stable keys used

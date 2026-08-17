@@ -105,3 +105,16 @@ thumbnails are remote and memory-only, so a restart test should expect cached
 issue snapshots but not cached comment bodies or thumbnail bytes. Confirm that
 OS Freedesktop alerts remain delivered independently throughout media loads and
 local download activity.
+
+Image diagnostics smoke should use a fresh temporary `XDG_STATE_HOME` for the
+run, preserving any existing user diagnostics logs, then inspect the JSONL
+records after exercising an IX-1873-like unresolved ADF
+Media Services UUID. Confirm that the record distinguishes each pre-GPUI
+failed or pre-GPUI missing state from the safe `gpui_decode_fallback` category,
+without exposing any excluded identifiers, URLs, filenames, text, payloads, or
+raw errors. Exercise enough image activity to verify rotation leaves no more
+than a 256 KiB active log and one 256 KiB backup. Verify the state directory is
+`0700` and both log files are `0600`; a missing or unwritable log must not block
+startup. Finally, confirm that the existing OS Freedesktop desktop alerts are
+unchanged and still delivered independently of diagnostics and in-app
+notifications.
