@@ -1,132 +1,67 @@
-# Jira GPUI
+# Jira Desk
 
-A Jira Cloud desktop client built with GPUI and `gpui-component`. Jira
-synchronization remains read-only; the sole remote write is explicit,
-user-confirmed comment creation.
+Jira Desk is a small Jira Cloud desktop client for keeping an authenticated
+user's assigned issues visible. It keeps a local SQLite cache, detects changes,
+and presents a local update feed without turning Jira into a second system of
+record.
 
-Phase 1 targets Linux on Wayland and will be distributed as an AppImage. The
-application core is kept independent from GPUI so another presentation adapter,
-such as Tauri, can be added later without replacing Jira, synchronization, or
-storage code.
+Phase 1 targets Linux on native Wayland and ships as an x86_64 AppImage.
+macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
 
-## Workspace layout
+## What it does
 
-- `apps/gpui`: GPUI presentation adapter and desktop entry point.
-- `crates/domain`: UI-independent domain types.
-- `crates/application`: use cases and ports implemented by adapters.
-- `crates/jira`: framework-independent Jira request/response mapping.
-- `crates/jira-http`: Jira Cloud HTTP transport behind the application ports.
-- `crates/storage`: local persistence adapter.
+- Authenticates with a Jira Cloud site and derives the user from Jira's
+  `/myself` endpoint; onboarding never asks for an account ID.
+- Synchronizes the Jira Project project, then shows only the authenticated
+  user's issues in the dashboard.
+- Filters status, searches issue keys/summaries locally, and can perform a
+  cancellable exact-key Jira lookup for an issue outside the local cache.
+- Loads selected-issue descriptions, paginated comments, and attachment
+  metadata lazily. Attachment content is never downloaded or opened.
+- Keeps a durable local update feed and best-effort desktop notifications.
+- Provides client-side Wayland title-bar controls and a local SQLite cache.
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for scope and milestones.
+Jira operations are read-only except for one deliberate action: creating a
+comment after the user explicitly confirms the exact issue and body. Comment
+creation is sent once, with no automatic retry; an uncertain result requires
+refreshing comments before retrying.
 
-## Development
+## Prerequisites
 
-`gpui-component` is pinned in `Cargo.toml`; GPUI uses the same Git source URL as
-the component and is pinned to its compatible commit by `Cargo.lock`. Update
-them together and verify Linux Wayland plus the local development platform
-before accepting an upgrade.
+- Linux with a Wayland compositor and the build dependencies listed in
+  [`packaging/appimage/README.md`](packaging/appimage/README.md).
+- Rust 1.95 or newer, installed through [rustup](https://rustup.rs/).
+- A Jira Cloud site and an Atlassian API token for local development. Tokens
+  are secrets: do not commit, log, or paste them into issue reports.
 
-Install Rust through [rustup](https://rustup.rs/) and use Rust 1.95 or newer.
-The current GPUI revision relies on `std::hint::cold_path`, which became stable
-in Rust 1.95. A system package manager may provide an older compiler even when
-the package itself is fully up to date.
+## Quick start
 
 ```bash
-cargo --version
-cargo test --workspace
 cargo run -p jira-gpui
 ```
 
-The desktop opens a native Jira setup form when no configuration is available.
-Enter the Jira Cloud site URL, Atlassian account email, and an unscoped API
-token. Jira Desk verifies the credentials with the authenticated-current-user
-endpoint, syncs all issues in the Jira Project project, and derives the
-authenticated account automatically; no account ID needs to be discovered or
-pasted. The token is masked, discarded from the input before connection starts,
-held only by the in-memory HTTP client, and never stored locally or logged.
-The authenticated `/myself` user is also resolved during environment startup;
-interactive onboarding reuses the user it already verified, so neither path
-asks for an account ID. Assignee values use that user's Jira display name when
-available. The Dashboard displays only My issues for the authenticated account;
-the remote sync remains project-wide, while status-category filters (All
-statuses, To do, In progress, Done, and Uncategorized) are local over the
-loaded cache and never refetch Jira. Search immediately filters cached issue
-keys and summaries locally. Pressing Enter or choosing `Search Jira` with a
-strict Jira key performs a cancellable exact-key lookup, including for an issue
-not present in the local cache; the transient result is not inserted into cache
-membership. A client-side Wayland title bar provides minimize,
-maximize/restore, and close controls.
-Live startup opens the local SQLite cache, uses an Jira Project/account-scoped
-workspace identity, and loads cached issues and in-app update events before
-contacting Jira. The first successful refresh establishes a
-quiet baseline; later automatic polls are incremental and preserve membership,
-while manual refresh remains full reconciliation. The live Dashboard owns one
-cancellable polling task, starts its first automatic tick after five minutes,
-and prevents overlap with manual refresh/feed actions. Offline/upstream errors
-back off from 30 seconds to 15 minutes, rate limits honor a clamped 30-second
-to one-hour Retry-After, and nontransient errors pause polling until a
-successful manual refresh restarts it. Polling exists only while the app runs.
-Jira failures leave the last committed cache available, and mark-all-read
-changes are local only. The Local updates feed is Jira Desk's durable view of
-detected changes, not Jira's bell/inbox notification stream; desktop delivery
-is best-effort and the local feed remains authoritative.
+On first launch, enter the Jira URL, Atlassian email, and unscoped API token.
+Jira Desk validates them through `/myself`, discards the token input before
+connection work begins, and keeps credentials only in the in-memory client.
+Environment bootstrap first constructs the client and opens SQLite; Dashboard
+initialization then resolves `/myself` before creating the authenticated
+workspace and loading its scoped cache. See [operations and
+security](docs/operations.md).
 
-Phase 1 local data is stored under `$XDG_DATA_HOME/jira-desk/` when
-`XDG_DATA_HOME` is set to a non-empty absolute path, or
-`$HOME/.local/share/jira-desk/` when it is unset or empty, in
-`jira-desk.sqlite3`. Relative roots are rejected. The app
-directory is created with Unix mode `0700` and a newly created database file
-with mode `0600`; SQLite uses a worker thread, WAL,
-foreign keys, migrations, and protected database-file opening. Credentials are
-not stored in SQLite: the current internal API-token flow keeps them only in
-the in-memory Jira HTTP client. The Linux Freedesktop notification adapter is
-best-effort: the default policy notifies for issue-added, status, assignee,
-priority, due-date, and comment events. Removal, summary, and parent events
-remain in-app only; delivery failures are nonfatal and the durable in-app feed
-is authoritative.
+## Development commands
 
-The prototype reads these environment variables as an all-or-none set; the
-project is fixed to Jira Project and no assignee variable is required:
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --all-targets --locked
+cargo clippy --workspace --lib --bins --locked -- -D warnings
+cargo run -p jira-gpui
+```
 
-- `JIRA_BASE_URL`: an HTTPS `*.atlassian.net` site URL.
-- `JIRA_SITE_ID`: the Atlassian cloud/site identifier.
-- `JIRA_EMAIL`: the Atlassian account email used for the token.
-- `JIRA_API_TOKEN`: an API token consumed into the in-memory HTTP client; the
-  app does not persist or log this environment value.
+For the AppImage workflow and current validation boundaries, see
+[release and validation](docs/release.md). For system boundaries and data
+flow, see [architecture](docs/architecture.md). The current roadmap is in
+[the implementation plan](docs/implementation-plan.md).
 
-Both interactive and environment startup resolve Jira's authenticated `/myself`
-identity, and My issues is enabled after that check succeeds. Selecting an
-issue lazily loads its description, paginated comments, and attachment
-metadata; these detail requests are memory-only, bounded, cancellable, and
-read-only. Attachment content is never downloaded or opened. The comment
-composer is memory-only and requires explicit confirmation showing the target
-issue and body size. Confirmed comment creation is the sole Jira write; there
-are no automatic retries. If Jira may have accepted a comment but the outcome
-is unknown, Jira Desk retains the draft and requires Refresh comments before a
-retry.
-
-This API-token flow is intended only for internal development and local
-testing; never commit or log these values. The current direct-site transport
-does not support scoped API tokens; those use
-`https://api.atlassian.com/ex/jira/{cloudId}` instead. The application does not
-erase or modify the process environment, so the environment remains the
-caller's responsibility. Production/public distribution still requires an
-interactive Atlassian 3LO/OAuth flow with scoped, revocable credentials and a
-platform-appropriate secret store; collected API tokens are not suitable for
-public distribution. That is an independent release milestone, separate from
-the planned macOS Phase 2 work.
-
-The Linux release build will enable GPUI's Wayland backend only. X11 is not a
-supported runtime target. Production OAuth and the Linux runtime matrix remain
-outstanding; macOS is Phase 2.
-
-Validation includes 123 Linux-target workspace tests in an x86_64 Ubuntu 22.04
-container with Rust 1.95.0 (124 on the macOS host due to the non-Linux adapter
-fallback test), rustfmt, warning-denied production Clippy, metadata checks, and
-the Cargo feature guard. A 0.1.0 AppImage was built with checksum-verified
-pinned tools/runtime; its checksum, extracted contents, required files, and
-`ldd` library/X11 checks passed. The GitHub-hosted workflow, AppImage
-build/extraction inspection, and artifact upload are validated by CI. Wayland
-GUI launch, FUSE execution, real Jira and notification-daemon delivery, public
-release, and multi-distribution runtime coverage remain unvalidated.
+Run the validation commands in [release and validation](docs/release.md)
+against the current tree; test totals and smoke-artifact versions are expected
+to change as the project evolves.
