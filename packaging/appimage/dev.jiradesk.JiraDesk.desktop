@@ -7,3 +7,5 @@ Icon=dev.jiradesk.JiraDesk
 Terminal=false
 Categories=Office;ProjectManagement;
 StartupNotify=true
+X-AppImage-Name=Jira Desk
+X-AppImage-Arch=x86_64

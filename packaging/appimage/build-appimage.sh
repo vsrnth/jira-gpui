@@ -43,7 +43,7 @@ case "$version" in
 esac
 
 binary="$project_root/target/release/jira-gpui"
-icon="$project_root/assets/app-icon/dev.jiradesk.JiraDesk.svg"
+icon_source="$project_root/assets/app-icon/dev.jiradesk.JiraDesk.svg"
 apprun="$project_root/packaging/appimage/AppRun"
 desktop="$project_root/packaging/appimage/dev.jiradesk.JiraDesk.desktop"
 metainfo="$project_root/packaging/appimage/dev.jiradesk.JiraDesk.metainfo.xml"
@@ -51,7 +51,7 @@ license="$project_root/LICENSE"
 output_dir="$project_root/dist"
 output="$output_dir/Jira_Desk-${version}-x86_64.AppImage"
 
-for input in "$desktop" "$icon" "$apprun" "$metainfo" "$license"; do
+for input in "$desktop" "$icon_source" "$apprun" "$metainfo" "$license"; do
     [ -f "$input" ] || { printf '%s\n' "Missing packaging input: $input" >&2; exit 1; }
 done
 
@@ -95,6 +95,20 @@ work_dir=$(mktemp -d "${TMPDIR:-/tmp}/jira-desk-appimage.XXXXXXXX")
 cleanup() { rm -rf -- "$work_dir"; }
 trap cleanup EXIT HUP INT TERM
 appdir="$work_dir/JiraDesk.AppDir"
+icon="$work_dir/dev.jiradesk.JiraDesk.png"
+if ! command -v magick >/dev/null 2>&1; then
+    printf '%s\n' "ImageMagick's magick command is required to render the AppImage root PNG icon" >&2
+    exit 1
+fi
+magick "$icon_source" "$icon"
+icon_format=$(magick identify -format '%m' "$icon") || {
+    printf '%s\n' "Could not inspect rendered icon: $icon" >&2
+    exit 1
+}
+[ "$icon_format" = "PNG" ] || {
+    printf '%s\n' "Icon renderer did not produce a PNG file: $icon" >&2
+    exit 1
+}
 mkdir -p "$appdir/usr/share/metainfo" "$appdir/usr/share/licenses/jira-gpui"
 cp -- "$metainfo" "$appdir/usr/share/metainfo/"
 cp -- "$license" "$appdir/usr/share/licenses/jira-gpui/LICENSE"
