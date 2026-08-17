@@ -350,8 +350,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CommitOutcome, ErrorKind, IssueListQuery, IssuePage, PageCursor, PortFuture, SyncCommit,
-        UserSearchRequest,
+        CommitOutcome, DefaultDesktopNotificationPolicy, ErrorKind, IssueListQuery, IssuePage,
+        PageCursor, PortFuture, SyncCommit, UserSearchRequest,
     };
 
     #[derive(Default)]
@@ -617,6 +617,26 @@ mod tests {
         )
     }
 
+    fn service_with_policy(
+        jira: Arc<FakeJira>,
+        cache: Arc<FakeCache>,
+        differ: Arc<FakeDiffer>,
+        notifications: Arc<FakeNotifications>,
+        policy: Arc<dyn NotificationPolicy>,
+        now: jira_domain::Timestamp,
+    ) -> SyncService {
+        SyncService::new(
+            jira,
+            cache,
+            differ,
+            notifications,
+            policy,
+            Arc::new(FixedClock(now)),
+            Arc::new(crate::NoopEventSink),
+            SyncConfig::default(),
+        )
+    }
+
     #[test]
     fn baseline_is_committed_without_diffing_or_notifications() {
         let (site_id, user_set_id, _account_id) = fixture_ids();
@@ -747,6 +767,70 @@ mod tests {
                 EventId::new("event-1").expect("event id"),
                 NotificationDelivery::Unavailable
             )]
+        );
+    }
+
+    #[test]
+    fn persists_and_delivers_in_scope_generic_issue_update() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let mut issue = fixture_issue(site_id.clone());
+        issue.assignee = Some(account_id.clone());
+        let event = UpdateEvent::new(
+            EventId::new("event-generic-update").expect("event id"),
+            site_id.clone(),
+            issue.id.clone(),
+            issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            datetime!(2026-08-16 13:01 UTC),
+            vec![user_set_id.clone()],
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![issue],
+                next_cursor: None,
+                server_time: Some(datetime!(2026-08-16 13:01 UTC)),
+            }])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.inserted_events.lock().expect("inserted events lock") = vec![event.clone()];
+        let differ = Arc::new(FakeDiffer::default());
+        *differ.events.lock().expect("differ events lock") = vec![event.clone()];
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service_with_policy(
+            jira,
+            cache.clone(),
+            differ,
+            notifications.clone(),
+            Arc::new(DefaultDesktopNotificationPolicy),
+            datetime!(2026-08-16 13:00 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                notification_assignees: Some(vec![account_id]),
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("incremental sync");
+
+        assert_eq!(outcome.events_inserted, 1);
+        assert_eq!(outcome.notifications_delivered, 1);
+        assert_eq!(outcome.notification_failures, 0);
+        let commits = cache.commits.lock().expect("commits lock");
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].update_events, vec![event.clone()]);
+        assert_eq!(
+            *notifications.calls.lock().expect("notification calls lock"),
+            1
+        );
+        assert_eq!(
+            cache.deliveries.lock().expect("deliveries lock").as_slice(),
+            &[(event.id, NotificationDelivery::Delivered)]
         );
     }
 

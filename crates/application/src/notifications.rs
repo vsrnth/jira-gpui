@@ -12,9 +12,9 @@ impl crate::NotificationPolicy for DefaultDesktopNotificationPolicy {
             | UpdateKind::AssigneeChanged { .. }
             | UpdateKind::PriorityChanged { .. }
             | UpdateKind::DueDateChanged { .. }
-            | UpdateKind::CommentAdded { .. } => true,
+            | UpdateKind::CommentAdded { .. }
+            | UpdateKind::IssueUpdated => true,
             UpdateKind::IssueRemovedFromView
-            | UpdateKind::IssueUpdated
             | UpdateKind::SummaryChanged { .. }
             | UpdateKind::ParentChanged { .. } => false,
         }
@@ -78,7 +78,6 @@ mod tests {
         let change = ChangeValue::Text("new".into());
         for kind in [
             UpdateKind::IssueRemovedFromView,
-            UpdateKind::IssueUpdated,
             UpdateKind::SummaryChanged {
                 old: change.clone(),
                 new: change.clone(),
@@ -90,5 +89,12 @@ mod tests {
         ] {
             assert!(!policy.should_notify(&event(kind)));
         }
+    }
+
+    #[test]
+    fn allows_generic_issue_updates() {
+        let policy = DefaultDesktopNotificationPolicy;
+
+        assert!(policy.should_notify(&event(UpdateKind::IssueUpdated)));
     }
 }
