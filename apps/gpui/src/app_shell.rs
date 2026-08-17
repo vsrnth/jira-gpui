@@ -13,6 +13,7 @@ use gpui_component::{
 
 use crate::Dashboard;
 use crate::config::{LiveSession, StartupSelection, live_session_from_manual_configuration};
+use crate::responsive::layout_for_width;
 
 /// The top-level view: either the configured dashboard or the first-run form.
 pub struct AppShell {
@@ -116,9 +117,12 @@ impl AppShell {
             .child(div().text_xs().text_color(muted_foreground).child(help))
     }
 
-    fn render_connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_connection_form(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout = layout_for_width(f32::from(window.viewport_size().width));
+        let mobile = layout.is_mobile();
         let error = self.connection_error.as_ref().map(|message| {
             div()
+                .min_w_0()
                 .w_full()
                 .rounded(cx.theme().radius)
                 .border_1()
@@ -134,19 +138,23 @@ impl AppShell {
         v_flex()
             .id("connection-form-scroll")
             .size_full()
-            .items_center()
+            .when(!mobile, |this| this.items_center())
+            .when(mobile, |this| this.items_start())
             .overflow_y_scrollbar()
             .child(
                 v_flex()
+                    .min_w_0()
                     .w_full()
                     .max_w(px(560.))
                     .gap_5()
-                    .p_8()
+                    .p(px(layout.onboarding_padding()))
                     .child(
                         v_flex()
+                            .min_w_0()
                             .gap_2()
                             .child(
                                 h_flex()
+                                    .min_w_0()
                                     .gap_3()
                                     .child(
                                         div()
@@ -162,10 +170,12 @@ impl AppShell {
                                     )
                                     .child(
                                         v_flex()
+                                            .min_w_0()
                                             .gap_0p5()
                                             .child(div().text_xl().font_semibold().child("Connect Jira"))
                                             .child(
                                                 div()
+                                                    .min_w_0()
                                                     .text_sm()
                                                     .text_color(cx.theme().muted_foreground)
                                             .child("Configure an Jira Project workspace"),
@@ -174,6 +184,7 @@ impl AppShell {
                             )
                             .child(
                                 div()
+                                    .min_w_0()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. Jira remains read-only except for explicitly confirmed comment creation."),
@@ -250,7 +261,7 @@ impl AppShell {
 }
 
 impl Render for AppShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = if let Some(dashboard) = &self.dashboard {
             div()
                 .min_h_0()
@@ -261,7 +272,7 @@ impl Render for AppShell {
             div()
                 .min_h_0()
                 .flex_1()
-                .child(self.render_connection_form(cx))
+                .child(self.render_connection_form(window, cx))
                 .into_any_element()
         };
 

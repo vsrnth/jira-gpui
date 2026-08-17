@@ -7,7 +7,7 @@ use gpui::{
     actions, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _,
     button::Button,
     button::ButtonVariants as _,
     h_flex,
@@ -39,7 +39,10 @@ use crate::{
         IssueDetailViewModel, IssueStatusFilter, IssueViewModel, UpdateViewModel,
         issue_views_for_filter,
     },
+    responsive::{LayoutMode, layout_for_width},
+    rich_text_view::{RichTextPalette, render_rich_text},
     sample_data::{sample_issues, sample_updates, sample_users},
+    semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
 };
 
 fn safe_sync_error(error: &ApplicationError) -> &'static str {
@@ -267,6 +270,7 @@ pub struct Dashboard {
     issues: Vec<IssueViewModel>,
     updates: Vec<UpdateViewModel>,
     selected_issue: Option<IssueId>,
+    mobile_detail_open: bool,
     sync_message: String,
     workspace: Option<Arc<LiveWorkspace>>,
     users: Vec<User>,
@@ -320,6 +324,7 @@ impl Dashboard {
             issues,
             updates,
             selected_issue,
+            mobile_detail_open: false,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
             workspace: None,
             users,
@@ -361,6 +366,7 @@ impl Dashboard {
             issues: Vec::new(),
             updates: Vec::new(),
             selected_issue: None,
+            mobile_detail_open: false,
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
             users,
@@ -1018,10 +1024,67 @@ impl Dashboard {
         self.updates.iter().filter(|update| update.unread).count()
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn rich_text_palette(&self, cx: &mut Context<Self>) -> RichTextPalette {
+        RichTextPalette {
+            foreground: cx.theme().foreground,
+            muted: cx.theme().muted_foreground,
+            border: cx.theme().border,
+            code_surface: cx.theme().muted.opacity(0.18),
+            link: cx.theme().link,
+            info: cx.theme().link,
+            warning: cx.theme().warning,
+            success: cx.theme().success,
+            danger: cx.theme().danger,
+        }
+    }
+
+    fn issue_key_with_icon(
+        &self,
+        key: impl Into<String>,
+        issue_type: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .min_w_0()
+            .gap_1()
+            .child(Icon::new(issue_type_icon(issue_type)).text_color(cx.theme().link))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().link)
+                    .child(key.into()),
+            )
+            .into_any_element()
+    }
+
+    fn priority_badge(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
+        let (icon, tone) = priority_semantics(&label);
+        let color = self.priority_color(tone, cx);
+        h_flex()
+            .min_w_0()
+            .gap_1()
+            .child(Icon::new(icon).text_color(color))
+            .child(div().min_w_0().truncate().child(label))
+            .into_any_element()
+    }
+
+    fn priority_color(&self, tone: PriorityTone, cx: &mut Context<Self>) -> gpui::Hsla {
+        match tone {
+            PriorityTone::Critical => cx.theme().danger,
+            PriorityTone::Elevated => cx.theme().warning,
+            PriorityTone::Neutral | PriorityTone::Unknown => cx.theme().muted_foreground,
+            PriorityTone::Low | PriorityTone::Minimal => cx.theme().link,
+        }
+    }
+
+    fn render_sidebar(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail = layout.is_rail();
         v_flex()
             .h_full()
-            .w(px(236.))
+            .w(px(layout.sidebar_width()))
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
@@ -1032,6 +1095,7 @@ impl Dashboard {
                     .h(px(72.))
                     .px_4()
                     .gap_3()
+                    .when(rail, |this| this.justify_center().px_2().gap_0())
                     .border_b_1()
                     .border_color(cx.theme().sidebar_border)
                     .child(
@@ -1046,38 +1110,47 @@ impl Dashboard {
                             .font_bold()
                             .child("JD"),
                     )
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(div().font_semibold().child("Jira Desk"))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Read-only sync · explicit comments"),
-                            ),
-                    ),
+                    .child(v_flex().min_w_0().gap_0p5().when(!rail, |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_semibold()
+                                .child("Jira Desk"),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Read-only sync · explicit comments"),
+                        )
+                    })),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .p_3()
                     .gap_1()
-                    .child(
-                        div()
-                            .px_3()
-                            .pt_2()
-                            .pb_1()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("WORKSPACE"),
-                    )
+                    .when(!rail, |this| {
+                        this.child(
+                            div()
+                                .px_3()
+                                .pt_2()
+                                .pb_1()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("WORKSPACE"),
+                        )
+                    })
                     .child(self.nav_item(
                         "Issues",
                         self.issues.len(),
                         self.section == Section::Issues,
                         Section::Issues,
+                        rail,
                         cx,
                     ))
                     .child(self.nav_item(
@@ -1085,61 +1158,68 @@ impl Dashboard {
                         self.unread_count(),
                         self.section == Section::Updates,
                         Section::Updates,
+                        rail,
                         cx,
                     ))
-                    .child(
-                        div()
-                            .mt_5()
-                            .px_3()
-                            .pt_2()
-                            .pb_1()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Jira Project VIEW"),
-                    )
-                    .child(
-                        v_flex()
-                            .mx_1()
-                            .mt_1()
-                            .p_3()
-                            .gap_1()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().sidebar_border)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .child(self.workspace_name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(self.workspace_members.clone()),
-                            ),
-                    ),
+                    .when(!rail, |this| {
+                        this.child(
+                            div()
+                                .mt_5()
+                                .px_3()
+                                .pt_2()
+                                .pb_1()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Jira Project VIEW"),
+                        )
+                    })
+                    .when(!rail, |this| {
+                        this.child(
+                            v_flex()
+                                .mx_1()
+                                .mt_1()
+                                .p_3()
+                                .gap_1()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().sidebar_border)
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .child(self.workspace_name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(self.workspace_members.clone()),
+                                ),
+                        )
+                    }),
             )
-            .child(
-                v_flex()
-                    .p_4()
-                    .gap_1()
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(self.site_label.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.mode_label.clone()),
-                    ),
-            )
+            .when(!rail, |this| {
+                this.child(
+                    v_flex()
+                        .p_4()
+                        .gap_1()
+                        .border_t_1()
+                        .border_color(cx.theme().sidebar_border)
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .child(self.site_label.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(self.mode_label.clone()),
+                        ),
+                )
+            })
     }
 
     fn nav_item(
@@ -1148,16 +1228,32 @@ impl Dashboard {
         count: usize,
         selected: bool,
         section: Section,
+        rail: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let icon = match section {
+            Section::Issues => IconName::LayoutDashboard,
+            Section::Updates => IconName::Inbox,
+        };
+        let visual = if rail {
+            Icon::new(icon).into_any_element()
+        } else {
+            div()
+                .text_sm()
+                .font_semibold()
+                .child(label)
+                .into_any_element()
+        };
         h_flex()
             .id(label)
             .w_full()
             .px_3()
             .py_2()
             .justify_between()
+            .when(rail, |this| this.justify_center().px_1())
             .rounded(cx.theme().radius)
             .cursor_pointer()
+            .aria_label(label)
             .when(selected, |this| {
                 this.bg(cx.theme().sidebar_accent)
                     .text_color(cx.theme().sidebar_accent_foreground)
@@ -1169,57 +1265,175 @@ impl Dashboard {
                 this.section = section;
                 cx.notify();
             }))
-            .child(div().text_sm().font_semibold().child(label))
-            .child(
-                div()
-                    .min_w(px(26.))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_full()
-                    .bg(cx.theme().muted)
-                    .text_center()
-                    .text_xs()
-                    .child(count.to_string()),
-            )
+            .child(visual)
+            .when(!rail, |this| {
+                this.child(
+                    div()
+                        .min_w(px(26.))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(cx.theme().muted)
+                        .text_center()
+                        .text_xs()
+                        .child(count.to_string()),
+                )
+            })
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .h(px(72.))
-            .px_5()
+    fn render_header(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+        let mobile = layout.is_mobile();
+        v_flex()
+            .h(px(if mobile { 84. } else { 72. }))
+            .px(px(if mobile { 12. } else { 20. }))
+            .py(px(if mobile { 10. } else { 12. }))
             .flex_shrink_0()
-            .justify_between()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(div().text_lg().font_semibold().child(match self.section {
-                        Section::Issues => "Jira Project issues",
-                        Section::Updates => "Local updates",
-                    }))
+                h_flex()
+                    .min_w_0()
+                    .justify_between()
+                    .child(div().min_w_0().truncate().text_lg().font_semibold().child(
+                        match self.section {
+                            Section::Issues => "Jira Project issues",
+                            Section::Updates => "Local updates",
+                        },
+                    ))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.sync_message.clone()),
+                        Button::new("refresh")
+                            .compact()
+                            .primary()
+                            .label(if self.operation_in_progress {
+                                "Refreshing…"
+                            } else {
+                                "Refresh"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
                     ),
             )
             .child(
-                h_flex().gap_2().child(
-                    Button::new("refresh")
-                        .primary()
-                        .label(if self.operation_in_progress {
-                            "Refreshing…"
-                        } else {
-                            "Refresh"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
-                ),
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.sync_message.clone()),
             )
     }
 
-    fn render_issues(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_issues(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+        let mobile = layout.is_mobile();
+        let issue_list = v_flex()
+            .h_full()
+            .when(mobile, |this| this.w_full())
+            .when(!mobile, |this| this.w(px(layout.issue_list_width())))
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(if mobile {
+                v_flex()
+                    .h(px(58.))
+                    .px_3()
+                    .justify_center()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().min_w_0().truncate().child(format!(
+                        "{} matching Jira Project issues · My issues",
+                        self.issues.len(),
+                    )))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .h(px(44.))
+                    .px_4()
+                    .flex_shrink_0()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().min_w_0().truncate().child(format!(
+                        "{} matching Jira Project issues · My issues",
+                        self.issues.len(),
+                    )))
+                    .child(div().flex_shrink_0().child("Updated newest first"))
+                    .into_any_element()
+            })
+            .when_some(self.search_input.clone(), |this, input| {
+                if mobile {
+                    this.child(
+                        v_flex()
+                            .gap_1()
+                            .px_2()
+                            .py_2()
+                            .min_w_0()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(Input::new(&input).cleanable(true).min_w_0().w_full())
+                            .child(
+                                Button::new("search-jira")
+                                    .compact()
+                                    .w_full()
+                                    .label("Search Jira")
+                                    .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
+                            ),
+                    )
+                } else {
+                    this.child(
+                        h_flex()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .min_w_0()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(Input::new(&input).cleanable(true).min_w_0().flex_1())
+                            .child(
+                                Button::new("search-jira")
+                                    .compact()
+                                    .label("Search Jira")
+                                    .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
+                            ),
+                    )
+                }
+            })
+            .child(
+                h_flex()
+                    .h(px(44.))
+                    .px_3()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(self.status_filter_dropdown()),
+            )
+            .child(
+                v_flex()
+                    .id("issue-list")
+                    .min_h_0()
+                    .flex_1()
+                    .when(mobile, |this| this.w_full())
+                    .overflow_y_scroll()
+                    .when_some(self.remote_lookup_view(), |this, issue| {
+                        this.child(self.issue_row_with_label(
+                            &issue,
+                            "Jira lookup result",
+                            layout,
+                            cx,
+                        ))
+                    })
+                    .children(
+                        self.issues
+                            .iter()
+                            .map(|issue| self.issue_row(issue, layout, cx)),
+                    ),
+            )
+            .into_any_element();
+
         h_flex()
             .size_full()
             .min_w_0()
@@ -1238,73 +1452,35 @@ impl Dashboard {
             .on_action(cx.listener(|this, _: &StatusUncategorized, _, cx| {
                 this.set_status_filter(IssueStatusFilter::Uncategorized, cx)
             }))
-            .child(
-                v_flex()
-                    .h_full()
-                    .w(px(494.))
-                    .flex_shrink_0()
-                    .border_r_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        h_flex()
-                            .h(px(44.))
-                            .px_4()
-                            .flex_shrink_0()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} matching Jira Project issues · My issues",
-                                self.issues.len(),
-                            ))
-                            .child("Updated newest first"),
-                    )
-                    .when_some(self.search_input.clone(), |this, input| {
-                        this.child(
+            .when(mobile && self.mobile_detail_open, |this| {
+                this.child(
+                    v_flex()
+                        .size_full()
+                        .min_w_0()
+                        .child(
                             h_flex()
-                                .gap_2()
+                                .h(px(44.))
                                 .px_3()
-                                .py_2()
-                                .min_w_0()
+                                .flex_shrink_0()
                                 .border_b_1()
                                 .border_color(cx.theme().border)
-                                .child(Input::new(&input).cleanable(true).min_w_0().flex_1())
                                 .child(
-                                    Button::new("search-jira").label("Search Jira").on_click(
-                                        cx.listener(|this, _, _, cx| this.search_jira(cx)),
-                                    ),
+                                    Button::new("mobile-detail-back")
+                                        .compact()
+                                        .ghost()
+                                        .label("Back to issues")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.mobile_detail_open = false;
+                                            cx.notify();
+                                        })),
                                 ),
                         )
-                    })
-                    .child(
-                        h_flex()
-                            .h(px(44.))
-                            .px_3()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .min_w_0()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(self.status_filter_dropdown()),
-                    )
-                    .child(
-                        v_flex()
-                            .id("issue-list")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .when_some(self.remote_lookup_view(), |this, issue| {
-                                this.child(self.issue_row_with_label(
-                                    &issue,
-                                    "Jira lookup result",
-                                    cx,
-                                ))
-                            })
-                            .children(self.issues.iter().map(|issue| self.issue_row(issue, cx))),
-                    ),
-            )
-            .child(self.issue_detail(cx))
+                        .child(self.issue_detail(layout, cx)),
+                )
+            })
+            .when(!mobile || !self.mobile_detail_open, |this| {
+                this.child(issue_list)
+            })
     }
 
     fn status_filter_dropdown(&self) -> impl IntoElement {
@@ -1377,14 +1553,20 @@ impl Dashboard {
         }
     }
 
-    fn issue_row(&self, issue: &IssueViewModel, cx: &mut Context<Self>) -> AnyElement {
-        self.issue_row_with_label(issue, "", cx)
+    fn issue_row(
+        &self,
+        issue: &IssueViewModel,
+        layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.issue_row_with_label(issue, "", layout, cx)
     }
 
     fn issue_row_with_label(
         &self,
         issue: &IssueViewModel,
         label: &str,
+        layout: LayoutMode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected = self.selected_issue.as_ref() == Some(&issue.id)
@@ -1394,6 +1576,7 @@ impl Dashboard {
             );
         let issue_id = issue.id.clone();
         let is_remote_result = !label.is_empty();
+        let mobile = layout.is_mobile();
         v_flex()
             .id(issue.id.to_string())
             .w_full()
@@ -1411,22 +1594,26 @@ impl Dashboard {
                     this.clear_remote_lookup();
                     this.select_issue(issue_id.clone(), cx, false);
                 }
+                this.mobile_detail_open = mobile;
+                cx.notify();
             }))
             .child(
                 h_flex()
+                    .min_w_0()
                     .justify_between()
                     .child(
                         h_flex()
+                            .min_w_0()
                             .gap_2()
+                            .child(self.issue_key_with_icon(
+                                issue.key.clone(),
+                                &issue.issue_type,
+                                cx,
+                            ))
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(cx.theme().link)
-                                    .child(issue.key.clone()),
-                            )
-                            .child(
-                                div()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(issue.issue_type.clone()),
@@ -1434,6 +1621,9 @@ impl Dashboard {
                     )
                     .child(
                         div()
+                            .min_w_0()
+                            .flex_shrink_0()
+                            .truncate()
                             .px_2()
                             .py_0p5()
                             .rounded_full()
@@ -1451,19 +1641,38 @@ impl Dashboard {
                         .child(label.to_owned()),
                 )
             })
-            .child(div().text_sm().font_semibold().child(issue.summary.clone()))
+            .child(
+                div()
+                    .min_w_0()
+                    .line_clamp(2)
+                    .text_sm()
+                    .font_semibold()
+                    .child(issue.summary.clone()),
+            )
             .child(
                 h_flex()
+                    .min_w_0()
                     .justify_between()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("{} · {}", issue.assignee, issue.priority))
-                    .child(issue.updated.clone()),
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(format!("{} ·", issue.assignee)),
+                            )
+                            .child(self.priority_badge(issue.priority.clone(), cx)),
+                    )
+                    .child(div().flex_shrink_0().child(issue.updated.clone())),
             )
             .into_any_element()
     }
 
-    fn issue_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         let issue = match &self.remote_lookup {
             RemoteLookupState::Loaded { .. } => self.remote_lookup_view(),
             RemoteLookupState::Loading { .. } | RemoteLookupState::Error { .. } => None,
@@ -1524,6 +1733,16 @@ impl Dashboard {
                 |issue| issue.description.clone(),
             ),
         };
+        let rich_description = match &detail_state {
+            DetailState::Loaded(detail) => detail.rich_description.clone(),
+            _ => issue
+                .as_ref()
+                .and_then(|issue| issue.rich_description.clone()),
+        };
+        let description_content = rich_description
+            .as_ref()
+            .map(|document| render_rich_text(document, self.rich_text_palette(cx)))
+            .unwrap_or_else(|| div().text_sm().child(description).into_any_element());
         let assignee = issue
             .as_ref()
             .map(|issue| issue.assignee.clone())
@@ -1562,27 +1781,47 @@ impl Dashboard {
             .flex_1()
             .min_w_0()
             .overflow_y_scroll()
-            .p_6()
-            .gap_5()
+            .p(px(layout.detail_padding()))
+            .gap(px(if layout.is_mobile() { 16. } else { 20. }))
             .child(
                 v_flex()
+                    .min_w_0()
                     .gap_2()
                     .child(
                         h_flex()
+                            .min_w_0()
                             .gap_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(project)
+                            .child(div().min_w_0().truncate().child(project))
                             .child("/")
-                            .child(key),
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        Icon::new(issue_type_icon(&issue_type))
+                                            .text_color(cx.theme().link),
+                                    )
+                                    .child(div().min_w_0().truncate().child(key)),
+                            ),
                     )
-                    .child(div().text_2xl().font_semibold().child(summary))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .line_clamp(if layout.is_mobile() { 3 } else { 4 })
+                            .text_2xl()
+                            .font_semibold()
+                            .child(summary),
+                    )
                     .child(
                         h_flex()
+                            .flex_wrap()
+                            .min_w_0()
                             .gap_2()
                             .child(self.pill(issue_type, cx))
                             .child(self.pill(status, cx))
-                            .child(self.pill(priority, cx)),
+                            .child(self.priority_badge(priority, cx)),
                     )
                     .when(
                         matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }),
@@ -1608,20 +1847,20 @@ impl Dashboard {
                             .border_color(cx.theme().border)
                             .text_sm()
                             .text_color(cx.theme().foreground)
-                            .child(description),
+                            .child(description_content),
                     ),
             )
             .child(
                 v_flex()
                     .gap_3()
                     .child(div().text_sm().font_semibold().child("Details"))
-                    .child(self.detail_field("Assignee", assignee, cx))
-                    .child(self.detail_field("Reporter", reporter, cx))
-                    .child(self.detail_field("Status category", status_category, cx))
-                    .child(self.detail_field("Parent", parent, cx))
-                    .child(self.detail_field("Created", created, cx))
-                    .child(self.detail_field("Updated", updated, cx))
-                    .child(self.detail_field("Due date", due_date, cx)),
+                    .child(self.detail_field("Assignee", assignee, layout, cx))
+                    .child(self.detail_field("Reporter", reporter, layout, cx))
+                    .child(self.detail_field("Status category", status_category, layout, cx))
+                    .child(self.detail_field("Parent", parent, layout, cx))
+                    .child(self.detail_field("Created", created, layout, cx))
+                    .child(self.detail_field("Updated", updated, layout, cx))
+                    .child(self.detail_field("Due date", due_date, layout, cx)),
             )
             .when(!labels.is_empty(), |this| {
                 this.child(
@@ -1630,17 +1869,20 @@ impl Dashboard {
                         .child(div().text_sm().font_semibold().child("Labels"))
                         .child(
                             h_flex()
+                                .flex_wrap()
+                                .min_w_0()
                                 .gap_2()
                                 .children(labels.iter().cloned().map(|label| self.pill(label, cx))),
                         ),
                 )
             })
-            .child(self.render_detail_state_for(&detail_state, cx))
+            .child(self.render_detail_state_for(&detail_state, layout, cx))
     }
 
     fn render_detail_state_for(
         &self,
         detail_state: &DetailState,
+        layout: LayoutMode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match detail_state {
@@ -1714,6 +1956,7 @@ impl Dashboard {
                 )
                 .into_any_element(),
             DetailState::Loaded(detail) => {
+                let palette = self.rich_text_palette(cx);
                 let comments = if detail.comments.is_empty() {
                     v_flex()
                         .text_sm()
@@ -1722,8 +1965,19 @@ impl Dashboard {
                         .into_any_element()
                 } else {
                     v_flex()
+                        .min_w_0()
                         .gap_3()
                         .children(detail.comments.iter().map(|comment| {
+                            let body = comment
+                                .rich_body
+                                .as_ref()
+                                .map(|document| render_rich_text(document, palette))
+                                .unwrap_or_else(|| {
+                                    div()
+                                        .text_sm()
+                                        .child(comment.body.clone())
+                                        .into_any_element()
+                                });
                             v_flex()
                                 .gap_1()
                                 .p_3()
@@ -1732,21 +1986,26 @@ impl Dashboard {
                                 .border_color(cx.theme().border)
                                 .child(
                                     h_flex()
+                                        .min_w_0()
+                                        .flex_wrap()
                                         .justify_between()
                                         .child(
                                             div()
+                                                .min_w_0()
+                                                .truncate()
                                                 .text_sm()
                                                 .font_semibold()
                                                 .child(comment.author.clone()),
                                         )
                                         .child(
                                             div()
+                                                .flex_shrink_0()
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(comment.created.clone()),
                                         ),
                                 )
-                                .child(div().text_sm().child(comment.body.clone()))
+                                .child(div().min_w_0().child(body))
                                 .when_some(comment.updated.clone(), |this, updated| {
                                     this.child(
                                         div()
@@ -1769,11 +2028,19 @@ impl Dashboard {
                         .gap_2()
                         .children(detail.attachments.iter().map(|attachment| {
                             h_flex()
+                                .min_w_0()
+                                .flex_wrap()
                                 .justify_between()
                                 .text_sm()
-                                .child(attachment.filename.clone())
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(attachment.filename.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
@@ -1802,13 +2069,13 @@ impl Dashboard {
                     .child(comments)
                     .child(div().text_sm().font_semibold().child("Attachments"))
                     .child(attachments)
-                    .child(self.render_comment_composer(cx))
+                    .child(self.render_comment_composer(layout, cx))
                     .into_any_element()
             }
         }
     }
 
-    fn render_comment_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_comment_composer(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
         let Some(input) = self.comment_input.as_ref() else {
             return div().into_any_element();
         };
@@ -1820,10 +2087,12 @@ impl Dashboard {
         let posting = matches!(&state, CommentPostState::Posting { .. });
         let editing_confirmed = matches!(&state, CommentPostState::Confirming { .. });
         let mut composer = v_flex()
+            .min_w_0()
             .gap_2()
             .child(div().text_sm().font_semibold().child("Add comment"))
             .child(
                 Textarea::new(input)
+                    .w_full()
                     .aria_label("Comment text")
                     .disabled(posting || editing_confirmed),
             )
@@ -1847,6 +2116,7 @@ impl Dashboard {
             } => composer
                 .child(
                     div()
+                        .min_w_0()
                         .text_sm()
                         .text_color(cx.theme().warning)
                         .child(format!(
@@ -1855,6 +2125,7 @@ impl Dashboard {
                 )
                 .child(
                     h_flex()
+                        .when(layout.is_mobile(), |this| this.flex_col())
                         .gap_2()
                         .child(
                             Button::new("post-comment-now")
@@ -1880,6 +2151,7 @@ impl Dashboard {
                 .child(div().text_sm().text_color(cx.theme().danger).child(message))
                 .child(
                     h_flex()
+                        .when(layout.is_mobile(), |this| this.flex_col())
                         .gap_2()
                         .child(
                             Button::new("post-comment")
@@ -1915,19 +2187,36 @@ impl Dashboard {
         &self,
         label: &'static str,
         value: String,
+        layout: LayoutMode,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .items_start()
-            .child(
-                div()
-                    .w(px(132.))
-                    .flex_shrink_0()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(label),
-            )
-            .child(div().min_w_0().text_sm().child(value))
+    ) -> AnyElement {
+        if layout.is_mobile() {
+            v_flex()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label),
+                )
+                .child(div().min_w_0().text_sm().child(value))
+                .into_any_element()
+        } else {
+            h_flex()
+                .min_w_0()
+                .items_start()
+                .child(
+                    div()
+                        .w(px(if layout.is_rail() { 108. } else { 132. }))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label),
+                )
+                .child(div().min_w_0().text_sm().child(value))
+                .into_any_element()
+        }
     }
 
     fn pill(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
@@ -1986,32 +2275,39 @@ impl Dashboard {
         self.comment_input = Some(input);
     }
 
-    fn render_updates(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_updates(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+        let mobile = layout.is_mobile();
         v_flex()
             .size_full()
             .min_w_0()
             .child(
-                h_flex()
-                    .h(px(54.))
-                    .px_5()
+                v_flex()
+                    .h(px(if mobile { 80. } else { 54. }))
+                    .px(px(if mobile { 12. } else { 20. }))
+                    .py(px(if mobile { 8. } else { 0. }))
                     .flex_shrink_0()
-                    .justify_between()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(
-                        div()
+                        h_flex()
+                            .min_w_0()
+                            .justify_between()
+                            .child(div()
+                            .min_w_0()
+                            .truncate()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
                                 "{} unread local updates · Changes detected by Jira Desk, not Jira notifications",
                                 self.unread_count()
-                            )),
-                    )
-                    .child(
-                        Button::new("mark-all-read")
-                            .ghost()
-                            .label("Mark all read")
-                            .on_click(cx.listener(|this, _, _, cx| this.mark_all_read(cx))),
+                            )))
+                            .child(
+                                Button::new("mark-all-read")
+                                    .compact()
+                                    .ghost()
+                                    .label("Mark all read")
+                                    .on_click(cx.listener(|this, _, _, cx| this.mark_all_read(cx))),
+                            ),
                     ),
             )
             .child(
@@ -2019,13 +2315,14 @@ impl Dashboard {
                     .id("update-list")
                     .flex_1()
                     .overflow_y_scroll()
-                    .p_5()
+                    .min_h_0()
+                    .p(px(layout.list_padding()))
                     .gap_3()
                     .children(
                         self.updates
                             .iter()
                             .enumerate()
-                            .map(|(index, update)| self.update_card(index, update, cx)),
+                            .map(|(index, update)| self.update_card(index, update, layout, cx)),
                     ),
             )
     }
@@ -2034,12 +2331,20 @@ impl Dashboard {
         &self,
         index: usize,
         update: &UpdateViewModel,
+        layout: LayoutMode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let issue_type = self
+            .domain_issues
+            .iter()
+            .find(|issue| issue.key.as_str().eq_ignore_ascii_case(&update.issue_key))
+            .map(|issue| issue.issue_type.name.as_str())
+            .unwrap_or("Unknown");
         h_flex()
             .id(("update-card", index))
             .w_full()
             .items_start()
+            .min_w_0()
             .gap_3()
             .p_4()
             .rounded(cx.theme().radius)
@@ -2062,19 +2367,22 @@ impl Dashboard {
                     .gap_1()
                     .child(
                         h_flex()
+                            .min_w_0()
                             .justify_between()
                             .child(
                                 h_flex()
+                                    .min_w_0()
+                                    .when(layout.is_mobile(), |this| this.flex_col())
                                     .gap_2()
+                                    .child(self.issue_key_with_icon(
+                                        update.issue_key.clone(),
+                                        issue_type,
+                                        cx,
+                                    ))
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .text_color(cx.theme().link)
-                                            .child(update.issue_key.clone()),
-                                    )
-                                    .child(
-                                        div()
+                                            .min_w_0()
+                                            .line_clamp(2)
                                             .text_sm()
                                             .font_semibold()
                                             .child(update.issue_summary.clone()),
@@ -2082,6 +2390,7 @@ impl Dashboard {
                             )
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(update.occurred_at.clone()),
@@ -2096,30 +2405,74 @@ impl Dashboard {
             )
             .into_any_element()
     }
+
+    fn render_mobile_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .h(px(48.))
+            .flex_shrink_0()
+            .gap_2()
+            .px_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Button::new("mobile-issues")
+                    .compact()
+                    .when(self.section == Section::Issues, |this| this.primary())
+                    .label(format!("Issues · {}", self.issues.len()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.section = Section::Issues;
+                        this.mobile_detail_open = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("mobile-updates")
+                    .compact()
+                    .when(self.section == Section::Updates, |this| this.primary())
+                    .label(format!("Updates · {}", self.unread_count()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.section = Section::Updates;
+                        this.mobile_detail_open = false;
+                        cx.notify();
+                    })),
+            )
+    }
 }
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_search_input(window, cx);
         self.ensure_comment_input(window, cx);
+        let layout = layout_for_width(f32::from(window.viewport_size().width));
         let content = match self.section {
-            Section::Issues => self.render_issues(cx).into_any_element(),
-            Section::Updates => self.render_updates(cx).into_any_element(),
+            Section::Issues => self.render_issues(layout, cx).into_any_element(),
+            Section::Updates => self.render_updates(layout, cx).into_any_element(),
         };
 
-        h_flex()
-            .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(self.render_sidebar(cx))
-            .child(
-                v_flex()
-                    .h_full()
-                    .min_w_0()
-                    .flex_1()
-                    .child(self.render_header(cx))
-                    .child(div().min_h_0().flex_1().child(content)),
-            )
+        let main = v_flex()
+            .h_full()
+            .min_w_0()
+            .flex_1()
+            .child(self.render_header(layout, cx))
+            .child(div().min_h_0().flex_1().child(content));
+
+        if layout.is_mobile() {
+            v_flex()
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .child(self.render_mobile_nav(cx))
+                .child(main)
+        } else {
+            h_flex()
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .child(self.render_sidebar(layout, cx))
+                .child(main)
+        }
     }
 }
 

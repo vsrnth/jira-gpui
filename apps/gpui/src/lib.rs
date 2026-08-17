@@ -11,7 +11,10 @@ mod dashboard;
 mod live_workspace;
 mod local_data;
 mod presentation;
+mod responsive;
+mod rich_text_view;
 mod sample_data;
+mod semantic_icons;
 
 pub use app_shell::AppShell;
 pub use config::{StartupSelection, startup_from_environment};
