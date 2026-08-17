@@ -59,12 +59,14 @@ attachment mappings remain preferred. When no exact mapping exists, the mapper
 retains at most 16 allowlisted image attachments as metadata-only fallback
 candidates. The UI presents them in a clearly labeled bounded gallery and never
 claims an ADF position for them. Each thumbnail is capped at 8 MiB, with at
-most 16 references and 32 MiB aggregate per detail load. A thumbnail 404 alone
-permits a bounded authenticated original-content fallback; other errors remain
-errors. Cached attachment metadata must remain an allowlisted image MIME.
-Authenticated thumbnail responses may use `application/octet-stream` or Jira's
-`image/jpg`, but MIME preflight still requires a strict payload byte signature
-before GPUI chooses a format. Results are applied only when the selected issue
+most 16 references and 32 MiB aggregate per detail load. A thumbnail 404, or the
+specific bounded unknown-MIME/unrecognized-signature thumbnail-unavailable
+result, permits one bounded authenticated original-content fallback. Non-404
+status, authentication, transport, malformed-MIME, empty, oversize, and other
+errors remain errors. Cached attachment metadata must remain an allowlisted image
+MIME. Authenticated thumbnail responses may use `application/octet-stream` or
+Jira's `image/jpg`, but MIME preflight still requires a strict payload byte
+signature before GPUI chooses a format. Results are applied only when the selected issue
 and request generation still match; detail and thumbnail bytes are memory-only.
 Configured-origin, redirect, and size protections remain enforced, and arbitrary
 Media Services URLs are never followed.

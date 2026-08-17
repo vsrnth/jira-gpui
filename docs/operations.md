@@ -103,11 +103,14 @@ are always preferred. If a mapping remains unresolved, the UI shows a clearly
 labeled, bounded gallery of remaining allowlisted Jira image attachments
 without claiming ADF placement. Thumbnails are authenticated reads from the
 configured Jira origin, capped at 8 MiB each, 16 references, and 32 MiB
-aggregate; a 404 alone permits a bounded authenticated original-content
-fallback. Cached attachment metadata must remain an allowlisted image MIME.
-Authenticated thumbnail responses may report `application/octet-stream` or
-Jira's `image/jpg`; the response is still preflighted and the payload must carry
-a strict image signature before selecting the GPUI image format. Configured
+aggregate; a 404, or the specific bounded unknown-MIME/unrecognized-signature
+thumbnail-unavailable result, permits one bounded authenticated original-content
+fallback. Authentication, transport, non-404 status, malformed-MIME, empty,
+oversize, and other thumbnail errors do not fall back. Cached attachment metadata
+must remain an allowlisted image MIME. Authenticated thumbnail responses may
+report `application/octet-stream` or Jira's `image/jpg`; the response is still
+preflighted and the payload must carry a strict image signature before selecting
+the GPUI image format. Configured
 origin, redirect, and size protections remain enforced. Arbitrary Media
 Services URLs and redirects are never followed. Thumbnail bytes are memory-only
 and are not written to SQLite or another automatic cache.

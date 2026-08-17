@@ -84,15 +84,21 @@ Media and attachment smoke must cover:
 - an unambiguous description image loading as an authenticated Jira thumbnail;
 - an IX-1873-like ADF media node containing a Media Services UUID that cannot
   be converted through documented Jira REST, showing the labeled bounded
-  allowlisted-attachment gallery without claiming ADF placement;
+  allowlisted-attachment gallery without claiming ADF placement, and recording
+  the safe unavailable-media diagnostic;
 - an ambiguous image reference falling back safely without an arbitrary remote
   Media Services read;
-- a thumbnail 404 falling back to bounded authenticated original content, while
-  non-404 thumbnail errors do not fall back;
+- a thumbnail 404, and separately a bounded unknown-MIME response whose bytes do
+  not match an image signature, each rejected as thumbnail bytes and then
+  falling back at most once to bounded authenticated original content; the
+  original response must still pass strict attachment ID, MIME, nonempty, and
+  size preflight. Authentication, transport, non-404 status, malformed-MIME,
+  empty, and oversize thumbnail errors do not fall back;
 - cached image metadata remaining allowlisted while authenticated thumbnail
   responses using `application/octet-stream` or `image/jpg` are accepted only
-  with valid image byte signatures; unsupported MIME, bad signatures, arbitrary
-  origins, redirects, and oversize content remain rejected;
+  with valid image byte signatures; unsupported MIME and bad signatures remain
+  rejected as thumbnail responses, while arbitrary origins, redirects, and
+  oversize content remain rejected;
 - cancellation before and during thumbnail loading, including stale-selection
   protection;
 - per-image 8 MiB, 16-reference, and 32 MiB aggregate rejection boundaries;

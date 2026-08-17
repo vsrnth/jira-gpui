@@ -43,11 +43,13 @@ refreshing comments before retrying.
 
 Media reads do not mutate Jira. Description thumbnails are limited to 8 MiB
 each, 16 references, and 32 MiB aggregate, with no arbitrary Media Services
-URLs, redirects, or persistence. A thumbnail 404 may fall back once to bounded
-authenticated original content; other thumbnail errors do not. Cached attachment
-metadata must remain an allowlisted image MIME; authenticated thumbnail responses
-may use `application/octet-stream` or Jira's `image/jpg`, but the payload must
-carry a strict image signature before GPUI chooses the decoder. Origin,
+URLs, redirects, or persistence. A thumbnail 404, or the specific bounded
+unknown-MIME/unrecognized-signature thumbnail-unavailable result, may fall back
+once to bounded authenticated original content. Non-404 status, authentication,
+transport, malformed-MIME, empty, oversize, and other thumbnail errors do not.
+Cached attachment metadata must remain an allowlisted image MIME; authenticated
+thumbnail responses may use `application/octet-stream` or Jira's `image/jpg`,
+but the payload must carry a strict image signature before GPUI chooses the decoder. Origin,
 redirect, and size protections remain enforced. An explicit attachment download
 is limited to 64 MiB, reads only from the configured authenticated Jira origin,
 writes in the background only after the user selects a destination, and never

@@ -71,6 +71,7 @@ current component set; Rust 1.97.1 is not required. Any upgrade must preserve
 Linux native Wayland as the only Phase 1 runtime target and rerun the release
 smoke, including media cancellation, portal download, and independent OS alert
 checks. The media smoke should include an unresolved ADF Media Services UUID,
-the bounded labeled fallback gallery, thumbnail-404 original-content fallback,
-and byte-signature format selection after MIME allowlists. OS alerts remain
+the bounded labeled fallback gallery, thumbnail-404 and precise unknown-MIME/
+unrecognized-signature thumbnail-unavailable original-content fallback, and
+byte-signature format selection after MIME allowlists. OS alerts remain
 unchanged.
