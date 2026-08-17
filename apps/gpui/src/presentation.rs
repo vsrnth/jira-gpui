@@ -360,6 +360,7 @@ impl IssueDetailViewModel {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateViewModel {
+    pub issue_id: jira_domain::IssueId,
     pub issue_key: String,
     pub issue_summary: String,
     pub change: String,
@@ -374,6 +375,7 @@ impl UpdateViewModel {
             identities.include_issue(issue);
         }
         Self {
+            issue_id: event.issue_id.clone(),
             issue_key: event.issue_key.to_string(),
             issue_summary: issue
                 .map(|issue| issue.summary.clone())
@@ -891,6 +893,7 @@ mod tests {
 
         let view = UpdateViewModel::from_domain(&event, Some(&issue), &[]);
 
+        assert_eq!(view.issue_id, issue.id);
         assert_eq!(view.change, "Issue activity changed");
     }
 }

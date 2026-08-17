@@ -1017,6 +1017,70 @@ fn local_issue_id_for_key(issues: &[Issue], key: &IssueKey) -> Option<IssueId> {
         .map(|issue| issue.id.clone())
 }
 
+fn selected_issue_view_from_sources(
+    selected_issue: Option<&IssueId>,
+    visible_issues: &[IssueViewModel],
+    domain_issues: &[Issue],
+    selected_issue_core: Option<&Issue>,
+    users: &[User],
+) -> Option<IssueViewModel> {
+    let selected = selected_issue?;
+    visible_issues
+        .iter()
+        .find(|issue| &issue.id == selected)
+        .cloned()
+        .or_else(|| {
+            domain_issues
+                .iter()
+                .find(|issue| &issue.id == selected)
+                .map(|issue| IssueViewModel::from_domain(issue, users))
+        })
+        .or_else(|| {
+            selected_issue_core
+                .filter(|issue| &issue.id == selected)
+                .map(|issue| IssueViewModel::from_domain(issue, users))
+        })
+}
+
+fn selected_issue_from_sources<'a>(
+    selected_issue: Option<&IssueId>,
+    domain_issues: &'a [Issue],
+    selected_issue_core: Option<&'a Issue>,
+) -> Option<&'a Issue> {
+    let selected = selected_issue?;
+    domain_issues
+        .iter()
+        .find(|issue| &issue.id == selected)
+        .or_else(|| selected_issue_core.filter(|issue| &issue.id == selected))
+}
+
+fn selection_after_issue_view_rebuild(
+    selected_issue: Option<IssueId>,
+    visible_issues: &[IssueViewModel],
+) -> Option<IssueId> {
+    selected_issue.or_else(|| visible_issues.first().map(|issue| issue.id.clone()))
+}
+
+fn should_defer_detail_refresh(
+    selected_issue: Option<&IssueId>,
+    domain_issues: &[Issue],
+    detail_state: &DetailState,
+    refresh_detail: bool,
+) -> bool {
+    let Some(selected_issue) = selected_issue else {
+        return false;
+    };
+    refresh_detail
+        && !domain_issues
+            .iter()
+            .any(|issue| &issue.id == selected_issue)
+        && matches!(
+            detail_state,
+            DetailState::Loading { issue_id } | DetailState::Error { issue_id, .. }
+                if issue_id == selected_issue
+        )
+}
+
 pub struct Dashboard {
     diagnostics: DiagnosticsSink,
     section: Section,
@@ -1024,6 +1088,7 @@ pub struct Dashboard {
     issues: Vec<IssueViewModel>,
     updates: Vec<UpdateViewModel>,
     selected_issue: Option<IssueId>,
+    selected_issue_core: Option<Issue>,
     mobile_detail_open: bool,
     sync_message: String,
     workspace: Option<Arc<LiveWorkspace>>,
@@ -1091,6 +1156,7 @@ impl Dashboard {
             issues,
             updates,
             selected_issue,
+            selected_issue_core: None,
             mobile_detail_open: false,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
             workspace: None,
@@ -1154,6 +1220,7 @@ impl Dashboard {
             issues: Vec::new(),
             updates: Vec::new(),
             selected_issue: None,
+            selected_issue_core: None,
             mobile_detail_open: false,
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
@@ -1380,18 +1447,20 @@ impl Dashboard {
             self.status_filter,
             &self.search_query,
         );
-        let selected_visible = self
-            .selected_issue
-            .as_ref()
-            .is_some_and(|selected| self.issues.iter().any(|issue| &issue.id == selected));
-        if self.selected_issue.is_some() && !selected_visible {
-            self.invalidate_detail_selection();
-        }
+        let retained_selection =
+            selection_after_issue_view_rebuild(self.selected_issue.clone(), &self.issues);
         if self.selected_issue.is_none() {
-            if let Some(issue_id) = self.issues.first().map(|issue| issue.id.clone()) {
+            if let Some(issue_id) = retained_selection {
                 self.select_issue(issue_id, cx, true);
             }
-        } else if refresh_detail {
+        } else if refresh_detail
+            && !should_defer_detail_refresh(
+                self.selected_issue.as_ref(),
+                &self.domain_issues,
+                &self.detail_state,
+                refresh_detail,
+            )
+        {
             self.reload_selected_detail(cx);
         }
     }
@@ -1607,6 +1676,7 @@ impl Dashboard {
         self.detail_task.take();
         self.detail_generation = self.detail_generation.wrapping_add(1);
         self.selected_issue = None;
+        self.selected_issue_core = None;
         self.detail_state = DetailState::Empty;
     }
 
@@ -1628,6 +1698,7 @@ impl Dashboard {
     }
 
     fn select_issue(&mut self, issue_id: IssueId, cx: &mut Context<Self>, force: bool) {
+        let selection_changed = self.selected_issue.as_ref() != Some(&issue_id);
         if self.selected_issue.as_ref() == Some(&issue_id)
             && !force
             && matches!(
@@ -1650,6 +1721,9 @@ impl Dashboard {
         self.invalidate_comment_selection();
         self.detail_task.take();
         self.detail_generation = self.detail_generation.wrapping_add(1);
+        if selection_changed {
+            self.selected_issue_core = None;
+        }
         let generation = self.detail_generation;
         self.selected_issue = Some(issue_id.clone());
 
@@ -1694,6 +1768,7 @@ impl Dashboard {
                     return;
                 }
             };
+            let issue = detail.core.issue.clone();
             let view = IssueDetailViewModel::from_domain(&detail, &users);
             let images = collect_detail_images_with_context(&view);
             let image_contexts = images
@@ -1717,6 +1792,7 @@ impl Dashboard {
                     ) {
                         return false;
                     }
+                    this.selected_issue_core = Some(issue.clone());
                     this.detail_state = DetailState::Loaded(view.clone());
                     this.selected_image_states = loading;
                     cx.notify();
@@ -1784,6 +1860,14 @@ impl Dashboard {
             }
         });
         self.detail_task = Some(task);
+        cx.notify();
+    }
+
+    fn open_update(&mut self, update: &UpdateViewModel, mobile: bool, cx: &mut Context<Self>) {
+        self.clear_remote_lookup();
+        self.select_issue(update.issue_id.clone(), cx, false);
+        self.section = Section::Issues;
+        self.mobile_detail_open = mobile;
         cx.notify();
     }
 
@@ -2778,17 +2862,13 @@ impl Dashboard {
     }
 
     fn selected_issue_view(&self) -> Option<IssueViewModel> {
-        let selected = self.selected_issue.as_ref()?;
-        self.issues
-            .iter()
-            .find(|issue| &issue.id == selected)
-            .cloned()
-            .or_else(|| {
-                self.domain_issues
-                    .iter()
-                    .find(|issue| &issue.id == selected)
-                    .map(|issue| IssueViewModel::from_domain(issue, &self.users))
-            })
+        selected_issue_view_from_sources(
+            self.selected_issue.as_ref(),
+            &self.issues,
+            &self.domain_issues,
+            self.selected_issue_core.as_ref(),
+            &self.users,
+        )
     }
 
     fn comment_target_issue(&self) -> Option<&Issue> {
@@ -2796,10 +2876,13 @@ impl Dashboard {
             RemoteLookupState::Loaded { issue, .. } => Some(issue),
             RemoteLookupState::Idle
             | RemoteLookupState::Loading { .. }
-            | RemoteLookupState::Error { .. } => self
-                .selected_issue
-                .as_ref()
-                .and_then(|id| self.domain_issues.iter().find(|issue| &issue.id == id)),
+            | RemoteLookupState::Error { .. } => self.selected_issue.as_ref().and_then(|id| {
+                selected_issue_from_sources(
+                    Some(id),
+                    &self.domain_issues,
+                    self.selected_issue_core.as_ref(),
+                )
+            }),
         }
     }
 
@@ -3742,12 +3825,16 @@ impl Dashboard {
         let issue_type = self
             .domain_issues
             .iter()
-            .find(|issue| issue.key.as_str().eq_ignore_ascii_case(&update.issue_key))
+            .find(|issue| issue.id == update.issue_id)
             .map(|issue| issue.issue_type.name.as_str())
             .unwrap_or("Unknown");
-        h_flex()
-            .id(("update-card", index))
+        let mobile = layout.is_mobile();
+        let update = update.clone();
+        let clicked_update = update.clone();
+        Button::new(("update-card", index))
+            .ghost()
             .w_full()
+            .h_auto()
             .items_start()
             .min_w_0()
             .gap_3()
@@ -3756,6 +3843,10 @@ impl Dashboard {
             .border_1()
             .border_color(cx.theme().border)
             .when(update.unread, |this| this.bg(cx.theme().list_active))
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_update(&clicked_update, mobile, cx);
+            }))
             .child(
                 div()
                     .mt_1()
@@ -4054,6 +4145,145 @@ mod tests {
             .map(|issue| issue.id.clone());
 
         assert_eq!(local_issue_id_for_key(&issues, &key), expected);
+    }
+
+    #[gpui::test]
+    fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui::TestAppContext) {
+        let issue = sample_issues()
+            .into_iter()
+            .find(|issue| issue.key.as_str() == "DESK-176")
+            .expect("issue");
+        let event = crate::sample_data::sample_updates()
+            .into_iter()
+            .find(|event| event.issue_id == issue.id)
+            .expect("update");
+        let update = UpdateViewModel::from_domain(&event, Some(&issue), &sample_users());
+        let dashboard = cx.new(|_| Dashboard::from_sample_data());
+
+        cx.update_entity(&dashboard, |dashboard, cx| {
+            dashboard.open_update(&update, true, cx);
+        });
+        let (selected_issue, section, mobile_detail_open) =
+            cx.read_entity(&dashboard, |dashboard, _| {
+                (
+                    dashboard.selected_issue.clone(),
+                    dashboard.section,
+                    dashboard.mobile_detail_open,
+                )
+            });
+
+        assert_eq!(selected_issue, Some(issue.id));
+        assert_eq!(section, Section::Issues);
+        assert!(mobile_detail_open);
+    }
+
+    #[test]
+    fn filtered_selected_issue_resolves_header_from_domain_cache() {
+        let domain_issues = sample_issues();
+        let users = sample_users();
+        let selected = domain_issues
+            .iter()
+            .find(|issue| issue.key.as_str() == "DESK-176")
+            .expect("selected issue");
+        let visible = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::ToDo, "");
+        assert!(!visible.iter().any(|issue| issue.id == selected.id));
+
+        let view = selected_issue_view_from_sources(
+            Some(&selected.id),
+            &visible,
+            &domain_issues,
+            None,
+            &users,
+        )
+        .expect("filtered selected issue header");
+
+        assert_eq!(view.id, selected.id);
+        assert_eq!(view.key, selected.key.to_string());
+    }
+
+    #[test]
+    fn absent_cache_selected_issue_uses_fetched_core_for_header_and_comments() {
+        let issue = sample_issues()
+            .into_iter()
+            .find(|issue| issue.key.as_str() == "DESK-176")
+            .expect("issue");
+        let users = sample_users();
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.domain_issues.clear();
+        dashboard.issues.clear();
+        dashboard.selected_issue = Some(issue.id.clone());
+        dashboard.selected_issue_core = Some(issue.clone());
+
+        let view = dashboard
+            .selected_issue_view()
+            .expect("fetched issue core header");
+        let comment_target = dashboard.comment_target_issue().expect("comment target");
+
+        assert_eq!(view.id, issue.id);
+        assert_eq!(
+            view.assignee,
+            IssueViewModel::from_domain(&issue, &users).assignee
+        );
+        assert_eq!(comment_target.id, issue.id);
+    }
+
+    #[test]
+    fn rebuild_retains_hidden_selection_and_defers_refresh_of_absent_cache_fetch() {
+        let issue = sample_issues()
+            .into_iter()
+            .find(|issue| issue.key.as_str() == "DESK-176")
+            .expect("issue");
+        let visible = issue_views_for_filter(
+            std::slice::from_ref(&issue),
+            &sample_users(),
+            IssueStatusFilter::ToDo,
+            "",
+        );
+        assert!(visible.is_empty());
+        assert_eq!(
+            selection_after_issue_view_rebuild(Some(issue.id.clone()), &visible),
+            Some(issue.id.clone())
+        );
+
+        let loading = DetailState::Loading {
+            issue_id: issue.id.clone(),
+        };
+        assert!(should_defer_detail_refresh(
+            Some(&issue.id),
+            &[],
+            &loading,
+            true,
+        ));
+        assert!(!should_defer_detail_refresh(
+            Some(&issue.id),
+            std::slice::from_ref(&issue),
+            &loading,
+            true,
+        ));
+        assert!(!should_defer_detail_refresh(
+            Some(&issue.id),
+            &[],
+            &DetailState::Empty,
+            true,
+        ));
+        assert!(should_defer_detail_refresh(
+            Some(&issue.id),
+            &[],
+            &DetailState::Error {
+                issue_id: issue.id.clone(),
+                message: "detail unavailable".to_owned(),
+            },
+            true,
+        ));
+        assert!(!should_defer_detail_refresh(
+            Some(&issue.id),
+            &[],
+            &DetailState::Error {
+                issue_id: IssueId::new("different").expect("issue"),
+                message: "detail unavailable".to_owned(),
+            },
+            true,
+        ));
     }
 
     #[test]
