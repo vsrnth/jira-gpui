@@ -86,6 +86,17 @@ The dashboard is responsive: below 720 px it shows one mobile pane at a time;
 720–959 px uses a compact navigation rail; 960–1,199 px uses the standard
 desktop columns; and 1,200 px or wider uses the expanded desktop layout.
 
+On desktop, the issue list and selected-issue detail are separated by a
+resizable split. On mobile, the shell presents one pane at a time with an
+explicit back action. Status filtering accepts multiple categories; no
+selected categories means All statuses. The issue list has its own component
+scrollbar so long result sets do not expand the surrounding layout.
+
+Refresh uses a loading spinner in the button while work is in progress. Refresh
+and comment outcomes also appear as in-app notifications. These in-app
+notifications are additive and do not disable or replace the existing
+Freedesktop OS desktop alerts for update delivery.
+
 ## Comment policy
 
 Creating a comment is the sole Jira write. The composer is memory-only and
@@ -94,6 +105,11 @@ KiB UTF-8. The user must confirm the exact issue, body, and sizes before the
 single dispatch. A confirmed request is never automatically retried. If the
 outcome is unknown, the draft is retained and the UI asks the user to refresh
 comments before deciding whether to retry.
+
+The composer is a plain Textarea, not a rich ADF editor. Jira Desk wraps the
+confirmed plain text in a safe Jira ADF paragraph before sending it. Received
+descriptions and comments use the bounded read-only ADF renderer; unsupported
+nodes and empty documents use safe fallbacks.
 
 No Jira issue edits, deletions, transitions, assignments, worklogs, attachment
 uploads, or background writes are supported.

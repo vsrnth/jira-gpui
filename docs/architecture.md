@@ -42,9 +42,12 @@ deterministic update events.
 
 The dashboard has one My-issues list. Status categories and text search are
 local intersections over the retained domain issue list; they do not trigger
-Jira or SQLite requests. Exact-key submission first selects a local match. If
-the key is absent, Jira Desk performs a bounded, cancellable lookup and shows a
-transient result without adding it to cache membership.
+Jira or SQLite requests. The status control is a multi-select: selecting any
+combination of To Do, In Progress, Done, and Uncategorized applies an OR
+filter, while an empty selection means All statuses. Exact-key submission first
+selects a local match. If the key is absent, Jira Desk performs a bounded,
+cancellable lookup and shows a transient result without adding it to cache
+membership.
 
 Selecting an issue starts a separate cancellable detail request. The request
 loads the description, all bounded comment pages, and attachment metadata.
@@ -53,8 +56,32 @@ match. Detail data is memory-only. Comment creation uses a separate confirmed
 request path and does not share retry behavior with reads.
 
 The local update feed is derived from cache transitions. It is Jira Desk's
-view of detected changes, not Jira's bell or inbox notification stream.
-Desktop delivery is best effort and never makes a sync fail.
+view of detected changes, not Jira's bell or inbox notification stream. The
+shell also shows component-level in-app notifications for refresh and comment
+outcomes. These are additive feedback: the Freedesktop desktop notification
+adapter remains enabled for update alerts, and desktop delivery is best effort
+and never makes a sync fail.
+
+## Dashboard components
+
+The desktop issue workspace uses the `gpui-component` primitives that match
+the interaction rather than duplicating them in the shell:
+
+- Compact, standard, and wide layouts use a horizontal resizable split between
+  the issue list and selected-issue detail. The mobile layout shows one pane at
+  a time and provides an explicit back action.
+- The issue list uses the component scrollbar. The refresh button uses the
+  component button's loading state, which displays its spinner and disables
+  duplicate activation while a refresh is running.
+- Status filtering uses the component combobox in multiple-selection mode. It
+  is a local presentation filter, not a change to the Jira query.
+- In-app outcome messages use the component notification layer. They do not
+  replace OS/Freedesktop desktop alerts.
+
+Issues and Updates are navigation controls in the current shell, not tab
+panels, so the component Tabs control is not currently used. A true tabbed
+detail surface can be introduced when there are separate detail panels that
+need tab semantics and keyboard navigation.
 
 ## Responsive presentation
 
@@ -97,6 +124,17 @@ small embedded `gpui-component` semantic icons as secondary cues: generic icons
 cover Story, Initiative, Task, Sub-task, Bug, Epic, and unknown types, while
 priority arrows/minus communicate Highest through Lowest with restrained theme
 tones.
+
+The comment composer is intentionally a plain multiline Textarea. Jira Desk
+does not present it as a rich ADF editor: after confirmation, the plain text is
+serialized as one safe Jira ADF paragraph and sent once through the dedicated
+comment-write port. Rich authored marks, lists, mentions, and attachments are
+not implied by the Textarea.
+
+Descriptions and received comments are rendered from the bounded, supported ADF
+subset described above. Empty ADF documents fall back to the normal empty-state
+copy, and unsupported or media-only content remains visible through safe
+placeholders rather than producing a blank panel or triggering a download.
 
 ## Boundaries worth preserving
 

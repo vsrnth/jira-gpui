@@ -69,7 +69,11 @@ distribution. No X11, Windows, or macOS artifact should be inferred from the
 Linux build.
 
 The release smoke should also exercise the responsive dashboard at narrow and
-wide window sizes, verify display-name-only identity labels, and confirm that
+wide window sizes, drag the desktop list/detail divider, select multiple status
+categories and clear them back to All, verify the issue-list scrollbar and
+refresh spinner, and confirm that in-app notifications appear. Verify that OS
+Freedesktop desktop alerts are still delivered independently of the in-app
+notification layer. Verify display-name-only identity labels, and confirm that
 rich-text placeholders and inert links remain safe. Comments/details are remote
 and memory-only, so a restart test should expect cached issue snapshots but not
 cached comment bodies.
