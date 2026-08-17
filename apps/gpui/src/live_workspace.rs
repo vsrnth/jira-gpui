@@ -7,12 +7,13 @@
 use std::sync::Arc;
 
 use jira_application::{
-    AddCommentRequest, ApplicationError, CancellationToken, Clock, CommentService,
+    AddCommentRequest, ApplicationError, AttachmentContent, AttachmentDownloadRequest,
+    AttachmentImage, AttachmentImageRequest, CancellationToken, Clock, CommentService,
     DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort, IssueCatalogService,
     IssueDetailConfig, IssueDetailRequest, IssueDetailService, IssueListQuery, IssueLocator,
-    JiraCommentWritePort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome,
-    SyncRequest, SyncService, UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort,
-    UserSetService,
+    IssueMediaConfig, IssueMediaService, JiraCommentWritePort, JiraReadPort, NoopEventSink,
+    SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService, UpdateFeedQuery,
+    UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
@@ -54,6 +55,7 @@ pub struct LiveWorkspace {
     catalog: IssueCatalogService,
     feed: UpdateFeedService,
     detail: IssueDetailService,
+    media: IssueMediaService,
     comments: CommentService,
     cache: Arc<SqliteStore>,
     sync: SyncService,
@@ -126,6 +128,7 @@ impl LiveWorkspace {
         let cache_port: Arc<dyn IssueCachePort> = cache.clone();
         let catalog = IssueCatalogService::new(jira.clone(), cache_port.clone());
         let detail = IssueDetailService::new(jira.clone(), IssueDetailConfig::default());
+        let media = IssueMediaService::new(jira.clone(), IssueMediaConfig::default());
         let comments = CommentService::new(comment_writer);
         let events = Arc::new(NoopEventSink);
         let feed = UpdateFeedService::new(
@@ -150,6 +153,7 @@ impl LiveWorkspace {
             catalog,
             feed,
             detail,
+            media,
             comments,
             cache,
             sync,
@@ -183,6 +187,24 @@ impl LiveWorkspace {
                 cancellation,
             )
             .await
+    }
+
+    /// Fetch one bounded authenticated thumbnail through the application media service.
+    pub async fn fetch_attachment_image(
+        &self,
+        request: AttachmentImageRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AttachmentImage, ApplicationError> {
+        self.media.fetch(request, cancellation).await
+    }
+
+    /// Fetch one bounded authenticated original attachment for an explicit download.
+    pub async fn download_attachment(
+        &self,
+        request: AttachmentDownloadRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AttachmentContent, ApplicationError> {
+        self.media.download(request, cancellation).await
     }
 
     /// Create exactly one explicitly confirmed Jira comment. The application

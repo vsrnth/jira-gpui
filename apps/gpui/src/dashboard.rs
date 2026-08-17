@@ -1,10 +1,16 @@
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, px,
+    AnyElement, AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, WindowExt as _,
@@ -17,14 +23,17 @@ use gpui_component::{
     resizable_panel,
     scroll::ScrollableElement as _,
     searchable_list::{SearchableListItem, SearchableVec},
+    spinner::Spinner,
     v_flex,
 };
 use jira_application::{
-    ApplicationError, CancellationToken, DefaultPollingPolicy, IssueLocator, JiraCommentWritePort,
-    JiraReadPort, SyncMode,
+    ApplicationError, AttachmentDownloadRequest, CancellationToken, DefaultPollingPolicy,
+    IssueLocator, JiraCommentWritePort, JiraReadPort, SyncMode,
 };
 
-use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
+use jira_domain::{
+    AccountId, Issue, IssueId, IssueKey, JiraSiteId, RichBlock, RichImage, RichTextDocument, User,
+};
 
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
@@ -34,7 +43,9 @@ use crate::{
         UpdateViewModel, issue_views_for_filter,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
-    rich_text_view::{RichTextPalette, render_rich_text},
+    rich_text_view::{
+        RichImageRenderState, RichImageRenderStates, RichTextPalette, render_rich_text,
+    },
     sample_data::{sample_issues, sample_updates, sample_users},
     semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
 };
@@ -110,6 +121,311 @@ fn safe_lookup_error(error: &ApplicationError) -> &'static str {
     }
 }
 
+const MAX_RICH_IMAGES: usize = 16;
+const MAX_RICH_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AttachmentDownloadState {
+    Idle,
+    Saving { attachment_id: String },
+}
+
+fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::Webp),
+        _ => None,
+    }
+}
+
+/// ADF metadata is only a preflight filter. Jira's authenticated response is
+/// authoritative for the bytes that GPUI will decode.
+fn fetched_image_format(cached_mime_type: &str, response_mime_type: &str) -> Option<ImageFormat> {
+    image_format_for_mime(cached_mime_type)?;
+    image_format_for_mime(response_mime_type)
+}
+
+/// Keep only a leaf filename suitable for a portal suggestion. The selected
+/// destination remains controlled by the user and is never derived from Jira.
+fn sanitized_attachment_filename(filename: &str) -> String {
+    let candidate = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let candidate = candidate.trim().trim_matches('.').trim();
+    if candidate.is_empty() {
+        "jira-attachment".to_owned()
+    } else {
+        let mut bounded = String::new();
+        for character in candidate.chars() {
+            if bounded.len().saturating_add(character.len_utf8()) > 255 {
+                break;
+            }
+            bounded.push(character);
+        }
+        if bounded.is_empty() {
+            "jira-attachment".to_owned()
+        } else {
+            bounded
+        }
+    }
+}
+
+fn choose_portal_download_directory(
+    home: Option<&Path>,
+    downloads: Option<&Path>,
+    current: &Path,
+) -> PathBuf {
+    downloads
+        .filter(|path| path.is_dir())
+        .or_else(|| home.filter(|path| path.is_dir()))
+        .unwrap_or(current)
+        .to_path_buf()
+}
+
+fn portal_download_directory() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let downloads = std::env::var_os("XDG_DOWNLOAD_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|path| path.join("Downloads")));
+    choose_portal_download_directory(home.as_deref(), downloads.as_deref(), Path::new("."))
+}
+
+fn attachment_temp_path(destination: &Path, unique_token: &str) -> PathBuf {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("jira-attachment");
+    parent.join(format!(".{filename}.jira-desk-{unique_token}.part"))
+}
+
+fn attachment_temp_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn write_attachment_temp(
+    path: &Path,
+    bytes: &[u8],
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        return Err("Download cancelled".to_owned());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "Could not create a temporary attachment file".to_owned())?;
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(|_| "Could not save the attachment".to_owned())?;
+        file.sync_all()
+            .map_err(|_| "Could not save the attachment".to_owned())?;
+        if cancellation.is_cancelled() {
+            return Err("Download cancelled".to_owned());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn cleanup_attachment_temp(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+fn attachment_download_is_current(
+    current_generation: u64,
+    expected_generation: u64,
+    cancellation: &CancellationToken,
+) -> bool {
+    current_generation == expected_generation && !cancellation.is_cancelled()
+}
+
+fn image_bytes_fit_aggregate(current: usize, next: usize) -> bool {
+    next <= MAX_RICH_IMAGE_BYTES && current <= MAX_RICH_IMAGE_BYTES.saturating_sub(next)
+}
+
+fn image_result_is_current(
+    selected_issue: Option<&IssueId>,
+    expected_issue: &IssueId,
+    generation: u64,
+    expected_generation: u64,
+) -> bool {
+    detail_result_is_current(
+        selected_issue,
+        expected_issue,
+        generation,
+        expected_generation,
+    )
+}
+
+fn attachment_download_button_label(active: bool) -> &'static str {
+    if active { "Saving…" } else { "Download" }
+}
+
+fn attachment_issue_id(
+    selected_issue: Option<&IssueId>,
+    remote_issue: Option<&IssueId>,
+) -> Option<IssueId> {
+    remote_issue.cloned().or_else(|| selected_issue.cloned())
+}
+
+fn collect_rich_images(document: &RichTextDocument) -> Vec<RichImage> {
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
+    for block in &document.blocks {
+        collect_rich_images_from_block(block, &mut seen, &mut images);
+        if images.len() == MAX_RICH_IMAGES {
+            break;
+        }
+    }
+    images
+}
+
+fn collect_rich_images_from_block(
+    block: &RichBlock,
+    seen: &mut HashSet<String>,
+    images: &mut Vec<RichImage>,
+) {
+    if images.len() == MAX_RICH_IMAGES {
+        return;
+    }
+    match block {
+        RichBlock::Image(image) => {
+            if seen.insert(image.attachment_id.clone()) {
+                images.push(image.clone());
+            }
+        }
+        RichBlock::BlockQuote(children)
+        | RichBlock::Panel {
+            content: children, ..
+        } => {
+            for child in children {
+                collect_rich_images_from_block(child, seen, images);
+                if images.len() == MAX_RICH_IMAGES {
+                    break;
+                }
+            }
+        }
+        RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
+            for item in items {
+                for child in &item.blocks {
+                    collect_rich_images_from_block(child, seen, images);
+                    if images.len() == MAX_RICH_IMAGES {
+                        return;
+                    }
+                }
+            }
+        }
+        RichBlock::Paragraph(_)
+        | RichBlock::Heading { .. }
+        | RichBlock::CodeBlock { .. }
+        | RichBlock::Placeholder { .. } => {}
+    }
+}
+
+fn collect_detail_images(detail: &IssueDetailViewModel) -> Vec<RichImage> {
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(document) = detail.rich_description.as_ref() {
+        for image in collect_rich_images(document) {
+            if seen.insert(image.attachment_id.clone()) {
+                images.push(image);
+            }
+        }
+    }
+    for comment in &detail.comments {
+        if let Some(document) = comment.rich_body.as_ref() {
+            for image in collect_rich_images(document) {
+                if seen.insert(image.attachment_id.clone()) {
+                    images.push(image);
+                    if images.len() == MAX_RICH_IMAGES {
+                        return images;
+                    }
+                }
+            }
+        }
+    }
+    images.truncate(MAX_RICH_IMAGES);
+    images
+}
+
+fn loading_image_states(images: &[RichImage]) -> RichImageRenderStates {
+    images
+        .iter()
+        .map(|image| (image.attachment_id.clone(), RichImageRenderState::Loading))
+        .collect()
+}
+
+async fn fetch_rich_image_states(
+    workspace: Arc<LiveWorkspace>,
+    site_id: JiraSiteId,
+    issue_id: IssueId,
+    images: Vec<RichImage>,
+    cancellation: CancellationToken,
+) -> Result<RichImageRenderStates, ()> {
+    let mut states = RichImageRenderStates::default();
+    let mut resident_bytes = 0usize;
+    for image in images {
+        cancellation.check().map_err(|_| ())?;
+        if image_format_for_mime(&image.mime_type).is_none() {
+            states.insert(image.attachment_id, RichImageRenderState::Failed);
+            continue;
+        }
+        let result = workspace
+            .fetch_attachment_image(
+                jira_application::AttachmentImageRequest {
+                    site_id: site_id.clone(),
+                    issue_id: issue_id.clone(),
+                    attachment_id: image.attachment_id.clone(),
+                    width: 1_600,
+                    height: 1_200,
+                    max_bytes: 8 * 1024 * 1024,
+                },
+                &cancellation,
+            )
+            .await;
+        match result {
+            Ok(image_bytes)
+                if image_bytes_fit_aggregate(resident_bytes, image_bytes.bytes.len()) =>
+            {
+                let Some(format) = fetched_image_format(&image.mime_type, &image_bytes.mime_type)
+                else {
+                    states.insert(image.attachment_id, RichImageRenderState::Failed);
+                    continue;
+                };
+                resident_bytes = resident_bytes.saturating_add(image_bytes.bytes.len());
+                states.insert(
+                    image.attachment_id,
+                    RichImageRenderState::Ready(Arc::new(Image::from_bytes(
+                        format,
+                        image_bytes.bytes,
+                    ))),
+                );
+            }
+            Ok(_) | Err(_) => {
+                states.insert(image.attachment_id, RichImageRenderState::Failed);
+            }
+        }
+    }
+    Ok(states)
+}
+
 fn refresh_complete_message(result: &RefreshResult) -> String {
     let mode = match result.outcome.mode {
         SyncMode::Baseline => "baseline",
@@ -139,6 +455,7 @@ enum Section {
 
 struct RefreshNotification;
 struct CommentNotification;
+struct AttachmentNotification;
 
 #[derive(Clone, Debug)]
 struct StatusOption(IssueStatusSelection);
@@ -337,6 +654,8 @@ pub struct Dashboard {
     detail_generation: u64,
     detail_cancellation: Option<CancellationToken>,
     detail_task: Option<gpui::Task<()>>,
+    selected_image_states: RichImageRenderStates,
+    remote_image_states: RichImageRenderStates,
     remote_lookup: RemoteLookupState,
     remote_lookup_generation: u64,
     remote_lookup_cancellation: Option<CancellationToken>,
@@ -347,6 +666,10 @@ pub struct Dashboard {
     comment_generation: u64,
     comment_cancellation: Option<CancellationToken>,
     comment_task: Option<gpui::Task<()>>,
+    attachment_download_state: AttachmentDownloadState,
+    attachment_download_generation: u64,
+    attachment_download_cancellation: Option<CancellationToken>,
+    attachment_download_task: Option<gpui::Task<()>>,
 }
 
 impl Dashboard {
@@ -393,6 +716,8 @@ impl Dashboard {
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
+            selected_image_states: RichImageRenderStates::default(),
+            remote_image_states: RichImageRenderStates::default(),
             remote_lookup: RemoteLookupState::Idle,
             remote_lookup_generation: 0,
             remote_lookup_cancellation: None,
@@ -403,6 +728,10 @@ impl Dashboard {
             comment_generation: 0,
             comment_cancellation: None,
             comment_task: None,
+            attachment_download_state: AttachmentDownloadState::Idle,
+            attachment_download_generation: 0,
+            attachment_download_cancellation: None,
+            attachment_download_task: None,
         }
     }
 
@@ -443,6 +772,8 @@ impl Dashboard {
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
+            selected_image_states: RichImageRenderStates::default(),
+            remote_image_states: RichImageRenderStates::default(),
             remote_lookup: RemoteLookupState::Idle,
             remote_lookup_generation: 0,
             remote_lookup_cancellation: None,
@@ -453,6 +784,10 @@ impl Dashboard {
             comment_generation: 0,
             comment_cancellation: None,
             comment_task: None,
+            attachment_download_state: AttachmentDownloadState::Idle,
+            attachment_download_generation: 0,
+            attachment_download_cancellation: None,
+            attachment_download_task: None,
         };
 
         let site_id = session.site_id;
@@ -659,12 +994,15 @@ impl Dashboard {
         }
         self.clear_remote_lookup();
         self.invalidate_comment_selection();
+        self.invalidate_attachment_download();
         self.search_query = query;
         self.rebuild_issue_views(false, cx);
         cx.notify();
     }
 
     fn clear_remote_lookup(&mut self) {
+        self.invalidate_attachment_download();
+        self.remote_image_states.clear();
         if let Some(cancellation) = self.remote_lookup_cancellation.take() {
             cancellation.cancel();
         }
@@ -710,8 +1048,58 @@ impl Dashboard {
             query: query.clone(),
         };
         let expected_query = query.clone();
+        let users = self.users.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = workspace.lookup_issue(key, &cancellation).await;
+            let detail = match result {
+                Ok(detail) => detail,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if !remote_lookup_result_is_current(
+                            &this.search_query,
+                            &expected_query,
+                            this.remote_lookup_generation,
+                            generation,
+                        ) {
+                            return;
+                        }
+                        this.remote_lookup_cancellation = None;
+                        this.remote_lookup_task = None;
+                        this.remote_image_states.clear();
+                        this.remote_lookup = RemoteLookupState::Error {
+                            query: expected_query.clone(),
+                            message: safe_lookup_error(&error).to_owned(),
+                        };
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let issue = detail.core.issue.clone();
+            let view = IssueDetailViewModel::from_domain(&detail, &users);
+            let images = collect_detail_images(&view);
+            let loading = loading_image_states(&images);
+            let site_id = workspace.site_id().clone();
+            let _ = this.update(cx, |this, cx| {
+                if !remote_lookup_result_is_current(
+                    &this.search_query,
+                    &expected_query,
+                    this.remote_lookup_generation,
+                    generation,
+                ) {
+                    return;
+                }
+                this.remote_lookup = RemoteLookupState::Loaded {
+                    query: expected_query.clone(),
+                    issue: issue.clone(),
+                    detail: view.clone(),
+                };
+                this.remote_image_states = loading;
+                cx.notify();
+            });
+            let states =
+                fetch_rich_image_states(workspace, site_id, issue.id.clone(), images, cancellation)
+                    .await;
             let _ = this.update(cx, |this, cx| {
                 if !remote_lookup_result_is_current(
                     &this.search_query,
@@ -723,21 +1111,9 @@ impl Dashboard {
                 }
                 this.remote_lookup_cancellation = None;
                 this.remote_lookup_task = None;
-                this.remote_lookup = match result {
-                    Ok(detail) => {
-                        let issue = detail.core.issue.clone();
-                        let detail = IssueDetailViewModel::from_domain(&detail, &this.users);
-                        RemoteLookupState::Loaded {
-                            query: expected_query.clone(),
-                            issue,
-                            detail,
-                        }
-                    }
-                    Err(error) => RemoteLookupState::Error {
-                        query: expected_query.clone(),
-                        message: safe_lookup_error(&error).to_owned(),
-                    },
-                };
+                if let Ok(states) = states {
+                    this.remote_image_states = states;
+                }
                 cx.notify();
             });
         });
@@ -746,6 +1122,8 @@ impl Dashboard {
     }
 
     fn invalidate_detail_selection(&mut self) {
+        self.invalidate_attachment_download();
+        self.selected_image_states.clear();
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel();
         }
@@ -785,6 +1163,8 @@ impl Dashboard {
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel();
         }
+        self.invalidate_attachment_download();
+        self.selected_image_states.clear();
         self.invalidate_comment_selection();
         self.detail_task.take();
         self.detail_generation = self.detail_generation.wrapping_add(1);
@@ -802,12 +1182,57 @@ impl Dashboard {
         self.detail_state = DetailState::Loading {
             issue_id: issue_id.clone(),
         };
+        let users = self.users.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = workspace
                 .fetch_issue_detail(IssueLocator::Id(issue_id.clone()), &cancellation)
                 .await;
+            let detail = match result {
+                Ok(detail) => detail,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if !detail_result_is_current(
+                            this.selected_issue.as_ref(),
+                            &issue_id,
+                            this.detail_generation,
+                            generation,
+                        ) {
+                            return;
+                        }
+                        this.detail_cancellation = None;
+                        this.detail_task = None;
+                        this.selected_image_states.clear();
+                        this.detail_state = DetailState::Error {
+                            issue_id: issue_id.clone(),
+                            message: safe_detail_error(&error).to_owned(),
+                        };
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let view = IssueDetailViewModel::from_domain(&detail, &users);
+            let images = collect_detail_images(&view);
+            let loading = loading_image_states(&images);
+            let site_id = workspace.site_id().clone();
             let _ = this.update(cx, |this, cx| {
-                if !detail_result_is_current(
+                if !image_result_is_current(
+                    this.selected_issue.as_ref(),
+                    &issue_id,
+                    this.detail_generation,
+                    generation,
+                ) {
+                    return;
+                }
+                this.detail_state = DetailState::Loaded(view.clone());
+                this.selected_image_states = loading;
+                cx.notify();
+            });
+            let states =
+                fetch_rich_image_states(workspace, site_id, issue_id.clone(), images, cancellation)
+                    .await;
+            let _ = this.update(cx, |this, cx| {
+                if !image_result_is_current(
                     this.selected_issue.as_ref(),
                     &issue_id,
                     this.detail_generation,
@@ -817,15 +1242,9 @@ impl Dashboard {
                 }
                 this.detail_cancellation = None;
                 this.detail_task = None;
-                this.detail_state = match result {
-                    Ok(detail) => {
-                        DetailState::Loaded(IssueDetailViewModel::from_domain(&detail, &this.users))
-                    }
-                    Err(error) => DetailState::Error {
-                        issue_id: issue_id.clone(),
-                        message: safe_detail_error(&error).to_owned(),
-                    },
-                };
+                if let Ok(states) = states {
+                    this.selected_image_states = states;
+                }
                 cx.notify();
             });
         });
@@ -838,6 +1257,163 @@ impl Dashboard {
             return;
         };
         self.select_issue(issue_id, cx, true);
+    }
+
+    fn download_attachment(
+        &mut self,
+        attachment: crate::presentation::AttachmentViewModel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(
+            self.attachment_download_state,
+            AttachmentDownloadState::Idle
+        ) {
+            return;
+        }
+        if attachment.size_bytes > MAX_ATTACHMENT_DOWNLOAD_BYTES as u64 {
+            window.push_notification(
+                Notification::error("Attachment is larger than the 64 MiB download limit")
+                    .id::<AttachmentNotification>(),
+                cx,
+            );
+            return;
+        }
+        let remote_issue = match &self.remote_lookup {
+            RemoteLookupState::Loaded { issue, .. } => Some(&issue.id),
+            _ => None,
+        };
+        let Some(issue_id) = attachment_issue_id(self.selected_issue.as_ref(), remote_issue) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.clone() else {
+            window.push_notification(
+                Notification::error(
+                    "Attachment download unavailable · live workspace is not ready",
+                )
+                .id::<AttachmentNotification>(),
+                cx,
+            );
+            return;
+        };
+
+        let filename = sanitized_attachment_filename(&attachment.filename);
+        let picker = cx.prompt_for_new_path(&portal_download_directory(), Some(&filename));
+        let generation = self.attachment_download_generation.wrapping_add(1);
+        self.attachment_download_generation = generation;
+        let cancellation = CancellationToken::new();
+        self.attachment_download_cancellation = Some(cancellation.clone());
+        self.attachment_download_state = AttachmentDownloadState::Saving {
+            attachment_id: attachment.id.clone(),
+        };
+        let request = AttachmentDownloadRequest {
+            site_id: workspace.site_id().clone(),
+            issue_id,
+            attachment_id: attachment.id.clone(),
+            max_bytes: MAX_ATTACHMENT_DOWNLOAD_BYTES,
+        };
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = async {
+                let destination = picker
+                    .await
+                    .map_err(|_| "File picker unavailable".to_owned())?
+                    .map_err(|_| "File picker unavailable".to_owned())?
+                    .ok_or_else(|| "Download cancelled".to_owned())?;
+                cancellation
+                    .check()
+                    .map_err(|_| "Download cancelled".to_owned())?;
+                let content = workspace
+                    .download_attachment(request, &cancellation)
+                    .await
+                    .map_err(|_| "Attachment download failed".to_owned())?;
+                cancellation
+                    .check()
+                    .map_err(|_| "Download cancelled".to_owned())?;
+                if content.bytes.len() > MAX_ATTACHMENT_DOWNLOAD_BYTES {
+                    return Err("Attachment exceeded the 64 MiB download limit".to_owned());
+                }
+                let temporary = attachment_temp_path(&destination, &attachment_temp_token());
+                let write_destination = temporary.clone();
+                let write_cancellation = cancellation.clone();
+                let write = cx.background_executor().spawn(async move {
+                    write_attachment_temp(&write_destination, &content.bytes, &write_cancellation)
+                });
+                if let Err(error) = write.await {
+                    cleanup_attachment_temp(&temporary);
+                    return Err(error);
+                }
+                if cancellation.is_cancelled() {
+                    cleanup_attachment_temp(&temporary);
+                    return Err("Download cancelled".to_owned());
+                }
+                Ok::<(PathBuf, PathBuf), String>((destination, temporary))
+            }
+            .await;
+            let temporary = result.as_ref().ok().map(|(_, temporary)| temporary.clone());
+            let update_result = this.update_in(cx, |this, window, cx| {
+                if !attachment_download_is_current(
+                    this.attachment_download_generation,
+                    generation,
+                    &cancellation,
+                ) {
+                    if let Some(temporary) = temporary.as_deref() {
+                        cleanup_attachment_temp(temporary);
+                    }
+                    return;
+                }
+                this.attachment_download_cancellation = None;
+                this.attachment_download_task = None;
+                this.attachment_download_state = AttachmentDownloadState::Idle;
+                match result {
+                    Ok((destination, temporary)) => match std::fs::rename(&temporary, &destination)
+                    {
+                        Ok(()) => window.push_notification(
+                            Notification::success(format!(
+                                "Attachment saved · {}",
+                                destination.display()
+                            ))
+                            .id::<AttachmentNotification>(),
+                            cx,
+                        ),
+                        Err(_) => {
+                            cleanup_attachment_temp(&temporary);
+                            window.push_notification(
+                                Notification::error("Could not save the attachment")
+                                    .id::<AttachmentNotification>(),
+                                cx,
+                            );
+                        }
+                    },
+                    Err(message) if message == "Download cancelled" => {}
+                    Err(message) => {
+                        if let Some(temporary) = temporary.as_deref() {
+                            cleanup_attachment_temp(temporary);
+                        }
+                        window.push_notification(
+                            Notification::error(message).id::<AttachmentNotification>(),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+            if update_result.is_err()
+                && let Some(temporary) = temporary.as_deref()
+            {
+                cleanup_attachment_temp(temporary);
+            }
+        });
+        self.attachment_download_task = Some(task);
+        cx.notify();
+    }
+
+    fn invalidate_attachment_download(&mut self) {
+        if let Some(cancellation) = self.attachment_download_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.attachment_download_task.take();
+        self.attachment_download_generation = self.attachment_download_generation.wrapping_add(1);
+        self.attachment_download_state = AttachmentDownloadState::Idle;
     }
 
     fn begin_comment_confirmation(&mut self, cx: &mut Context<Self>) {
@@ -1458,7 +2034,13 @@ impl Dashboard {
                             .min_w_0()
                             .border_b_1()
                             .border_color(cx.theme().border)
-                            .child(Input::new(&input).cleanable(true).min_w_0().w_full())
+                            .child(
+                                Input::new(&input)
+                                    .cleanable(true)
+                                    .aria_label("Issue key or summary")
+                                    .min_w_0()
+                                    .w_full(),
+                            )
                             .child(
                                 Button::new("search-jira")
                                     .compact()
@@ -1476,7 +2058,13 @@ impl Dashboard {
                             .min_w_0()
                             .border_b_1()
                             .border_color(cx.theme().border)
-                            .child(Input::new(&input).cleanable(true).min_w_0().flex_1())
+                            .child(
+                                Input::new(&input)
+                                    .cleanable(true)
+                                    .aria_label("Issue key or summary")
+                                    .min_w_0()
+                                    .flex_1(),
+                            )
                             .child(
                                 Button::new("search-jira")
                                     .compact()
@@ -1747,6 +2335,14 @@ impl Dashboard {
             .into_any_element()
     }
 
+    fn active_image_states(&self) -> &RichImageRenderStates {
+        if matches!(self.remote_lookup, RemoteLookupState::Loaded { .. }) {
+            &self.remote_image_states
+        } else {
+            &self.selected_image_states
+        }
+    }
+
     fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         let issue = match &self.remote_lookup {
             RemoteLookupState::Loaded { .. } => self.remote_lookup_view(),
@@ -1816,7 +2412,13 @@ impl Dashboard {
         };
         let description_content = rich_description
             .as_ref()
-            .map(|document| render_rich_text(document, self.rich_text_palette(cx)))
+            .map(|document| {
+                render_rich_text(
+                    document,
+                    self.rich_text_palette(cx),
+                    self.active_image_states(),
+                )
+            })
             .unwrap_or_else(|| div().text_sm().child(description).into_any_element());
         let assignee = issue
             .as_ref()
@@ -1855,7 +2457,7 @@ impl Dashboard {
             .h_full()
             .flex_1()
             .min_w_0()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .p(px(layout.detail_padding()))
             .gap(px(if layout.is_mobile() { 16. } else { 20. }))
             .child(
@@ -1989,10 +2591,12 @@ impl Dashboard {
                         .child("Comments and attachments"),
                 )
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Loading issue details…"),
+                    h_flex().gap_2().child(Spinner::new()).child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Loading issue details…"),
+                    ),
                 )
                 .into_any_element(),
             DetailState::RemoteLoading { query } => v_flex()
@@ -2046,7 +2650,9 @@ impl Dashboard {
                             let body = comment
                                 .rich_body
                                 .as_ref()
-                                .map(|document| render_rich_text(document, palette))
+                                .map(|document| {
+                                    render_rich_text(document, palette, self.active_image_states())
+                                })
                                 .unwrap_or_else(|| {
                                     div()
                                         .text_sm()
@@ -2102,6 +2708,16 @@ impl Dashboard {
                     v_flex()
                         .gap_2()
                         .children(detail.attachments.iter().map(|attachment| {
+                            let attachment_for_click = attachment.clone();
+                            let downloading = matches!(
+                                &self.attachment_download_state,
+                                AttachmentDownloadState::Saving { attachment_id }
+                                    if attachment_id == &attachment.id
+                            );
+                            let download_active = !matches!(
+                                self.attachment_download_state,
+                                AttachmentDownloadState::Idle
+                            );
                             h_flex()
                                 .min_w_0()
                                 .flex_wrap()
@@ -2122,6 +2738,20 @@ impl Dashboard {
                                             "{} · {}",
                                             attachment.mime_type, attachment.size
                                         )),
+                                )
+                                .child(
+                                    Button::new(format!("download-attachment-{}", attachment.id))
+                                        .ghost()
+                                        .label(attachment_download_button_label(downloading))
+                                        .loading(downloading)
+                                        .disabled(download_active)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.download_attachment(
+                                                attachment_for_click.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        })),
                                 )
                         }))
                         .into_any_element()
@@ -2426,7 +3056,7 @@ impl Dashboard {
                 v_flex()
                     .id("update-list")
                     .flex_1()
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .min_h_0()
                     .p(px(layout.list_padding()))
                     .gap_3()
@@ -2836,5 +3466,205 @@ mod tests {
             &local_id
         ));
         assert!(comment_target_is_current(None, Some(&local_id), &local_id));
+    }
+
+    fn test_image(id: &str) -> RichImage {
+        RichImage {
+            attachment_id: id.to_owned(),
+            filename: format!("{id}.png"),
+            mime_type: "image/png".to_owned(),
+            alt_text: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn rich_image_collection_is_recursive_deduplicated_and_capped() {
+        let mut blocks = vec![RichBlock::Panel {
+            kind: jira_domain::PanelKind::Info,
+            content: vec![RichBlock::BlockQuote(vec![RichBlock::Image(test_image(
+                "nested",
+            ))])],
+        }];
+        blocks.extend((0..20).map(|index| RichBlock::Image(test_image(&format!("image-{index}")))));
+        blocks.push(RichBlock::Image(test_image("nested")));
+        let document = RichTextDocument::new(blocks, false);
+        let images = collect_rich_images(&document);
+
+        assert_eq!(images.len(), MAX_RICH_IMAGES);
+        assert_eq!(images[0].attachment_id, "nested");
+        assert_eq!(
+            images
+                .iter()
+                .filter(|image| image.attachment_id == "nested")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn image_aggregate_limit_accepts_boundary_and_rejects_overflow() {
+        assert!(image_bytes_fit_aggregate(0, MAX_RICH_IMAGE_BYTES));
+        assert!(!image_bytes_fit_aggregate(1, MAX_RICH_IMAGE_BYTES));
+        assert!(!image_bytes_fit_aggregate(MAX_RICH_IMAGE_BYTES, 1));
+    }
+
+    #[test]
+    fn image_mime_mapping_accepts_only_supported_render_formats() {
+        assert_eq!(image_format_for_mime(" image/png "), Some(ImageFormat::Png));
+        assert_eq!(image_format_for_mime("image/jpg"), Some(ImageFormat::Jpeg));
+        assert_eq!(image_format_for_mime("image/jpeg"), Some(ImageFormat::Jpeg));
+        assert_eq!(image_format_for_mime("image/svg+xml"), None);
+        assert_eq!(image_format_for_mime("application/pdf"), None);
+    }
+
+    #[test]
+    fn fetched_image_format_uses_response_mime_after_cached_preflight() {
+        assert_eq!(
+            fetched_image_format("image/jpeg", " image/png "),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            fetched_image_format("image/png", "image/svg+xml"),
+            None,
+            "unsupported authenticated responses must not be decoded"
+        );
+        assert_eq!(
+            fetched_image_format("application/pdf", "image/png"),
+            None,
+            "non-image ADF metadata must still fail preflight"
+        );
+    }
+
+    #[test]
+    fn filename_sanitization_strips_paths_controls_and_bounds_utf8_bytes() {
+        let filename = format!("/private/..\\{}\0", "é".repeat(200));
+        let sanitized = sanitized_attachment_filename(&filename);
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('\\'));
+        assert!(!sanitized.chars().any(char::is_control));
+        assert!(sanitized.len() <= 255);
+        assert!(sanitized.is_char_boundary(sanitized.len()));
+    }
+
+    #[test]
+    fn image_results_reject_stale_selection_generation() {
+        let first = IssueId::new("first").expect("issue");
+        let second = IssueId::new("second").expect("issue");
+        assert!(!image_result_is_current(Some(&first), &first, 3, 2));
+        assert!(!image_result_is_current(Some(&second), &first, 2, 2));
+        assert!(image_result_is_current(Some(&first), &first, 2, 2));
+    }
+
+    #[test]
+    fn attachment_download_state_and_labels_reflect_busy_operation() {
+        assert_eq!(attachment_download_button_label(false), "Download");
+        assert_eq!(attachment_download_button_label(true), "Saving…");
+        let state = AttachmentDownloadState::Saving {
+            attachment_id: "att-1".to_owned(),
+        };
+        assert!(!matches!(state, AttachmentDownloadState::Idle));
+    }
+
+    #[test]
+    fn attachment_download_commit_requires_current_generation_and_live_token() {
+        let cancellation = CancellationToken::new();
+        assert!(attachment_download_is_current(4, 4, &cancellation));
+        assert!(!attachment_download_is_current(5, 4, &cancellation));
+        cancellation.cancel();
+        assert!(!attachment_download_is_current(4, 4, &cancellation));
+    }
+
+    #[test]
+    fn attachment_temp_path_is_unique_and_stays_with_destination() {
+        let destination = Path::new("/tmp/downloads/report.pdf");
+        let temporary = attachment_temp_path(destination, "unique-token");
+        assert_eq!(temporary.parent(), destination.parent());
+        assert_ne!(temporary, destination);
+        assert_eq!(
+            temporary.file_name().and_then(|name| name.to_str()),
+            Some(".report.pdf.jira-desk-unique-token.part")
+        );
+    }
+
+    #[test]
+    fn attachment_temp_write_never_overwrites_an_existing_path() {
+        let root = std::env::temp_dir().join(format!(
+            "jira-gpui-temp-write-test-{}-{}",
+            std::process::id(),
+            attachment_temp_token()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let path = root.join("attachment.part");
+        std::fs::write(&path, b"existing").expect("existing file");
+
+        assert!(write_attachment_temp(&path, b"replacement", &CancellationToken::new()).is_err());
+        assert_eq!(std::fs::read(&path).expect("existing bytes"), b"existing");
+
+        cleanup_attachment_temp(&path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_attachment_temp_write_leaves_no_file() {
+        let root = std::env::temp_dir().join(format!(
+            "jira-gpui-cancelled-temp-write-test-{}-{}",
+            std::process::id(),
+            attachment_temp_token()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let path = root.join("attachment.part");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert_eq!(
+            write_attachment_temp(&path, b"should not be written", &cancellation),
+            Err("Download cancelled".to_owned())
+        );
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn attachment_issue_id_prefers_loaded_remote_issue() {
+        let local = IssueId::new("local").expect("issue");
+        let remote = IssueId::new("remote").expect("issue");
+        assert_eq!(
+            attachment_issue_id(Some(&local), Some(&remote)),
+            Some(remote.clone())
+        );
+        assert_eq!(attachment_issue_id(Some(&local), None), Some(local));
+        assert_eq!(attachment_issue_id(None, None), None);
+    }
+
+    #[test]
+    fn portal_directory_prefers_existing_downloads_then_home_then_current() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "jira-gpui-portal-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let downloads = root.join("Downloads");
+        let home = root.join("home");
+        std::fs::create_dir_all(&downloads).expect("downloads");
+        std::fs::create_dir_all(&home).expect("home");
+        assert_eq!(
+            choose_portal_download_directory(Some(&home), Some(&downloads), Path::new(".")),
+            downloads
+        );
+        assert_eq!(
+            choose_portal_download_directory(Some(&home), None, Path::new(".")),
+            home
+        );
+        assert_eq!(
+            choose_portal_download_directory(None, None, Path::new(".")),
+            PathBuf::from(".")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

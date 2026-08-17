@@ -303,8 +303,10 @@ pub struct CommentViewModel {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttachmentViewModel {
+    pub id: String,
     pub filename: String,
     pub mime_type: String,
+    pub size_bytes: u64,
     pub size: String,
 }
 
@@ -331,11 +333,13 @@ impl IssueDetailViewModel {
             .attachments
             .iter()
             .map(|attachment| AttachmentViewModel {
+                id: attachment.id.clone(),
                 filename: attachment.filename.clone(),
                 mime_type: attachment
                     .mime_type
                     .clone()
                     .unwrap_or_else(|| "Unknown type".to_owned()),
+                size_bytes: attachment.size_bytes,
                 size: format_bytes(attachment.size_bytes),
             })
             .collect();
@@ -703,6 +707,8 @@ mod tests {
         assert!(!view.comments[0].author.contains("account-1"));
         assert_eq!(view.comments[0].body, "A comment body");
         assert_eq!(view.attachments[0].filename, "report.txt");
+        assert_eq!(view.attachments[0].id, "attachment-1");
+        assert_eq!(view.attachments[0].size_bytes, 1024);
         assert_eq!(view.attachments[0].mime_type, "text/plain");
         assert_eq!(view.attachments[0].size, "1.0 KiB");
     }

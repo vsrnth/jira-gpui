@@ -1,12 +1,23 @@
 //! Small, bounded rich-text renderer for the GPUI adapter.
 //!
-//! The domain layer has already discarded raw ADF/JSON, media nodes, and
-//! untrusted mention identifiers. This module only turns that safe projection
-//! into ordinary GPUI elements; links remain visibly styled but inert.
+//! The domain layer has already discarded raw ADF/JSON and untrusted mention
+//! identifiers, projecting media to bounded image metadata. This module only
+//! turns that safe projection into ordinary GPUI elements; links remain visibly
+//! styled but inert.
 
-use gpui::{AnyElement, Hsla, IntoElement, ParentElement as _, Styled as _, div, px};
-use gpui_component::{StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
-use jira_domain::{PanelKind, RichBlock, RichInline, RichListItem, RichMark, RichTextDocument};
+use std::{collections::HashMap, sync::Arc};
+
+use gpui::{
+    AnyElement, Hsla, Image, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img,
+    px,
+};
+use gpui_component::{
+    StyledExt as _, h_flex, scroll::ScrollableElement as _, spinner::Spinner, v_flex,
+};
+use jira_domain::{
+    PanelKind, RichBlock, RichImage, RichInline, RichListItem, RichMark, RichTextDocument,
+};
 
 // Cached models can be deserialized without passing through the Jira ADF
 // parser. Keep rendering bounded independently of the domain projection's
@@ -15,7 +26,22 @@ const MAX_RENDER_DEPTH: usize = 32;
 const MAX_RENDER_NODES: usize = 4_096;
 const MAX_RENDER_CHILDREN: usize = 1_024;
 const MAX_RENDER_TEXT_BYTES: usize = 1_000_000;
+const MAX_IMAGE_LABEL_BYTES: usize = 512;
+const MAX_IMAGE_HEIGHT: f32 = 720.;
 const RENDER_OMITTED_LABEL: &str = "Some content was omitted by Jira Desk.";
+
+/// The application-owned state for a Jira attachment image.
+///
+/// The renderer only accepts already-authenticated, decoded in-memory images. It never
+/// turns attachment metadata into a URI or performs a fetch itself.
+#[derive(Clone)]
+pub(crate) enum RichImageRenderState {
+    Loading,
+    Ready(Arc<Image>),
+    Failed,
+}
+
+pub(crate) type RichImageRenderStates = HashMap<String, RichImageRenderState>;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RichTextPalette {
@@ -33,11 +59,12 @@ pub(crate) struct RichTextPalette {
 pub(crate) fn render_rich_text(
     document: &RichTextDocument,
     palette: RichTextPalette,
+    image_states: &RichImageRenderStates,
 ) -> AnyElement {
     let mut budget = RenderBudget::default();
     let mut blocks = Vec::new();
     for block in document.blocks.iter().take(MAX_RENDER_CHILDREN) {
-        blocks.push(render_block(block, palette, 0, &mut budget));
+        blocks.push(render_block(block, palette, image_states, 0, &mut budget));
         if budget.omitted {
             break;
         }
@@ -62,6 +89,7 @@ pub(crate) fn render_rich_text(
 fn render_block(
     block: &RichBlock,
     palette: RichTextPalette,
+    image_states: &RichImageRenderStates,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
@@ -85,9 +113,11 @@ fn render_block(
                 HeadingSize::Sm => element.text_sm().into_any_element(),
             }
         }
-        RichBlock::BulletList(items) => render_list(items, None, palette, depth, budget),
+        RichBlock::BulletList(items) => {
+            render_list(items, None, palette, image_states, depth, budget)
+        }
         RichBlock::OrderedList { order, items } => {
-            render_list(items, Some(*order), palette, depth, budget)
+            render_list(items, Some(*order), palette, image_states, depth, budget)
         }
         RichBlock::CodeBlock { language, text } => {
             let mut code = v_flex()
@@ -119,7 +149,7 @@ fn render_block(
             .pl_3()
             .border_l_2()
             .border_color(palette.muted)
-            .children(render_blocks(content, palette, depth, budget))
+            .children(render_blocks(content, palette, image_states, depth, budget))
             .into_any_element(),
         RichBlock::Panel { kind, content } => {
             let accent = panel_accent(*kind, palette);
@@ -131,9 +161,10 @@ fn render_block(
                 .border_1()
                 .border_color(accent)
                 .bg(accent.opacity(0.08))
-                .children(render_blocks(content, palette, depth, budget))
+                .children(render_blocks(content, palette, image_states, depth, budget))
                 .into_any_element()
         }
+        RichBlock::Image(image) => render_image(image, palette, image_states, budget),
         RichBlock::Placeholder { label } => div()
             .min_w_0()
             .text_sm()
@@ -144,9 +175,123 @@ fn render_block(
     }
 }
 
+fn render_image(
+    image: &RichImage,
+    palette: RichTextPalette,
+    image_states: &RichImageRenderStates,
+    budget: &mut RenderBudget,
+) -> AnyElement {
+    let name = bounded_image_name(rich_image_name(image));
+    let accessible_label = budget.text(&format!("Image: {name}"));
+    let mut frame = v_flex()
+        .min_w_0()
+        .max_w_full()
+        .gap_2()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(palette.border)
+        // The ID is internal GPUI bookkeeping, never rendered or exposed as an
+        // accessibility label. The budget ordinal makes repeated attachments
+        // unique within this render pass.
+        .id(format!(
+            "rich-image-{}-{}",
+            image.attachment_id, budget.nodes
+        ))
+        .aria_label(accessible_label);
+
+    match image_render_state(image_states, image) {
+        Some(RichImageRenderState::Ready(image)) => {
+            let unavailable = format!("Image unavailable · {name}");
+            let loading_color = palette.muted;
+            let fallback_color = palette.muted;
+            frame = frame.child(
+                img(ImageSource::Image(image.clone()))
+                    .max_w_full()
+                    .max_h(px(MAX_IMAGE_HEIGHT))
+                    .object_fit(ObjectFit::Contain)
+                    // ImageSource::Image is already in memory, but GPUI may
+                    // still decode it on the render path. Keep that fallback
+                    // visible without adding a second animated spinner beside
+                    // the source-state Loading view.
+                    .with_loading(move || {
+                        div()
+                            .text_xs()
+                            .text_color(loading_color)
+                            .child("Loading image…")
+                            .into_any_element()
+                    })
+                    .with_fallback(move || {
+                        div()
+                            .text_xs()
+                            .text_color(fallback_color)
+                            .child(unavailable.clone())
+                            .into_any_element()
+                    }),
+            );
+        }
+        Some(RichImageRenderState::Loading) => {
+            frame = frame.child(
+                h_flex()
+                    .min_h(px(72.))
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(Spinner::new())
+                    .child("Loading image…"),
+            );
+        }
+        Some(RichImageRenderState::Failed) | None => {
+            let unavailable = format!("Image unavailable · {name}");
+            frame = frame.child(
+                div()
+                    .min_h(px(72.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(palette.muted)
+                    .child(budget.text(&unavailable)),
+            );
+        }
+    }
+
+    frame
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(budget.text(&name)),
+        )
+        .into_any_element()
+}
+
+fn rich_image_name(image: &RichImage) -> &str {
+    image
+        .alt_text
+        .as_deref()
+        .filter(|alt| !alt.trim().is_empty())
+        .unwrap_or(image.filename.as_str())
+}
+
+fn bounded_image_name(value: &str) -> String {
+    let mut end = value.len().min(MAX_IMAGE_LABEL_BYTES);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn image_render_state<'a>(
+    image_states: &'a RichImageRenderStates,
+    image: &RichImage,
+) -> Option<&'a RichImageRenderState> {
+    image_states.get(&image.attachment_id)
+}
+
 fn render_blocks(
     blocks: &[RichBlock],
     palette: RichTextPalette,
+    image_states: &RichImageRenderStates,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> Vec<AnyElement> {
@@ -155,6 +300,7 @@ fn render_blocks(
         rendered.push(render_block(
             block,
             palette,
+            image_states,
             depth.saturating_add(1),
             budget,
         ));
@@ -172,6 +318,7 @@ fn render_list(
     items: &[RichListItem],
     order: Option<u32>,
     palette: RichTextPalette,
+    image_states: &RichImageRenderStates,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
@@ -201,6 +348,7 @@ fn render_list(
                 .child(v_flex().min_w_0().flex_1().gap_2().children(render_blocks(
                     &item.blocks,
                     palette,
+                    image_states,
                     depth,
                     budget,
                 )))
@@ -420,11 +568,14 @@ fn panel_accent(kind: PanelKind, palette: RichTextPalette) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use jira_domain::RichInline;
+    use std::sync::Arc;
+
+    use jira_domain::{RichImage, RichInline};
 
     use super::{
-        HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_TEXT_BYTES, RenderBudget, heading_size,
-        inline_line_count,
+        HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_TEXT_BYTES, RenderBudget, RichImageRenderState,
+        RichImageRenderStates, heading_size, image_render_state, inline_line_count,
+        rich_image_name,
     };
 
     #[test]
@@ -469,5 +620,62 @@ mod tests {
         let wrapped = super::insert_soft_wraps(&token);
         assert!(wrapped.contains('\u{200b}'));
         assert_eq!(wrapped.replace('\u{200b}', ""), token);
+    }
+
+    fn image(attachment_id: &str, filename: &str, alt_text: Option<&str>) -> RichImage {
+        RichImage {
+            attachment_id: attachment_id.to_owned(),
+            filename: filename.to_owned(),
+            mime_type: "image/png".to_owned(),
+            alt_text: alt_text.map(str::to_owned),
+            width: Some(640),
+            height: Some(480),
+        }
+    }
+
+    #[test]
+    fn image_name_prefers_nonempty_alt_text_and_falls_back_to_filename() {
+        assert_eq!(
+            rich_image_name(&image("1", "diagram.png", Some("Architecture"))),
+            "Architecture"
+        );
+        assert_eq!(
+            rich_image_name(&image("1", "diagram.png", Some("  "))),
+            "diagram.png"
+        );
+        assert_eq!(
+            rich_image_name(&image("1", "diagram.png", None)),
+            "diagram.png"
+        );
+    }
+
+    #[test]
+    fn image_state_lookup_is_scoped_to_attachment_id() {
+        let first = image("first", "one.png", None);
+        let second = image("second", "two.png", None);
+        let states = RichImageRenderStates::from([(
+            first.attachment_id.clone(),
+            RichImageRenderState::Loading,
+        )]);
+
+        assert!(matches!(
+            image_render_state(&states, &first),
+            Some(RichImageRenderState::Loading)
+        ));
+        assert!(image_render_state(&states, &second).is_none());
+    }
+
+    #[test]
+    fn image_nodes_consume_render_budget() {
+        let mut budget = RenderBudget::default();
+        assert!(budget.enter(0));
+        assert_eq!(budget.nodes, 1);
+    }
+
+    #[test]
+    fn ready_image_state_can_hold_decoded_in_memory_image() {
+        let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new()));
+        let state = RichImageRenderState::Ready(image);
+        assert!(matches!(state, RichImageRenderState::Ready(_)));
     }
 }
