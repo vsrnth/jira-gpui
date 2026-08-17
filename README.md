@@ -21,9 +21,12 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   metadata lazily. Rich Jira text is displayed through a safe subset. A
   description image is fetched only when its attachment reference resolves
   unambiguously (a unique alt/filename, or the one-media/one-image case), as a
-  bounded authenticated thumbnail held in memory. Explicit attachment
-  downloads use a user-selected XDG portal destination and are separate from
-  description rendering.
+  bounded authenticated thumbnail held in memory. If an ADF Media Services UUID
+  cannot be converted through Jira's documented REST APIs, the renderer shows a
+  clearly labeled, bounded gallery of remaining allowlisted Jira image
+  attachments without claiming those candidates occupy the unresolved ADF
+  position. Explicit attachment downloads use a user-selected XDG portal
+  destination and are separate from description rendering.
 - Shows user display names in the interface while retaining stable Jira
   account IDs only for matching and local application state.
 - Keeps a durable local update feed, in-app refresh/comment feedback, and
@@ -37,10 +40,19 @@ refreshing comments before retrying.
 
 Media reads do not mutate Jira. Description thumbnails are limited to 8 MiB
 each, 16 references, and 32 MiB aggregate, with no arbitrary Media Services
-URLs, redirects, or persistence. An explicit attachment download is limited
-to 64 MiB, reads only from the configured authenticated Jira origin, writes in
-the background only after the user selects a destination, and never starts
-automatically or retries itself.
+URLs, redirects, or persistence. A thumbnail 404 may fall back once to bounded
+authenticated original content; other thumbnail errors do not. Allowlisted
+MIME types are preflighted, then GPUI selects the decoder from the payload byte
+signature. An explicit attachment download is limited to 64 MiB, reads only
+from the configured authenticated Jira origin, writes in the background only
+after the user selects a destination, and never starts automatically or retries
+itself.
+
+The GPUI asset bundle is registered at application startup so title-bar and
+semantic icons render without a hover-only discovery dependency. Window
+minimize, maximize, and close controls remain client-side Wayland controls;
+hover may provide emphasis, but idle controls remain discoverable. OS alerts
+remain unchanged and independent of in-app notifications.
 
 ## Prerequisites
 

@@ -77,11 +77,17 @@ bounded safe subset of paragraphs, headings, lists, code blocks, quotes, panels,
 text marks, and mentions. Unsupported nodes show a placeholder. HTTP(S) links
 are validated and styled but remain inert. Description media is resolved only
 when its attachment reference is unambiguous: a unique alt/filename match, or
-the one-media/one-image case. Thumbnails are authenticated reads from the
+the one-media/one-image case. Jira's documented REST APIs do not support
+converting an ADF Media Services UUID into an attachment ID, so exact mappings
+are always preferred. If a mapping remains unresolved, the UI shows a clearly
+labeled, bounded gallery of remaining allowlisted Jira image attachments
+without claiming ADF placement. Thumbnails are authenticated reads from the
 configured Jira origin, capped at 8 MiB each, 16 references, and 32 MiB
-aggregate; arbitrary Media Services URLs and redirects are never followed.
-Thumbnail bytes are memory-only and are not written to SQLite or another
-automatic cache.
+aggregate; a 404 alone permits a bounded authenticated original-content
+fallback. MIME allowlists are checked before payload byte signatures select the
+GPUI image format. Arbitrary Media Services URLs and redirects are never
+followed. Thumbnail bytes are memory-only and are not written to SQLite or
+another automatic cache.
 
 An attachment download is explicit and separate from description rendering.
 It reads the configured authenticated Jira origin, rejects redirect behavior,
@@ -98,6 +104,11 @@ remotely and held in memory; comment bodies are not persisted across restart.
 The dashboard is responsive: below 720 px it shows one mobile pane at a time;
 720–959 px uses a compact navigation rail; 960–1,199 px uses the standard
 desktop columns; and 1,200 px or wider uses the expanded desktop layout.
+
+The application registers the GPUI component asset bundle at startup, keeping
+title-bar and semantic icons rendered at rest. Client-side minimize, maximize,
+and close controls remain discoverable when the window is idle; hover styling
+adds emphasis but is not required to find the controls.
 
 On desktop, the issue list and selected-issue detail are separated by a
 resizable split. On mobile, the shell presents one pane at a time with an

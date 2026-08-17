@@ -53,11 +53,18 @@ Selecting an issue starts a separate cancellable detail request. The request
 loads the description, all bounded comment pages, and attachment metadata.
 Description media is resolved conservatively: only a unique alt/filename
 match, or the one-media/one-image case, can trigger an authenticated Jira
-thumbnail read. Each thumbnail is capped at 8 MiB, with at most 16 references
-and 32 MiB aggregate per detail load. Results are applied only when the
-selected issue and request generation still match; detail and thumbnail bytes
-are memory-only. Arbitrary Media Services URLs and redirects are never
-followed.
+thumbnail read. Jira's documented REST surface does not provide a supported
+conversion from an ADF Media Services UUID to an attachment ID, so exact
+attachment mappings remain preferred. When no exact mapping exists, the mapper
+retains at most 16 allowlisted image attachments as metadata-only fallback
+candidates. The UI presents them in a clearly labeled bounded gallery and never
+claims an ADF position for them. Each thumbnail is capped at 8 MiB, with at
+most 16 references and 32 MiB aggregate per detail load. A thumbnail 404 alone
+permits a bounded authenticated original-content fallback; other errors remain
+errors. MIME allowlists are checked before GPUI chooses a format from the
+payload signature. Results are applied only when the selected issue and
+request generation still match; detail and thumbnail bytes are memory-only.
+Arbitrary Media Services URLs and redirects are never followed.
 
 An explicit attachment download is a separate user action. It reads the
 configured Jira origin with authentication, caps the response at 64 MiB, and
@@ -87,7 +94,10 @@ the interaction rather than duplicating them in the shell:
 - Status filtering uses the component combobox in multiple-selection mode. It
   is a local presentation filter, not a change to the Jira query.
 - In-app outcome messages use the component notification layer. They do not
-  replace OS/Freedesktop desktop alerts.
+  replace OS/Freedesktop desktop alerts. The application registers the
+  `gpui-component-assets` bundle so TitleBar and semantic icon assets render;
+  idle minimize, maximize, and close controls stay discoverable, with hover
+  styling as an enhancement rather than the only cue.
 
 Issues and Updates are navigation controls in the current shell, not tab
 panels, so the component Tabs control is not currently used. A true tabbed

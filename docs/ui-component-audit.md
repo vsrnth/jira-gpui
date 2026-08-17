@@ -14,6 +14,9 @@ The shell already uses or intentionally composes:
 - `Input` and `Combobox` for onboarding, local search, and status filters;
 - `Notification` for in-app refresh/comment outcomes, while Freedesktop alerts
   remain independent;
+- the registered `gpui-component-assets` bundle for TitleBar and semantic icon
+  assets, keeping idle minimize/maximize/close controls discoverable while
+  retaining hover emphasis;
 - custom ADF rendering, responsive mobile navigation, and the existing detail
   presentation where domain-specific semantics matter.
 
@@ -67,4 +70,7 @@ through the lockfile rather than adding a second GPUI source identity. Rust
 current component set; Rust 1.97.1 is not required. Any upgrade must preserve
 Linux native Wayland as the only Phase 1 runtime target and rerun the release
 smoke, including media cancellation, portal download, and independent OS alert
-checks.
+checks. The media smoke should include an unresolved ADF Media Services UUID,
+the bounded labeled fallback gallery, thumbnail-404 original-content fallback,
+and byte-signature format selection after MIME allowlists. OS alerts remain
+unchanged.

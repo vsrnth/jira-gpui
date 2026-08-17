@@ -73,13 +73,24 @@ wide window sizes, drag the desktop list/detail divider, select multiple status
 categories and clear them back to All, verify the issue-list scrollbar and
 refresh spinner, and confirm that in-app notifications appear. Verify that OS
 Freedesktop desktop alerts are still delivered independently of the in-app
-notification layer. Verify display-name-only identity labels, and confirm that
-rich-text placeholders and inert links remain safe.
+notification layer. Verify display-name-only identity labels, confirm that
+title-bar minimize, maximize, and close controls are clearly discoverable with
+the window idle (hover should not be required), and confirm that the registered
+component asset bundle renders title-bar and semantic icons. Rich-text
+placeholders and inert links must remain safe.
 
 Media and attachment smoke must cover:
 
 - an unambiguous description image loading as an authenticated Jira thumbnail;
-- an ambiguous image reference falling back safely without a remote read;
+- an IX-1873-like ADF media node containing a Media Services UUID that cannot
+  be converted through documented Jira REST, showing the labeled bounded
+  allowlisted-attachment gallery without claiming ADF placement;
+- an ambiguous image reference falling back safely without an arbitrary remote
+  Media Services read;
+- a thumbnail 404 falling back to bounded authenticated original content, while
+  non-404 thumbnail errors do not fall back;
+- MIME allowlists rejecting unsupported responses and valid image byte
+  signatures selecting the GPUI decoder even when declared MIME differs;
 - cancellation before and during thumbnail loading, including stale-selection
   protection;
 - per-image 8 MiB, 16-reference, and 32 MiB aggregate rejection boundaries;
