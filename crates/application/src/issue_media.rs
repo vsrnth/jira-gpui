@@ -58,12 +58,12 @@ impl IssueMediaService {
             ..request
         };
 
-        let (image, allow_octet_stream) = match self
+        let image = match self
             .jira
             .fetch_attachment_image(&port_request, cancellation)
             .await
         {
-            Ok(image) => (image, false),
+            Ok(image) => image,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 cancellation.check()?;
                 let content_request = AttachmentDownloadRequest {
@@ -80,24 +80,16 @@ impl IssueMediaService {
                     .fetch_attachment_content(&content_request, cancellation)
                     .await?;
                 cancellation.check()?;
-                (
-                    AttachmentImage {
-                        attachment_id: content.attachment_id,
-                        mime_type: content.mime_type,
-                        bytes: content.bytes,
-                    },
-                    true,
-                )
+                AttachmentImage {
+                    attachment_id: content.attachment_id,
+                    mime_type: content.mime_type,
+                    bytes: content.bytes,
+                }
             }
             Err(error) => return Err(error),
         };
 
-        validate_image(
-            &image,
-            &requested_attachment_id,
-            self.config.max_bytes,
-            allow_octet_stream,
-        )?;
+        validate_image(&image, &requested_attachment_id, self.config.max_bytes)?;
 
         cancellation.check()?;
         Ok(image)
@@ -201,7 +193,12 @@ fn validate_attachment_id(value: &str) -> Result<(), ApplicationError> {
 fn is_allowed_image_mime(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        "application/octet-stream"
+            | "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
     )
 }
 
@@ -209,19 +206,12 @@ fn validate_image(
     image: &AttachmentImage,
     requested_attachment_id: &str,
     max_bytes: usize,
-    allow_octet_stream: bool,
 ) -> Result<(), ApplicationError> {
     if image.attachment_id != requested_attachment_id {
         return Err(upstream("Jira returned a different attachment"));
     }
     validate_attachment_id(&image.attachment_id)?;
-    if !(is_allowed_image_mime(&image.mime_type)
-        || (allow_octet_stream
-            && image
-                .mime_type
-                .trim()
-                .eq_ignore_ascii_case("application/octet-stream")))
-    {
+    if !is_allowed_image_mime(&image.mime_type) {
         return Err(upstream("Jira returned an unsupported image type"));
     }
     if image.bytes.is_empty() {
@@ -390,6 +380,48 @@ mod tests {
     }
 
     #[test]
+    fn accepts_direct_thumbnail_with_octet_stream_mime_and_png_signature() {
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        let service = IssueMediaService::new(
+            Arc::new(FakeJira {
+                image: Mutex::new(Some(Ok(image("att-1", "application/octet-stream", bytes)))),
+                download: Mutex::new(None),
+                image_request: Mutex::new(None),
+                download_request: Mutex::new(None),
+                cancellation: Mutex::new(None),
+            }),
+            IssueMediaConfig::default(),
+        );
+
+        let result = block_on(service.fetch(request("att-1"), &CancellationToken::new()))
+            .expect("direct octet-stream thumbnail");
+
+        assert_eq!(result.mime_type, "application/octet-stream");
+        assert_eq!(result.bytes, bytes);
+    }
+
+    #[test]
+    fn accepts_direct_thumbnail_with_image_jpg_mime_and_jpeg_signature() {
+        let bytes = b"\xff\xd8\xff";
+        let service = IssueMediaService::new(
+            Arc::new(FakeJira {
+                image: Mutex::new(Some(Ok(image("att-1", "image/jpg", bytes)))),
+                download: Mutex::new(None),
+                image_request: Mutex::new(None),
+                download_request: Mutex::new(None),
+                cancellation: Mutex::new(None),
+            }),
+            IssueMediaConfig::default(),
+        );
+
+        let result = block_on(service.fetch(request("att-1"), &CancellationToken::new()))
+            .expect("direct image/jpg thumbnail");
+
+        assert_eq!(result.mime_type, "image/jpg");
+        assert_eq!(result.bytes, bytes);
+    }
+
+    #[test]
     fn falls_back_to_bounded_original_content_when_thumbnail_is_not_found() {
         let fake = Arc::new(FakeJira {
             image: Mutex::new(Some(Err(ApplicationError::new(
@@ -431,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_octet_stream_only_for_original_content_fallback() {
+    fn allows_octet_stream_for_original_content_fallback() {
         let fake = Arc::new(FakeJira {
             image: Mutex::new(Some(Err(ApplicationError::new(
                 ErrorKind::NotFound,
@@ -454,11 +486,6 @@ mod tests {
         let result = block_on(fallback_service.fetch(request("att-1"), &CancellationToken::new()))
             .expect("octet-stream original fallback");
         assert_eq!(result.mime_type, "application/octet-stream");
-
-        let direct = service(Ok(image("att-1", "application/octet-stream", b"bytes")));
-        let error = block_on(direct.fetch(request("att-1"), &CancellationToken::new()))
-            .expect_err("direct thumbnail octet-stream must be rejected");
-        assert_eq!(error.kind(), ErrorKind::Upstream);
     }
 
     #[test]

@@ -4081,6 +4081,42 @@ mod tests {
     }
 
     #[test]
+    fn image_response_preflight_accepts_authenticated_thumbnail_mime_variants() {
+        assert_eq!(
+            image_response_preflight(
+                "image/png",
+                "application/octet-stream",
+                b"\x89PNG\r\n\x1a\nvalid png",
+                0,
+            ),
+            ImagePreflight::Accepted,
+            "authenticated original-content responses may be octet-stream when bytes are PNG"
+        );
+        assert_eq!(
+            image_response_preflight("image/jpg", "image/jpg", b"\xff\xd8\xff\xe0valid jpeg", 0,),
+            ImagePreflight::Accepted,
+            "Jira's image/jpg response must be accepted when bytes are JPEG"
+        );
+    }
+
+    #[test]
+    fn image_response_preflight_rejects_unsupported_mime_or_bad_signature() {
+        assert_eq!(
+            image_response_preflight(
+                "image/png",
+                "application/pdf",
+                b"\x89PNG\r\n\x1a\nvalid png",
+                0,
+            ),
+            ImagePreflight::ResponseMimeRejected
+        );
+        assert_eq!(
+            image_response_preflight("image/jpg", "image/jpg", b"not a jpeg", 0,),
+            ImagePreflight::SignatureRejected
+        );
+    }
+
+    #[test]
     fn image_mime_mapping_accepts_only_supported_render_formats() {
         assert_eq!(image_format_for_mime(" image/png "), Some(ImageFormat::Png));
         assert_eq!(image_format_for_mime("image/jpg"), Some(ImageFormat::Jpeg));

@@ -1054,7 +1054,12 @@ fn attachment_url_with_query(mut url: Url, width: usize, height: usize, thumbnai
 fn is_allowed_image_mime(value: &str) -> bool {
     matches!(
         value,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        "application/octet-stream"
+            | "image/gif"
+            | "image/jpg"
+            | "image/jpeg"
+            | "image/png"
+            | "image/webp"
     )
 }
 
@@ -1531,7 +1536,9 @@ mod tests {
         );
         assert_eq!(media_type("missing"), None);
         assert!(is_allowed_image_mime("image/webp"));
-        assert!(!is_allowed_image_mime("application/octet-stream"));
+        assert!(is_allowed_image_mime("application/octet-stream"));
+        assert!(is_allowed_image_mime("image/jpg"));
+        assert!(!is_allowed_image_mime("text/plain"));
         assert_eq!(
             status_error(StatusCode::FOUND, &header::HeaderMap::new()).kind(),
             ErrorKind::Upstream
@@ -1607,6 +1614,70 @@ mod tests {
             ))
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn attachment_thumbnail_accepts_a_valid_png_with_octet_stream_mime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82";
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let responder = async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    png.len()
+                );
+                let mut response = response.into_bytes();
+                response.extend_from_slice(png);
+                let mut written = 0;
+                while written < response.len() {
+                    stream.writable().await.unwrap();
+                    match stream.try_write(&response[written..]) {
+                        Ok(count) => written += count,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("responder write failed: {error}"),
+                    }
+                }
+            };
+            let responder = tokio::spawn(responder);
+
+            let credentials = ApiTokenCredentials::new("person@example.com", "secret-token")
+                .unwrap();
+            let client = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let content = JiraHttpClient::attachment_image_request(
+                client,
+                Url::parse(&format!(
+                    "http://{address}/rest/api/3/attachment/thumbnail/42"
+                ))
+                .unwrap(),
+                credentials,
+                AttachmentReadOptions {
+                    attachment_id: "42".to_owned(),
+                    cancellation: CancellationToken::new(),
+                    max_bytes: 1024,
+                    width: 640,
+                    height: 480,
+                    thumbnail: true,
+                },
+            )
+            .await
+            .unwrap();
+            responder.await.unwrap();
+
+            assert_eq!(content.mime_type, "application/octet-stream");
+            assert_eq!(content.bytes, png);
+        });
     }
 
     #[test]
