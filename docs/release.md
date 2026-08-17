@@ -89,8 +89,10 @@ Media and attachment smoke must cover:
   Media Services read;
 - a thumbnail 404 falling back to bounded authenticated original content, while
   non-404 thumbnail errors do not fall back;
-- MIME allowlists rejecting unsupported responses and valid image byte
-  signatures selecting the GPUI decoder even when declared MIME differs;
+- cached image metadata remaining allowlisted while authenticated thumbnail
+  responses using `application/octet-stream` or `image/jpg` are accepted only
+  with valid image byte signatures; unsupported MIME, bad signatures, arbitrary
+  origins, redirects, and oversize content remain rejected;
 - cancellation before and during thumbnail loading, including stale-selection
   protection;
 - per-image 8 MiB, 16-reference, and 32 MiB aggregate rejection boundaries;

@@ -44,12 +44,14 @@ refreshing comments before retrying.
 Media reads do not mutate Jira. Description thumbnails are limited to 8 MiB
 each, 16 references, and 32 MiB aggregate, with no arbitrary Media Services
 URLs, redirects, or persistence. A thumbnail 404 may fall back once to bounded
-authenticated original content; other thumbnail errors do not. Allowlisted
-MIME types are preflighted, then GPUI selects the decoder from the payload byte
-signature. An explicit attachment download is limited to 64 MiB, reads only
-from the configured authenticated Jira origin, writes in the background only
-after the user selects a destination, and never starts automatically or retries
-itself.
+authenticated original content; other thumbnail errors do not. Cached attachment
+metadata must remain an allowlisted image MIME; authenticated thumbnail responses
+may use `application/octet-stream` or Jira's `image/jpg`, but the payload must
+carry a strict image signature before GPUI chooses the decoder. Origin,
+redirect, and size protections remain enforced. An explicit attachment download
+is limited to 64 MiB, reads only from the configured authenticated Jira origin,
+writes in the background only after the user selects a destination, and never
+starts automatically or retries itself.
 
 The GPUI asset bundle is registered at application startup so title-bar and
 semantic icons render without a hover-only discovery dependency. Window

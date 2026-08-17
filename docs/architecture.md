@@ -61,10 +61,13 @@ candidates. The UI presents them in a clearly labeled bounded gallery and never
 claims an ADF position for them. Each thumbnail is capped at 8 MiB, with at
 most 16 references and 32 MiB aggregate per detail load. A thumbnail 404 alone
 permits a bounded authenticated original-content fallback; other errors remain
-errors. MIME allowlists are checked before GPUI chooses a format from the
-payload signature. Results are applied only when the selected issue and
-request generation still match; detail and thumbnail bytes are memory-only.
-Arbitrary Media Services URLs and redirects are never followed.
+errors. Cached attachment metadata must remain an allowlisted image MIME.
+Authenticated thumbnail responses may use `application/octet-stream` or Jira's
+`image/jpg`, but MIME preflight still requires a strict payload byte signature
+before GPUI chooses a format. Results are applied only when the selected issue
+and request generation still match; detail and thumbnail bytes are memory-only.
+Configured-origin, redirect, and size protections remain enforced, and arbitrary
+Media Services URLs are never followed.
 
 An explicit attachment download is a separate user action. It reads the
 configured Jira origin with authentication, caps the response at 64 MiB, and

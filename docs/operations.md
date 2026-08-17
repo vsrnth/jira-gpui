@@ -104,10 +104,13 @@ labeled, bounded gallery of remaining allowlisted Jira image attachments
 without claiming ADF placement. Thumbnails are authenticated reads from the
 configured Jira origin, capped at 8 MiB each, 16 references, and 32 MiB
 aggregate; a 404 alone permits a bounded authenticated original-content
-fallback. MIME allowlists are checked before payload byte signatures select the
-GPUI image format. Arbitrary Media Services URLs and redirects are never
-followed. Thumbnail bytes are memory-only and are not written to SQLite or
-another automatic cache.
+fallback. Cached attachment metadata must remain an allowlisted image MIME.
+Authenticated thumbnail responses may report `application/octet-stream` or
+Jira's `image/jpg`; the response is still preflighted and the payload must carry
+a strict image signature before selecting the GPUI image format. Configured
+origin, redirect, and size protections remain enforced. Arbitrary Media
+Services URLs and redirects are never followed. Thumbnail bytes are memory-only
+and are not written to SQLite or another automatic cache.
 
 An attachment download is explicit and separate from description rendering.
 It reads the configured authenticated Jira origin, rejects redirect behavior,
