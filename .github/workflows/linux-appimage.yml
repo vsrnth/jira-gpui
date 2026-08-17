@@ -34,6 +34,7 @@ jobs:
             clang \
             cmake \
             desktop-file-utils \
+            imagemagick \
             jq \
             libfontconfig1-dev \
             libfreetype6-dev \
@@ -46,6 +47,19 @@ jobs:
             libzstd-dev \
             pkg-config \
             wayland-protocols
+          # Jammy ships ImageMagick 6, whose CLI exposes convert/identify
+          # instead of ImageMagick 7's single `magick` entry point.
+          sudo tee /usr/local/bin/magick >/dev/null <<'EOF'
+          #!/bin/sh
+          set -eu
+          if [ "${1:-}" = "identify" ]; then
+            shift
+            exec identify "$@"
+          fi
+          exec convert "$@"
+          EOF
+          sudo chmod 755 /usr/local/bin/magick
+          magick identify -version
 
       - name: Install Rust 1.95.0
         shell: bash

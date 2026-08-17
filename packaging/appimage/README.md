@@ -6,7 +6,7 @@ This directory builds the Phase 1 Linux x86_64 Wayland AppImage. The scaffold fo
 
 - A Linux x86_64 host with the Wayland development/runtime libraries required by the GPUI build.
 - Rust and Cargo with the repository toolchain available.
-- ImageMagick 7 (`magick`) to render the AppImage root icon as PNG.
+- An ImageMagick-compatible `magick` command to render the AppImage root icon as PNG. Local Fedora builds can use ImageMagick 7 directly; Ubuntu 22.04 CI installs ImageMagick 6 and supplies a compatibility launcher.
 - Pinned, executable `linuxdeploy` and `appimagetool` paths supplied by the caller.
 - Optional pinned AppImage runtime passed with `APPIMAGE_RUNTIME`.
 
@@ -19,7 +19,6 @@ From the repository root:
 ```sh
 LINUXDEPLOY=/opt/tools/linuxdeploy \
 APPIMAGETOOL=/opt/tools/appimagetool \
-VERSION=0.1.0 \
 packaging/appimage/build-appimage.sh
 ```
 
@@ -32,7 +31,7 @@ APPIMAGE_RUNTIME=/opt/tools/runtime-x86_64 \
 packaging/appimage/build-appimage.sh
 ```
 
-The output is `dist/Jira_Desk-${VERSION}-x86_64.AppImage` with an adjacent SHA-256 checksum. The 0.1.0 artifact has been checksum-verified, extracted without FUSE, checked for required binary/desktop/metainfo/LICENSE files, and checked with `ldd` for missing or X11-linked libraries. CI automates these checks. Wayland GUI launch, FUSE execution, real Jira/notification-daemon delivery, public release, and multi-distribution runtime coverage remain unvalidated. macOS remains Phase 2.
+The output is `dist/Jira_Desk-${VERSION}-x86_64.AppImage` with an adjacent SHA-256 checksum. See the [current release and validation snapshot](../../docs/release.md). Checksum, extraction, required-file, and shared-library validation are automated, and a Wayland extract-and-run startup smoke has been exercised. FUSE execution, multi-distribution coverage, real Jira and notification-daemon delivery, and public release remain outstanding. macOS remains Phase 2.
 
 The build renders the source SVG into a 256×256 PNG before calling linuxdeploy. This keeps the root `.DirIcon` compliant with the AppImage specification and avoids generic file icons in file managers that do not load an SVG root icon. The desktop file, icon name, and GPUI Wayland `app_id` are all `dev.jiradesk.JiraDesk`.
 
