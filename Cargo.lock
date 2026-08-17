@@ -3378,6 +3378,7 @@ dependencies = [
  "futures-lite",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
  "jira-application",
  "jira-desktop-notifications",
