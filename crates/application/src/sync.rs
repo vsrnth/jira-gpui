@@ -164,6 +164,18 @@ impl SyncService {
         cancellation.check()?;
 
         let issues = deduplicate_issues(issues);
+        let notification_issue_ids = request.notification_assignees.as_deref().map(|assignees| {
+            issues
+                .iter()
+                .filter(|issue| {
+                    issue
+                        .assignee
+                        .as_ref()
+                        .is_some_and(|assignee| assignees.contains(assignee))
+                })
+                .map(|issue| issue.id.clone())
+                .collect::<HashSet<_>>()
+        });
         let cursor = server_time.unwrap_or_else(|| self.clock.now());
         let existing = if request.mode.emits_updates() {
             self.cache
@@ -210,6 +222,20 @@ impl SyncService {
         let mut notification_failures = 0;
         if request.mode.emits_updates() {
             for event in &committed.inserted_events {
+                if notification_issue_ids
+                    .as_ref()
+                    .is_some_and(|issue_ids| !issue_ids.contains(&event.issue_id))
+                {
+                    let _ = self
+                        .cache
+                        .record_notification_delivery(
+                            &event.id,
+                            NotificationDelivery::SuppressedByPolicy,
+                            self.clock.now(),
+                        )
+                        .await;
+                    continue;
+                }
                 if self.notification_policy.should_notify(event) {
                     match self
                         .notifications
@@ -271,6 +297,13 @@ impl SyncService {
         {
             return Err(ApplicationError::invalid_input(
                 "sync assignees must be unique",
+            ));
+        }
+        if let Some(assignees) = &request.notification_assignees
+            && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
+        {
+            return Err(ApplicationError::invalid_input(
+                "notification assignees must be unique",
             ));
         }
         if self.config.page_size == 0 || self.config.max_pages == 0 {
@@ -612,6 +645,7 @@ mod tests {
                 site_id,
                 user_set_id,
                 assignees: None,
+                notification_assignees: None,
                 mode: SyncMode::Baseline,
             },
             &CancellationToken::new(),
@@ -691,6 +725,7 @@ mod tests {
                 site_id,
                 user_set_id,
                 assignees: Some(vec![account_id.clone()]),
+                notification_assignees: None,
                 mode: SyncMode::Incremental,
             },
             &CancellationToken::new(),
@@ -712,6 +747,84 @@ mod tests {
                 EventId::new("event-1").expect("event id"),
                 NotificationDelivery::Unavailable
             )]
+        );
+    }
+
+    #[test]
+    fn project_wide_sync_scopes_notifications_to_incoming_my_issues() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let mut my_issue = fixture_issue(site_id.clone());
+        my_issue.assignee = Some(account_id.clone());
+        let mut other_issue = fixture_issue(site_id.clone());
+        other_issue.id = IssueId::new("10002").expect("issue id");
+        other_issue.key = IssueKey::new("APP-2").expect("issue key");
+        other_issue.assignee = Some(AccountId::new("account-2").expect("account id"));
+
+        let my_event = fixture_event(site_id.clone(), user_set_id.clone());
+        let other_event = UpdateEvent::new(
+            EventId::new("event-2").expect("event id"),
+            site_id.clone(),
+            other_issue.id.clone(),
+            other_issue.key.clone(),
+            UpdateKind::StatusChanged {
+                old: jira_domain::ChangeValue::Text("Open".into()),
+                new: jira_domain::ChangeValue::Text("Done".into()),
+            },
+            datetime!(2026-08-16 13:01 UTC),
+            vec![user_set_id.clone()],
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![my_issue, other_issue],
+                next_cursor: None,
+                server_time: Some(datetime!(2026-08-16 13:01 UTC)),
+            }])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.inserted_events.lock().expect("inserted events lock") =
+            vec![my_event.clone(), other_event.clone()];
+        let differ = Arc::new(FakeDiffer::default());
+        *differ.events.lock().expect("differ events lock") =
+            vec![my_event.clone(), other_event.clone()];
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service(
+            jira.clone(),
+            cache.clone(),
+            differ,
+            notifications.clone(),
+            datetime!(2026-08-16 13:00 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                notification_assignees: Some(vec![account_id]),
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("project-wide sync");
+
+        assert_eq!(outcome.notifications_delivered, 1);
+        assert_eq!(outcome.notification_failures, 0);
+        assert_eq!(
+            *notifications.calls.lock().expect("notification calls lock"),
+            1
+        );
+        assert_eq!(
+            cache.deliveries.lock().expect("deliveries lock").as_slice(),
+            &[
+                (my_event.id, NotificationDelivery::Delivered,),
+                (other_event.id, NotificationDelivery::SuppressedByPolicy,),
+            ]
+        );
+        assert_eq!(
+            jira.requests.lock().expect("requests lock")[0].assignees,
+            None,
+            "notification scope must not narrow the project-wide Jira fetch"
         );
     }
 

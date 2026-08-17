@@ -35,21 +35,84 @@ impl AttachmentMetadata {
     }
 }
 
+/// A comment author identity with optional Jira display data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueCommentAuthor {
+    pub account_id: AccountId,
+    pub display_name: Option<String>,
+}
+
+impl IssueCommentAuthor {
+    pub fn new(
+        account_id: AccountId,
+        display_name: Option<impl Into<String>>,
+    ) -> Result<Self, DomainError> {
+        let display_name = display_name
+            .map(Into::into)
+            .map(|value: String| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(|value| validate_text(value, "comment author display name", 255))
+            .transpose()?;
+        Ok(Self {
+            account_id,
+            display_name,
+        })
+    }
+}
+
 /// A textual issue comment with attachment metadata only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueComment {
     pub id: String,
-    pub author: Option<AccountId>,
+    pub author: Option<IssueCommentAuthor>,
     pub body: String,
     pub created_at: Timestamp,
     pub updated_at: Option<Timestamp>,
     pub attachments: Vec<AttachmentMetadata>,
 }
 
+#[cfg(test)]
+mod author_tests {
+    use super::IssueCommentAuthor;
+    use crate::AccountId;
+
+    #[test]
+    fn normalizes_optional_comment_author_display_name() {
+        let author = IssueCommentAuthor::new(
+            AccountId::new("account-1").expect("account"),
+            Some("  Asha  "),
+        )
+        .expect("author");
+        assert_eq!(author.display_name.as_deref(), Some("Asha"));
+
+        let blank =
+            IssueCommentAuthor::new(AccountId::new("account-1").expect("account"), Some("   "))
+                .expect("blank display names are optional");
+        assert_eq!(blank.display_name, None);
+    }
+
+    #[test]
+    fn rejects_overlong_comment_author_display_name() {
+        let error = IssueCommentAuthor::new(
+            AccountId::new("account-1").expect("account"),
+            Some("x".repeat(256)),
+        )
+        .expect_err("display names must stay bounded");
+
+        assert_eq!(
+            error,
+            crate::DomainError::TooLong {
+                field: "comment author display name",
+                maximum: 255,
+            }
+        );
+    }
+}
+
 impl IssueComment {
     pub fn new(
         id: impl Into<String>,
-        author: Option<AccountId>,
+        author: Option<IssueCommentAuthor>,
         body: impl Into<String>,
         created_at: Timestamp,
         updated_at: Option<Timestamp>,

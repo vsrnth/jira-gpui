@@ -168,7 +168,7 @@ impl AppShell {
                                                 div()
                                                     .text_sm()
                                                     .text_color(cx.theme().muted_foreground)
-                                                    .child("Configure a read-only Jira Project workspace"),
+                                            .child("Configure an Jira Project workspace"),
                                             ),
                                     ),
                             )
@@ -176,7 +176,7 @@ impl AppShell {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. It never writes to Jira."),
+                                    .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. Jira remains read-only except for explicitly confirmed comment creation."),
                             ),
                     )
                     .when_some(error, |this, error| this.child(error))
@@ -229,7 +229,7 @@ impl AppShell {
                                     .label(if self.connecting {
                                         "Connecting…"
                                     } else {
-                                        "Connect read-only"
+                                        "Connect"
                                     })
                                     .primary()
                                     .disabled(self.connecting)
@@ -242,7 +242,7 @@ impl AppShell {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Read-only access is required. Create an API token in your Atlassian account security settings."),
+                                    .child("Jira read access is required; comment permission is used only after explicit confirmation. Create an API token in your Atlassian account security settings."),
                             ),
                     ),
             )

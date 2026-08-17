@@ -1,6 +1,6 @@
 use jira_domain::{
-    AccountId, Issue, IssueComment, IssueId, JiraSiteId, Timestamp, UpdateEvent, UpdateKind,
-    UserSetId,
+    AccountId, Issue, IssueComment, IssueId, IssueKey, JiraSiteId, Timestamp, UpdateEvent,
+    UpdateKind, UserSetId,
 };
 
 #[derive(Clone, Debug)]
@@ -20,11 +20,29 @@ pub struct IssueFetchRequest {
     pub page_size: usize,
 }
 
+/// A user-confirmed Jira comment creation request. The body remains plain text
+/// here; the Jira adapter owns conversion to Atlassian Document Format.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddCommentRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+    pub body: String,
+}
+
+/// Typed request for the core issue-detail payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IssueLocator {
+    Id(IssueId),
+    /// Jira key lookup accepts the key currently returned by Jira. If an issue
+    /// was moved and its key changed, the old key is intentionally rejected.
+    Key(IssueKey),
+}
+
 /// Typed request for the core issue-detail payload.
 #[derive(Clone, Debug)]
 pub struct IssueDetailRequest {
     pub site_id: JiraSiteId,
-    pub issue_id: IssueId,
+    pub locator: IssueLocator,
 }
 
 /// Typed request for one page of issue comments.
@@ -83,6 +101,10 @@ pub struct SyncRequest {
     pub user_set_id: UserSetId,
     /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
     pub assignees: Option<Vec<AccountId>>,
+    /// Optional local notification restriction. This does not change the remote fetch or cache
+    /// membership; it only allows desktop delivery for incoming issues assigned to these users.
+    /// `None` preserves the generic, unfiltered notification behavior.
+    pub notification_assignees: Option<Vec<AccountId>>,
     pub mode: SyncMode,
 }
 

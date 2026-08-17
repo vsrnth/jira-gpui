@@ -6,10 +6,10 @@ use jira_domain::{
 };
 
 use crate::{
-    ApplicationError, ApplicationEvent, CancellationToken, ChangeSet, CommitOutcome,
-    IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
-    IssueListQuery, IssuePage, NotificationRequest, SyncCommit, SyncState, UpdateFeedQuery,
-    UserSearchRequest, UserSetDraft,
+    AddCommentRequest, ApplicationError, ApplicationEvent, CancellationToken, ChangeSet,
+    CommitOutcome, IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest,
+    IssueFetchRequest, IssueListQuery, IssuePage, NotificationRequest, SyncCommit, SyncState,
+    UpdateFeedQuery, UserSearchRequest, UserSetDraft,
 };
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationError>> + Send + 'a>>;
@@ -66,6 +66,16 @@ pub trait JiraReadPort: Send + Sync {
         issue_ids: &'a [IssueId],
         cancellation: &'a CancellationToken,
     ) -> PortFuture<'a, Vec<Issue>>;
+}
+
+/// The sole Jira write boundary. Implementations must issue exactly one
+/// explicit comment creation request and must not retry it automatically.
+pub trait JiraCommentWritePort: Send + Sync {
+    fn create_comment<'a>(
+        &'a self,
+        request: &'a AddCommentRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, jira_domain::IssueComment>;
 }
 
 /// Cache operations required by issue browsing and synchronization.

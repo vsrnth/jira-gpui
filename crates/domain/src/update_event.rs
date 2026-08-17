@@ -20,6 +20,8 @@ pub enum ChangeValue {
 pub enum UpdateKind {
     IssueAddedToView,
     IssueRemovedFromView,
+    /// A Jira update was observed, but no more specific tracked field changed.
+    IssueUpdated,
     StatusChanged {
         old: ChangeValue,
         new: ChangeValue,

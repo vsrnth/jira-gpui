@@ -14,6 +14,7 @@ impl crate::NotificationPolicy for DefaultDesktopNotificationPolicy {
             | UpdateKind::DueDateChanged { .. }
             | UpdateKind::CommentAdded { .. } => true,
             UpdateKind::IssueRemovedFromView
+            | UpdateKind::IssueUpdated
             | UpdateKind::SummaryChanged { .. }
             | UpdateKind::ParentChanged { .. } => false,
         }
@@ -77,6 +78,7 @@ mod tests {
         let change = ChangeValue::Text("new".into());
         for kind in [
             UpdateKind::IssueRemovedFromView,
+            UpdateKind::IssueUpdated,
             UpdateKind::SummaryChanged {
                 old: change.clone(),
                 new: change.clone(),

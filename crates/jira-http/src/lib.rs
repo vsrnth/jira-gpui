@@ -12,13 +12,13 @@ use std::{
 
 use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraCommentPage, JiraIssue, JiraUser};
 use jira_application::{
-    ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage, IssueCommentsPageRequest,
-    IssueDetailRequest, IssueFetchRequest, IssuePage, JiraReadPort, PageCursor, PortFuture,
-    UserSearchRequest,
+    AddCommentRequest, ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
+    IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage,
+    JiraCommentWritePort, JiraReadPort, PageCursor, PortFuture, UserSearchRequest,
 };
-use jira_domain::{Issue, IssueId, JiraSiteId, User};
+use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, User};
 use reqwest::{Client, Response, StatusCode, header};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{runtime::Builder, sync::oneshot};
 use url::Url;
 
@@ -27,6 +27,49 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
+
+#[derive(Debug, Serialize)]
+struct JiraCommentCreateRequest {
+    body: JiraAdfDocument,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraAdfDocument {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    version: u8,
+    content: Vec<JiraAdfBlock>,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraAdfBlock {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    content: Vec<JiraAdfText>,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraAdfText {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+}
+
+fn jira_comment_create_body(text: &str) -> JiraCommentCreateRequest {
+    JiraCommentCreateRequest {
+        body: JiraAdfDocument {
+            kind: "doc",
+            version: 1,
+            content: vec![JiraAdfBlock {
+                kind: "paragraph",
+                content: vec![JiraAdfText {
+                    kind: "text",
+                    text: text.to_owned(),
+                }],
+            }],
+        },
+    }
+}
 
 /// Credentials for Jira Cloud basic authentication (email + API token).
 ///
@@ -197,15 +240,19 @@ impl JiraHttpClient {
 
     fn issue_endpoint(
         &self,
-        issue_id: &IssueId,
+        locator: &IssueLocator,
         suffix: Option<&str>,
     ) -> Result<Url, ApplicationError> {
+        let issue_id_or_key = match locator {
+            IssueLocator::Id(issue_id) => issue_id.as_str(),
+            IssueLocator::Key(issue_key) => issue_key.as_str(),
+        };
         let mut url = self.endpoint("rest/api/3/issue")?;
         {
             let mut segments = url.path_segments_mut().map_err(|_| {
                 ApplicationError::new(ErrorKind::Internal, "invalid Jira issue endpoint")
             })?;
-            segments.push(issue_id.as_str());
+            segments.push(issue_id_or_key);
             if let Some(suffix) = suffix {
                 segments.push(suffix);
             }
@@ -228,6 +275,30 @@ impl JiraHttpClient {
             let result = runtime.dispatch(operation).await?;
             cancellation.check()?;
             result
+        })
+    }
+
+    /// Dispatches a write after the preflight cancellation check. Once queued, the operation is
+    /// awaited to completion so cancellation cannot turn a committed-or-unknown Jira write into
+    /// a retryable cancellation result.
+    fn submit_write<T, F>(
+        &self,
+        cancellation: &CancellationToken,
+        operation: F,
+    ) -> PortFuture<'static, T>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, ApplicationError>> + Send + 'static,
+    {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let runtime = Arc::clone(&self.runtime);
+        Box::pin(async move {
+            runtime
+                .dispatch(operation)
+                .await
+                .map_err(write_dispatch_error)?
         })
     }
 
@@ -436,6 +507,40 @@ impl JiraHttpClient {
             ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid comment data")
         })
     }
+
+    fn create_comment_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+        body: JiraCommentCreateRequest,
+    ) -> reqwest::RequestBuilder {
+        client
+            .post(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .json(&body)
+    }
+
+    async fn create_comment_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        body: String,
+        max_response_bytes: usize,
+    ) -> Result<IssueComment, ApplicationError> {
+        let response = Self::create_comment_request_builder(
+            &client,
+            url,
+            &credentials,
+            jira_comment_create_body(&body),
+        )
+        .send()
+        .await
+        .map_err(comment_transport_error)?;
+
+        read_created_comment(response, max_response_bytes).await
+    }
 }
 
 impl JiraReadPort for JiraHttpClient {
@@ -450,7 +555,7 @@ impl JiraReadPort for JiraHttpClient {
         if let Err(error) = self.validate_site(&request.site_id) {
             return Box::pin(std::future::ready(Err(error)));
         }
-        let url = match self.issue_endpoint(&request.issue_id, None) {
+        let url = match self.issue_endpoint(&request.locator, None) {
             Ok(url) => url,
             Err(error) => return Box::pin(std::future::ready(Err(error))),
         };
@@ -474,7 +579,8 @@ impl JiraReadPort for JiraHttpClient {
         if let Err(error) = self.validate_site(&request.site_id) {
             return Box::pin(std::future::ready(Err(error)));
         }
-        let url = match self.issue_endpoint(&request.issue_id, Some("comment")) {
+        let locator = IssueLocator::Id(request.issue_id.clone());
+        let url = match self.issue_endpoint(&locator, Some("comment")) {
             Ok(url) => url,
             Err(error) => return Box::pin(std::future::ready(Err(error))),
         };
@@ -599,6 +705,37 @@ impl JiraReadPort for JiraHttpClient {
     }
 }
 
+impl JiraCommentWritePort for JiraHttpClient {
+    fn create_comment<'a>(
+        &'a self,
+        request: &'a AddCommentRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, IssueComment> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let body = request.body.trim().to_owned();
+        if body.is_empty() {
+            return Box::pin(std::future::ready(Err(ApplicationError::invalid_input(
+                "comment body must not be empty",
+            ))));
+        }
+        let url = match self.issue_endpoint(&request.locator, Some("comment")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let max = self.config.max_response_bytes;
+        self.submit_write(cancellation, async move {
+            Self::create_comment_request(client, url, credentials, body, max).await
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
     #[error("Jira base URL must be a valid HTTPS Atlassian Cloud URL")]
@@ -646,6 +783,81 @@ fn transport_error(error: reqwest::Error) -> ApplicationError {
     } else {
         ApplicationError::new(ErrorKind::Upstream, "Jira request failed")
     }
+}
+
+fn comment_transport_error(error: reqwest::Error) -> ApplicationError {
+    if error.is_connect() {
+        ApplicationError::new(ErrorKind::Offline, "could not connect to Jira")
+    } else {
+        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
+    }
+}
+
+fn write_dispatch_error(_error: ApplicationError) -> ApplicationError {
+    ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
+}
+
+fn comment_status_error(status: StatusCode, headers: &header::HeaderMap) -> ApplicationError {
+    match status {
+        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE => {
+            ApplicationError::invalid_input("Jira rejected the comment request")
+        }
+        StatusCode::UNAUTHORIZED => {
+            ApplicationError::new(ErrorKind::Authentication, "Jira authentication failed")
+        }
+        StatusCode::FORBIDDEN => {
+            ApplicationError::new(ErrorKind::Authorization, "Jira authorization was denied")
+        }
+        StatusCode::NOT_FOUND => {
+            ApplicationError::new(ErrorKind::NotFound, "Jira issue was not found")
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            ApplicationError::rate_limited("Jira rate limit exceeded", retry_after(headers))
+        }
+        _ => ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown"),
+    }
+}
+
+async fn read_created_comment(
+    response: Response,
+    max_bytes: usize,
+) -> Result<IssueComment, ApplicationError> {
+    let status = response.status();
+    if status != StatusCode::CREATED {
+        return Err(comment_status_error(status, response.headers()));
+    }
+    let mut response = response;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(ApplicationError::new(
+            ErrorKind::UnknownOutcome,
+            "Jira comment outcome is unknown",
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
+    })? {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(ApplicationError::new(
+                ErrorKind::UnknownOutcome,
+                "Jira comment outcome is unknown",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    map_created_comment_body(&body)
+}
+
+fn map_created_comment_body(body: &[u8]) -> Result<IssueComment, ApplicationError> {
+    let comment: jira_adapter::JiraComment = serde_json::from_slice(body).map_err(|_| {
+        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
+    })?;
+    IssueMapper.map_comment(comment).map_err(|_| {
+        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
+    })
 }
 
 async fn read_json<T: DeserializeOwned>(
@@ -903,7 +1115,9 @@ mod tests {
             config: JiraHttpConfig::default(),
         };
         let issue_id = IssueId::new("ENG/42?private").unwrap();
-        let mut detail = client.issue_endpoint(&issue_id, None).unwrap();
+        let mut detail = client
+            .issue_endpoint(&IssueLocator::Id(issue_id.clone()), None)
+            .unwrap();
         detail
             .query_pairs_mut()
             .append_pair("fields", &jira_adapter::issue_detail_fields_query());
@@ -916,7 +1130,9 @@ mod tests {
             Some(jira_adapter::issue_detail_fields_query())
         );
 
-        let mut comments = client.issue_endpoint(&issue_id, Some("comment")).unwrap();
+        let mut comments = client
+            .issue_endpoint(&IssueLocator::Id(issue_id), Some("comment"))
+            .unwrap();
         comments
             .query_pairs_mut()
             .append_pair("startAt", "20")
@@ -933,6 +1149,26 @@ mod tests {
     }
 
     #[test]
+    fn issue_detail_url_accepts_a_typed_issue_key_as_one_encoded_path_segment() {
+        let configured = JiraSiteId::new("configured-site").unwrap();
+        let client = JiraHttpClient {
+            site_id: configured,
+            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            credentials: ApiTokenCredentials::new("person@example.com", "secret").unwrap(),
+            client: Client::new(),
+            runtime: Arc::new(RuntimeBridge::new().unwrap()),
+            config: JiraHttpConfig::default(),
+        };
+        let issue_key = jira_domain::IssueKey::new("ENG-42").unwrap();
+        let url = client
+            .issue_endpoint(&IssueLocator::Key(issue_key), None)
+            .unwrap();
+
+        assert_eq!(url.path(), "/rest/api/3/issue/ENG-42");
+        assert_eq!(url.query(), None);
+    }
+
+    #[test]
     fn detail_request_builder_uses_basic_auth_without_putting_credentials_in_the_url() {
         let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
         let request = Client::new()
@@ -944,5 +1180,144 @@ mod tests {
         assert_eq!(request.url().username(), "");
         assert!(!request.url().as_str().contains("secret-token"));
         assert!(request.headers().contains_key(header::AUTHORIZATION));
+    }
+
+    #[test]
+    fn create_comment_builder_posts_plain_text_as_safe_adf_without_extra_fields() {
+        let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
+        let request = JiraHttpClient::create_comment_request_builder(
+            &Client::new(),
+            Url::parse("https://example.atlassian.net/rest/api/3/issue/IX-123/comment").unwrap(),
+            &credentials,
+            jira_comment_create_body("<b>hello & goodbye</b>\nsecond"),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.url().path(), "/rest/api/3/issue/IX-123/comment");
+        assert_eq!(request.url().query(), None);
+        assert_eq!(
+            request.headers().get(header::ACCEPT).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            request.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic cGVyc29uQGV4YW1wbGUuY29tOnNlY3JldC10b2tlbg==")
+        );
+        let body = request.body().and_then(reqwest::Body::as_bytes).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "text",
+                            "text": "<b>hello & goodbye</b>\nsecond"
+                        }]
+                    }]
+                }
+            })
+        );
+        assert!(json.get("visibility").is_none());
+        assert!(json.get("properties").is_none());
+        assert!(!String::from_utf8_lossy(body).contains("secret-token"));
+    }
+
+    #[test]
+    fn comment_body_is_trimmed_before_adf_serialization() {
+        let body = "  hello\nworld  ".trim();
+        let json = serde_json::to_value(jira_comment_create_body(body)).unwrap();
+
+        assert_eq!(
+            json["body"]["content"][0]["content"][0]["text"],
+            "hello\nworld"
+        );
+    }
+
+    #[test]
+    fn comment_status_mapping_preserves_safe_categories_and_retry_after() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, header::HeaderValue::from_static("7"));
+        for (status, kind) in [
+            (StatusCode::BAD_REQUEST, ErrorKind::InvalidInput),
+            (StatusCode::PAYLOAD_TOO_LARGE, ErrorKind::InvalidInput),
+            (StatusCode::UNAUTHORIZED, ErrorKind::Authentication),
+            (StatusCode::FORBIDDEN, ErrorKind::Authorization),
+            (StatusCode::NOT_FOUND, ErrorKind::NotFound),
+        ] {
+            assert_eq!(comment_status_error(status, &headers).kind(), kind);
+        }
+        let rate_limited = comment_status_error(StatusCode::TOO_MANY_REQUESTS, &headers);
+        assert_eq!(rate_limited.kind(), ErrorKind::RateLimited);
+        assert_eq!(rate_limited.retry_after(), Some(Duration::from_secs(7)));
+        assert_eq!(
+            comment_status_error(StatusCode::INTERNAL_SERVER_ERROR, &headers).kind(),
+            ErrorKind::UnknownOutcome
+        );
+        assert_eq!(
+            comment_status_error(StatusCode::OK, &headers).kind(),
+            ErrorKind::UnknownOutcome
+        );
+    }
+
+    #[test]
+    fn write_dispatch_failures_are_unknown_outcomes_without_leaking_dispatch_details() {
+        let error = write_dispatch_error(ApplicationError::new(
+            ErrorKind::Internal,
+            "runtime response channel closed with secret-token",
+        ));
+
+        assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
+        assert_eq!(error.message(), "Jira comment outcome is unknown");
+        assert!(!error.message().contains("secret-token"));
+    }
+
+    #[test]
+    fn malformed_created_comment_is_an_unknown_outcome_without_leaking_body() {
+        let error = map_created_comment_body(br#"{"id":"secret-token"}"#).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
+        assert_eq!(error.message(), "Jira comment outcome is unknown");
+        assert!(!error.message().contains("secret-token"));
+    }
+
+    #[test]
+    fn cancelled_comment_creation_is_rejected_before_dispatch() {
+        let site = JiraSiteId::new("configured-site").unwrap();
+        let client = JiraHttpClient::new(
+            site.clone(),
+            "https://example.atlassian.net",
+            ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
+        )
+        .unwrap();
+        let request = AddCommentRequest {
+            site_id: site,
+            locator: IssueLocator::Key(jira_domain::IssueKey::new("IX-123").unwrap()),
+            body: "hello".to_owned(),
+        };
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(client.create_comment(&request, &cancellation))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::Cancelled);
     }
 }

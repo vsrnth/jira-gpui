@@ -5,6 +5,7 @@
 //! contains no executor, database, HTTP, or UI dependencies.
 
 mod cancellation;
+mod comment;
 mod error;
 mod feed;
 mod issue_detail;
@@ -19,6 +20,7 @@ mod sync;
 mod user_sets;
 
 pub use cancellation::CancellationToken;
+pub use comment::{CommentService, MAX_COMMENT_BYTES, MAX_COMMENT_CHARS};
 pub use error::{ApplicationError, ErrorKind};
 pub use feed::UpdateFeedService;
 pub use issue_detail::{IssueDetailConfig, IssueDetailService};

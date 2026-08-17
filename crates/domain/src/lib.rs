@@ -13,7 +13,9 @@ mod value;
 pub use issue::{
     Issue, IssueField, IssueLifecycle, IssueType, ParentIssue, Priority, Project, Status,
 };
-pub use issue_detail::{AttachmentMetadata, IssueComment, IssueDetail, IssueDetailCore};
+pub use issue_detail::{
+    AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,
+};
 pub use update_event::{
     ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,
 };

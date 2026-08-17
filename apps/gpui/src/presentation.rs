@@ -4,7 +4,7 @@
 //! adapter can reuse the same decisions without depending on the native UI.
 
 use jira_domain::{
-    ChangeValue, Issue, IssueDetail, UpdateEvent, UpdateKind, UpdateReadState, User,
+    ChangeValue, Issue, IssueDetail, IssueKey, UpdateEvent, UpdateKind, UpdateReadState, User,
 };
 use time::{Date, OffsetDateTime};
 
@@ -45,12 +45,29 @@ pub fn issue_views_for_filter(
     issues: &[Issue],
     users: &[User],
     filter: IssueStatusFilter,
+    search: &str,
 ) -> Vec<IssueViewModel> {
+    let search = search.trim().to_ascii_lowercase();
     issues
         .iter()
         .filter(|issue| filter.matches(issue.status.category.as_deref().unwrap_or_default()))
+        .filter(|issue| {
+            search.is_empty()
+                || issue.key.to_string().to_ascii_lowercase().contains(&search)
+                || issue.summary.to_ascii_lowercase().contains(&search)
+        })
         .map(|issue| IssueViewModel::from_domain(issue, users))
         .collect()
+}
+
+/// Normalize a user-entered exact-key lookup without allowing arbitrary text
+/// to become a remote request. The transport lookup is intentionally owned by
+/// the live workspace once its application locator contract is available.
+pub fn normalized_issue_key(query: &str) -> Option<IssueKey> {
+    let normalized = query.trim().to_ascii_uppercase();
+    (!normalized.is_empty())
+        .then(|| IssueKey::new(normalized).ok())
+        .flatten()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,7 +167,7 @@ pub struct AttachmentViewModel {
 }
 
 impl IssueDetailViewModel {
-    pub fn from_domain(detail: &IssueDetail) -> Self {
+    pub fn from_domain(detail: &IssueDetail, users: &[User]) -> Self {
         let comments = detail
             .comments
             .iter()
@@ -158,7 +175,21 @@ impl IssueDetailViewModel {
                 author: comment
                     .author
                     .as_ref()
-                    .map(ToString::to_string)
+                    .and_then(|author| author.display_name.clone())
+                    .or_else(|| {
+                        comment.author.as_ref().and_then(|author| {
+                            users
+                                .iter()
+                                .find(|user| user.account_id == author.account_id)
+                                .map(|user| user.display_name.clone())
+                        })
+                    })
+                    .or_else(|| {
+                        comment
+                            .author
+                            .as_ref()
+                            .map(|author| author.account_id.to_string())
+                    })
                     .unwrap_or_else(|| "Unknown author".to_owned()),
                 body: comment.body.clone(),
                 created: format_timestamp(comment.created_at),
@@ -202,23 +233,24 @@ pub struct UpdateViewModel {
 }
 
 impl UpdateViewModel {
-    pub fn from_domain(event: &UpdateEvent, issue: Option<&Issue>) -> Self {
+    pub fn from_domain(event: &UpdateEvent, issue: Option<&Issue>, users: &[User]) -> Self {
         Self {
             issue_key: event.issue_key.to_string(),
             issue_summary: issue
                 .map(|issue| issue.summary.clone())
                 .unwrap_or_else(|| "Issue no longer in this view".to_owned()),
-            change: describe_change(&event.kind),
+            change: describe_change(&event.kind, users),
             occurred_at: format_timestamp(event.occurred_at),
             unread: event.read_state == UpdateReadState::Unread,
         }
     }
 }
 
-fn describe_change(kind: &UpdateKind) -> String {
+fn describe_change(kind: &UpdateKind, users: &[User]) -> String {
     match kind {
         UpdateKind::IssueAddedToView => "Added to this user set".to_owned(),
         UpdateKind::IssueRemovedFromView => "Removed from this user set".to_owned(),
+        UpdateKind::IssueUpdated => "Issue activity changed".to_owned(),
         UpdateKind::StatusChanged { old, new } => change_sentence("Status", old, new),
         UpdateKind::AssigneeChanged { old, new } => change_sentence("Assignee", old, new),
         UpdateKind::PriorityChanged { old, new } => change_sentence("Priority", old, new),
@@ -230,7 +262,14 @@ fn describe_change(kind: &UpdateKind) -> String {
         } => {
             let author = author
                 .as_ref()
-                .map_or("Someone", jira_domain::AccountId::as_str);
+                .and_then(|account_id| {
+                    users
+                        .iter()
+                        .find(|user| &user.account_id == account_id)
+                        .map(|user| user.display_name.as_str())
+                })
+                .or_else(|| author.as_ref().map(jira_domain::AccountId::as_str))
+                .unwrap_or("Unknown author");
             format!("{author} commented: {excerpt}")
         }
     }
@@ -314,7 +353,9 @@ fn month_name(month: u8) -> &'static str {
 mod tests {
     use super::*;
     use crate::sample_data::{sample_issues, sample_users};
-    use jira_domain::{AttachmentMetadata, IssueComment, IssueDetail, IssueDetailCore};
+    use jira_domain::{
+        AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,
+    };
     use time::macros::datetime;
 
     #[test]
@@ -355,11 +396,57 @@ mod tests {
         let issues = sample_issues();
         let users = sample_users();
 
-        let views = issue_views_for_filter(&issues, &users, IssueStatusFilter::Done);
+        let views = issue_views_for_filter(&issues, &users, IssueStatusFilter::Done, "");
 
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].key, "DESK-163");
         assert_eq!(views[0].assignee, "Devon Park");
+    }
+
+    #[test]
+    fn searches_issue_key_and_summary_locally_and_composes_with_status() {
+        let issues = sample_issues();
+        let users = sample_users();
+
+        assert_eq!(
+            issue_views_for_filter(&issues, &users, IssueStatusFilter::All, "DESK-184")
+                .iter()
+                .map(|issue| issue.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["DESK-184"]
+        );
+        assert_eq!(
+            issue_views_for_filter(&issues, &users, IssueStatusFilter::All, "desk-18").len(),
+            1
+        );
+        assert_eq!(
+            issue_views_for_filter(&issues, &users, IssueStatusFilter::All, "notifications").len(),
+            1
+        );
+        assert_eq!(
+            issue_views_for_filter(&issues, &users, IssueStatusFilter::Done, "desk")
+                .iter()
+                .map(|issue| issue.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["DESK-163"]
+        );
+        assert_eq!(
+            issue_views_for_filter(&issues, &users, IssueStatusFilter::All, "   ").len(),
+            issues.len()
+        );
+    }
+
+    #[test]
+    fn normalizes_only_strict_issue_keys_for_future_remote_lookup() {
+        assert_eq!(
+            normalized_issue_key("  ix-123 ")
+                .as_ref()
+                .map(IssueKey::as_str),
+            Some("IX-123")
+        );
+        assert!(normalized_issue_key("summary text").is_none());
+        assert!(normalized_issue_key("IX-").is_none());
+        assert!(normalized_issue_key("   ").is_none());
     }
 
     #[test]
@@ -377,7 +464,13 @@ mod tests {
             vec![
                 IssueComment::new(
                     "comment-1",
-                    Some(jira_domain::AccountId::new("account-1").expect("account")),
+                    Some(
+                        IssueCommentAuthor::new(
+                            jira_domain::AccountId::new("account-1").expect("account"),
+                            None::<String>,
+                        )
+                        .expect("author"),
+                    ),
                     "A comment body",
                     datetime!(2026-01-03 00:00 UTC),
                     None,
@@ -388,12 +481,63 @@ mod tests {
         )
         .expect("detail");
 
-        let view = IssueDetailViewModel::from_domain(&detail);
+        let view = IssueDetailViewModel::from_domain(&detail, &[]);
 
         assert_eq!(view.comments[0].author, "account-1");
         assert_eq!(view.comments[0].body, "A comment body");
         assert_eq!(view.attachments[0].filename, "report.txt");
         assert_eq!(view.attachments[0].mime_type, "text/plain");
         assert_eq!(view.attachments[0].size, "1.0 KiB");
+    }
+
+    #[test]
+    fn maps_comment_author_to_authenticated_catalog_display_name() {
+        let account = jira_domain::AccountId::new("account-1").expect("account");
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let detail = IssueDetail::new(
+            IssueDetailCore::new(issue, Vec::new()).expect("detail core"),
+            vec![
+                IssueComment::new(
+                    "comment-1",
+                    Some(IssueCommentAuthor::new(account.clone(), Some("  ")).expect("author")),
+                    "A comment body",
+                    datetime!(2026-01-03 00:00 UTC),
+                    None,
+                    Vec::new(),
+                )
+                .expect("comment"),
+            ],
+        )
+        .expect("detail");
+        let user = User::new(
+            detail.core.issue.site_id.clone(),
+            account,
+            "Asha",
+            None,
+            true,
+        );
+
+        let view = IssueDetailViewModel::from_domain(&detail, &[user]);
+
+        assert_eq!(view.comments[0].author, "Asha");
+        assert_ne!(view.comments[0].author, "account-1");
+    }
+
+    #[test]
+    fn renders_generic_issue_activity_update_without_raw_enum_name() {
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let event = UpdateEvent::new(
+            jira_domain::EventId::new("event-1").expect("event"),
+            issue.site_id.clone(),
+            issue.id.clone(),
+            issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            issue.updated_at,
+            Vec::new(),
+        );
+
+        let view = UpdateViewModel::from_domain(&event, Some(&issue), &[]);
+
+        assert_eq!(view.change, "Issue activity changed");
     }
 }

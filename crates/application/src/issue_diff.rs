@@ -127,6 +127,7 @@ fn append_field_events(
     user_set_id: &UserSetId,
     detected_at: Timestamp,
 ) {
+    let initial_event_count = events.len();
     // The fixed order is part of the feed contract and keeps output stable
     // even if this function is later changed to use a map of field values.
     // The event exposes only the display name. Workflow category and status
@@ -219,6 +220,19 @@ fn append_field_events(
             "field",
             new.updated_at,
             "parent",
+        ));
+    }
+
+    if old.updated_at != new.updated_at && events.len() == initial_event_count {
+        events.push(new_event(
+            site_id,
+            new,
+            UpdateKind::IssueUpdated,
+            detected_at,
+            user_set_id,
+            "field",
+            new.updated_at,
+            "issue_updated",
         ));
     }
 }
@@ -316,6 +330,7 @@ fn canonical_kind(kind: &UpdateKind) -> Vec<String> {
     match kind {
         UpdateKind::IssueAddedToView => fields.push("issue_added_to_view".into()),
         UpdateKind::IssueRemovedFromView => fields.push("issue_removed_from_view".into()),
+        UpdateKind::IssueUpdated => fields.push("issue_updated".into()),
         UpdateKind::StatusChanged { old, new } => {
             fields.push("status_changed".into());
             canonical_change_value(&mut fields, old);
@@ -496,6 +511,48 @@ mod tests {
             summary: Some("Epic".into()),
         });
         new
+    }
+
+    #[test]
+    fn timestamp_only_change_emits_one_generic_issue_update() {
+        let old = issue("10001", datetime!(2026-08-16 10:00 UTC));
+        let new = issue("10001", datetime!(2026-08-16 11:00 UTC));
+        let events = DefaultIssueDiffer
+            .diff(change_set(vec![old.clone()], vec![new.clone()]))
+            .expect("timestamp-only changes should diff");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, UpdateKind::IssueUpdated));
+
+        let mut retry = change_set(vec![old], vec![new]);
+        retry.detected_at = datetime!(2026-08-17 12:00 UTC);
+        let retry_events = DefaultIssueDiffer.diff(retry).expect("retry should diff");
+        assert_eq!(events[0].id, retry_events[0].id);
+        assert_ne!(events[0].occurred_at, retry_events[0].occurred_at);
+    }
+
+    #[test]
+    fn specific_field_change_with_timestamp_emits_only_specific_event() {
+        let old = issue("10001", datetime!(2026-08-16 10:00 UTC));
+        let mut new = issue("10001", datetime!(2026-08-16 11:00 UTC));
+        new.summary = "changed summary".into();
+
+        let events = DefaultIssueDiffer
+            .diff(change_set(vec![old], vec![new]))
+            .expect("specific changes should diff");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].kind, UpdateKind::SummaryChanged { .. }));
+    }
+
+    #[test]
+    fn identical_snapshots_emit_no_events() {
+        let snapshot = issue("10001", datetime!(2026-08-16 10:00 UTC));
+        let events = DefaultIssueDiffer
+            .diff(change_set(vec![snapshot.clone()], vec![snapshot]))
+            .expect("identical snapshots should diff");
+
+        assert!(events.is_empty());
     }
 
     #[test]

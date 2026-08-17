@@ -48,9 +48,10 @@ impl IssueDetailService {
 
         let core = self.jira.fetch_issue_detail(&request, cancellation).await?;
         cancellation.check()?;
-        if core.issue.site_id != request.site_id || core.issue.id != request.issue_id {
+        if core.issue.site_id != request.site_id || !locator_matches(&request.locator, &core) {
             return Err(upstream("Jira returned detail for a different issue"));
         }
+        let canonical_issue_id = core.issue.id.clone();
 
         let mut comments = Vec::new();
         let mut start_at = 0;
@@ -65,7 +66,7 @@ impl IssueDetailService {
                 .fetch_issue_comments_page(
                     &IssueCommentsPageRequest {
                         site_id: request.site_id.clone(),
-                        issue_id: request.issue_id.clone(),
+                        issue_id: canonical_issue_id.clone(),
                         start_at,
                         page_cursor: page_cursor.clone(),
                         page_size: self.config.comment_page_size,
@@ -195,6 +196,17 @@ fn upstream(message: &'static str) -> ApplicationError {
     ApplicationError::new(crate::ErrorKind::Upstream, message)
 }
 
+fn locator_matches(locator: &crate::IssueLocator, core: &jira_domain::IssueDetailCore) -> bool {
+    match locator {
+        crate::IssueLocator::Id(issue_id) => &core.issue.id == issue_id,
+        crate::IssueLocator::Key(issue_key) => core
+            .issue
+            .key
+            .as_str()
+            .eq_ignore_ascii_case(issue_key.as_str()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -213,8 +225,8 @@ mod tests {
     use super::*;
     use crate::{
         ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
-        IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage, JiraReadPort,
-        PortFuture, UserSearchRequest,
+        IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage,
+        JiraReadPort, PortFuture, UserSearchRequest,
     };
 
     #[derive(Default)]
@@ -308,8 +320,76 @@ mod tests {
     fn request() -> IssueDetailRequest {
         IssueDetailRequest {
             site_id: JiraSiteId::new("site").expect("site"),
-            issue_id: IssueId::new("100").expect("issue"),
+            locator: IssueLocator::Id(IssueId::new("100").expect("issue")),
         }
+    }
+
+    #[test]
+    fn key_locator_uses_returned_numeric_id_for_comment_requests() {
+        let jira = Arc::new(FakeJira {
+            core: Mutex::new(VecDeque::from([Ok(core())])),
+            pages: Mutex::new(VecDeque::from([Ok(IssueCommentsPage {
+                comments: Vec::new(),
+                start_at: 0,
+                next_start_at: None,
+                next_cursor: None,
+                total: Some(0),
+            })])),
+            ..FakeJira::default()
+        });
+        let request = IssueDetailRequest {
+            site_id: JiraSiteId::new("site").expect("site"),
+            locator: IssueLocator::Key(IssueKey::new("APP-100").expect("key")),
+        };
+
+        block_on(
+            IssueDetailService::new(jira.clone(), IssueDetailConfig::default())
+                .fetch(request, &CancellationToken::new()),
+        )
+        .expect("key detail");
+
+        let requests = jira.page_requests.lock().expect("page requests lock");
+        assert_eq!(requests[0].issue_id.as_str(), "100");
+    }
+
+    #[test]
+    fn key_locator_rejects_a_different_returned_key() {
+        let mut returned = core();
+        returned.issue.key = IssueKey::new("APP-999").expect("key");
+        let jira = Arc::new(FakeJira {
+            core: Mutex::new(VecDeque::from([Ok(returned)])),
+            ..FakeJira::default()
+        });
+        let request = IssueDetailRequest {
+            site_id: JiraSiteId::new("site").expect("site"),
+            locator: IssueLocator::Key(IssueKey::new("APP-100").expect("key")),
+        };
+
+        let error = block_on(
+            IssueDetailService::new(jira, IssueDetailConfig::default())
+                .fetch(request, &CancellationToken::new()),
+        )
+        .expect_err("key mismatch");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+    }
+
+    #[test]
+    fn id_locator_rejects_a_different_returned_id() {
+        let jira = Arc::new(FakeJira {
+            core: Mutex::new(VecDeque::from([Ok(core())])),
+            ..FakeJira::default()
+        });
+        let request = IssueDetailRequest {
+            site_id: JiraSiteId::new("site").expect("site"),
+            locator: IssueLocator::Id(IssueId::new("999").expect("issue")),
+        };
+
+        let error = block_on(
+            IssueDetailService::new(jira, IssueDetailConfig::default())
+                .fetch(request, &CancellationToken::new()),
+        )
+        .expect_err("ID mismatch");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
     }
 
     fn core() -> IssueDetailCore {

@@ -21,7 +21,7 @@ use rusqlite::{
 use time::{OffsetDateTime, UtcOffset};
 
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const SUPPORTED_SCHEMA_VERSION: i32 = 1;
+const SUPPORTED_SCHEMA_VERSION: i32 = 2;
 
 type Reply<T> = oneshot::Sender<Result<T, ApplicationError>>;
 
@@ -475,7 +475,64 @@ fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
         transaction.execute_batch(include_str!("../../../migrations/0001_initial.sql"))?;
         transaction.execute_batch("PRAGMA user_version = 1;")?;
     }
+    if version < 2 {
+        migrate_update_event_kind_range(&transaction)?;
+        transaction.execute_batch("PRAGMA user_version = 2;")?;
+    }
     transaction.commit()
+}
+
+/// Extends the update-event kind range without changing the meaning of any
+/// existing tag. SQLite cannot alter a CHECK constraint in place, so rebuild
+/// the two directly related tables while preserving all rows and associations.
+fn migrate_update_event_kind_range(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "
+        CREATE TABLE update_events_v2 (
+            event_id TEXT PRIMARY KEY,
+            site_id TEXT NOT NULL,
+            issue_id TEXT NOT NULL,
+            issue_key TEXT NOT NULL,
+            kind INTEGER NOT NULL,
+            occurred_seconds INTEGER NOT NULL,
+            occurred_nanos INTEGER NOT NULL,
+            read_state INTEGER NOT NULL DEFAULT 0,
+            notification_delivery INTEGER NOT NULL DEFAULT 0,
+            snapshot TEXT NOT NULL,
+            UNIQUE (event_id, site_id),
+            FOREIGN KEY (site_id, issue_id) REFERENCES issues(site_id, issue_id) ON DELETE CASCADE,
+            CHECK (kind BETWEEN 0 AND 9),
+            CHECK (occurred_nanos BETWEEN 0 AND 999999999),
+            CHECK (read_state IN (0, 1)),
+            CHECK (notification_delivery BETWEEN 0 AND 3)
+        );
+        INSERT INTO update_events_v2
+            SELECT event_id, site_id, issue_id, issue_key, kind, occurred_seconds,
+                   occurred_nanos, read_state, notification_delivery, snapshot
+            FROM update_events;
+        CREATE TABLE event_user_sets_v2 (
+            event_id TEXT NOT NULL,
+            site_id TEXT NOT NULL,
+            user_set_id TEXT NOT NULL,
+            PRIMARY KEY (event_id, site_id, user_set_id),
+            FOREIGN KEY (event_id, site_id) REFERENCES update_events_v2(event_id, site_id) ON DELETE CASCADE,
+            FOREIGN KEY (site_id, user_set_id) REFERENCES user_sets(site_id, id) ON DELETE CASCADE
+        );
+        INSERT INTO event_user_sets_v2
+            SELECT event_id, site_id, user_set_id
+            FROM event_user_sets;
+        DROP TABLE event_user_sets;
+        DROP TABLE update_events;
+        ALTER TABLE update_events_v2 RENAME TO update_events;
+        ALTER TABLE event_user_sets_v2 RENAME TO event_user_sets;
+        CREATE INDEX update_events_feed_idx
+            ON update_events(site_id, occurred_seconds DESC, occurred_nanos DESC, event_id ASC);
+        CREATE INDEX update_events_unread_idx
+            ON update_events(site_id, read_state, occurred_seconds DESC, occurred_nanos DESC);
+        CREATE INDEX event_user_sets_lookup_idx
+            ON event_user_sets(site_id, user_set_id, event_id);
+        ",
+    )
 }
 
 fn handle_request(connection: &mut Connection, request: Request) {
@@ -1116,6 +1173,7 @@ fn kind_tag(kind: &UpdateKind) -> i64 {
     match kind {
         UpdateKind::IssueAddedToView => 0,
         UpdateKind::IssueRemovedFromView => 1,
+        UpdateKind::IssueUpdated => 9,
         UpdateKind::StatusChanged { .. } => 2,
         UpdateKind::AssigneeChanged { .. } => 3,
         UpdateKind::PriorityChanged { .. } => 4,
@@ -1165,6 +1223,9 @@ fn error_kind_tag(kind: ErrorKind) -> i64 {
         ErrorKind::Cancelled => 4,
         ErrorKind::InvalidInput => 5,
         ErrorKind::NotFound => 6,
+        // Comment-write outcomes are never sync-state categories. Keep this
+        // defensive fallback on the existing Upstream tag for old databases.
+        ErrorKind::UnknownOutcome => 8,
         ErrorKind::Storage => 7,
         ErrorKind::Upstream => 8,
         ErrorKind::Notification => 9,
@@ -1274,7 +1335,7 @@ mod tests {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let foreign_keys: i32 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .expect("foreign keys");
@@ -1324,10 +1385,31 @@ mod tests {
             "wal"
         );
         connection
-            .execute_batch("PRAGMA user_version = 2")
+            .execute_batch("PRAGMA user_version = 3")
             .expect("set newer version");
         drop(connection);
         assert!(SqliteStore::open(&path).is_err());
+    }
+
+    #[test]
+    fn unknown_outcome_uses_legacy_upstream_sync_tag() {
+        let store = SqliteStore::in_memory().expect("open store");
+        let site_id = site("site-a");
+        let user_set_id = saved_set(&store, site_id.clone());
+
+        block_on(store.record_sync_failure(
+            &site_id,
+            &user_set_id,
+            ErrorKind::UnknownOutcome,
+            datetime!(2026-01-03 02:00 UTC),
+        ))
+        .expect("record failure");
+
+        let persisted_state = block_on(store.sync_state(&site_id, &user_set_id))
+            .expect("sync state")
+            .expect("stored state");
+        assert_eq!(persisted_state.consecutive_failures, 1);
+        assert_eq!(persisted_state.last_error_kind, Some(ErrorKind::Upstream));
     }
 
     #[cfg(unix)]
@@ -1462,6 +1544,107 @@ mod tests {
         .expect("events");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].matching_user_set_ids, vec![user_set_id]);
+    }
+
+    #[test]
+    fn issue_updated_kind_round_trips_through_update_feed_storage() {
+        let store = SqliteStore::in_memory().expect("open store");
+        let site_id = site("site-a");
+        let user_set_id = saved_set(&store, site_id.clone());
+        let cached_issue = issue(
+            site_id.clone(),
+            "100",
+            "Timestamp-only update",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+        let event = UpdateEvent::new(
+            EventId::new("event-updated").expect("event"),
+            site_id.clone(),
+            cached_issue.id.clone(),
+            cached_issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            datetime!(2026-01-03 00:00 UTC),
+            vec![user_set_id.clone()],
+        );
+
+        let outcome = block_on(store.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            issues: vec![cached_issue],
+            update_events: vec![event.clone()],
+            replace_membership: true,
+            state: SyncState::new(site_id.clone(), user_set_id.clone()),
+        }))
+        .expect("commit");
+        assert_eq!(outcome.inserted_events, vec![event]);
+
+        let events = block_on(UpdateFeedPort::list(
+            &store,
+            &UpdateFeedQuery {
+                site_id,
+                unread_only: false,
+                kinds: vec![UpdateKind::IssueUpdated],
+                before: None,
+                limit: 10,
+            },
+        ))
+        .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, UpdateKind::IssueUpdated);
+    }
+
+    #[test]
+    fn kind_range_migration_preserves_existing_events_and_associations() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("kind-migration.sqlite");
+        let store = SqliteStore::open(&path).expect("open store");
+        let site_id = site("site-a");
+        let user_set_id = saved_set(&store, site_id.clone());
+        let cached_issue = issue(
+            site_id.clone(),
+            "100",
+            "Existing event",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+        let event = UpdateEvent::new(
+            EventId::new("event-existing").expect("event"),
+            site_id.clone(),
+            cached_issue.id.clone(),
+            cached_issue.key.clone(),
+            UpdateKind::IssueAddedToView,
+            datetime!(2026-01-03 00:00 UTC),
+            vec![user_set_id.clone()],
+        );
+        block_on(store.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            issues: vec![cached_issue],
+            update_events: vec![event.clone()],
+            replace_membership: true,
+            state: SyncState::new(site_id.clone(), user_set_id),
+        }))
+        .expect("commit");
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&path).expect("open raw database");
+        connection
+            .execute_batch("PRAGMA user_version = 1")
+            .expect("mark database as legacy version");
+        drop(connection);
+
+        let reopened = SqliteStore::open(&path).expect("migrate store");
+        let events = block_on(UpdateFeedPort::list(
+            &reopened,
+            &UpdateFeedQuery {
+                site_id,
+                unread_only: false,
+                kinds: vec![UpdateKind::IssueAddedToView],
+                before: None,
+                limit: 10,
+            },
+        ))
+        .expect("events");
+        assert_eq!(events, vec![event]);
     }
 
     #[test]

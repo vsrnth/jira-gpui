@@ -2,15 +2,35 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    actions, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, StyledExt as _, button::Button,
-    button::ButtonVariants as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, StyledExt as _,
+    button::Button,
+    button::ButtonVariants as _,
+    h_flex,
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    menu::DropdownMenu as _,
+    v_flex,
 };
-use jira_application::{ApplicationError, CancellationToken, DefaultPollingPolicy, SyncMode};
-use jira_domain::{AccountId, Issue, IssueId, User};
+use jira_application::{
+    ApplicationError, CancellationToken, DefaultPollingPolicy, IssueLocator, JiraCommentWritePort,
+    JiraReadPort, SyncMode,
+};
+
+actions!(
+    jira_dashboard,
+    [
+        StatusAll,
+        StatusToDo,
+        StatusInProgress,
+        StatusDone,
+        StatusUncategorized
+    ]
+);
+use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
@@ -38,7 +58,8 @@ fn safe_sync_error(error: &ApplicationError) -> &'static str {
         jira_application::ErrorKind::Upstream => "Refresh failed · Jira returned an error",
         jira_application::ErrorKind::Storage
         | jira_application::ErrorKind::Notification
-        | jira_application::ErrorKind::Internal => "Refresh failed · local application error",
+        | jira_application::ErrorKind::Internal
+        | jira_application::ErrorKind::UnknownOutcome => "Refresh failed · local application error",
     }
 }
 
@@ -62,8 +83,32 @@ fn safe_detail_error(error: &ApplicationError) -> &'static str {
         | jira_application::ErrorKind::Upstream
         | jira_application::ErrorKind::Storage
         | jira_application::ErrorKind::Notification
-        | jira_application::ErrorKind::Internal => {
+        | jira_application::ErrorKind::Internal
+        | jira_application::ErrorKind::UnknownOutcome => {
             "Issue details unavailable · Jira returned an error"
+        }
+    }
+}
+
+fn safe_lookup_error(error: &ApplicationError) -> &'static str {
+    match error.kind() {
+        jira_application::ErrorKind::Authentication => {
+            "Jira lookup failed · authentication was rejected"
+        }
+        jira_application::ErrorKind::Authorization => {
+            "Jira lookup failed · authorization was denied"
+        }
+        jira_application::ErrorKind::NotFound => "Jira lookup · issue was not found",
+        jira_application::ErrorKind::RateLimited => "Jira lookup paused · rate limit reached",
+        jira_application::ErrorKind::Offline => "Jira lookup failed · Jira is unreachable",
+        jira_application::ErrorKind::Cancelled => "Jira lookup cancelled",
+        jira_application::ErrorKind::InvalidInput
+        | jira_application::ErrorKind::Upstream
+        | jira_application::ErrorKind::Storage
+        | jira_application::ErrorKind::Notification
+        | jira_application::ErrorKind::Internal
+        | jira_application::ErrorKind::UnknownOutcome => {
+            "Jira lookup failed · request was not completed"
         }
     }
 }
@@ -75,7 +120,7 @@ fn refresh_complete_message(result: &RefreshResult) -> String {
         SyncMode::Reconciliation => "reconciliation",
     };
     format!(
-        "Refresh complete · {} issues · {} new updates · {} in inbox · desktop notifications: {} delivered, {} unavailable · {mode}",
+        "Refresh complete · {} issues · {} new local updates · {} local updates loaded · desktop notifications: {} delivered, {} unavailable · {mode}",
         result.cached.issues.len(),
         result.outcome.events_inserted,
         result.cached.events.len(),
@@ -95,18 +140,97 @@ enum Section {
     Updates,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IssueScope {
-    All,
-    Mine,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DetailState {
     Empty,
     Loading { issue_id: IssueId },
+    RemoteLoading { query: String },
     Loaded(IssueDetailViewModel),
     Error { issue_id: IssueId, message: String },
+    RemoteError { query: String, message: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CommentPostState {
+    Idle,
+    Confirming {
+        issue_id: IssueId,
+        issue_key: String,
+        body: String,
+        chars: usize,
+        bytes: usize,
+    },
+    Posting {
+        issue_id: IssueId,
+    },
+    Error {
+        issue_id: IssueId,
+        message: String,
+        unknown_outcome: bool,
+    },
+}
+
+fn comment_error_message(error: &ApplicationError) -> (&'static str, bool) {
+    match error.kind() {
+        jira_application::ErrorKind::Authentication => (
+            "Comment not posted · Jira authentication was rejected",
+            false,
+        ),
+        jira_application::ErrorKind::Authorization => {
+            ("Comment not posted · Jira denied comment permission", false)
+        }
+        jira_application::ErrorKind::NotFound => {
+            ("Comment not posted · the Jira issue was not found", false)
+        }
+        jira_application::ErrorKind::RateLimited => (
+            "Comment not posted · Jira rate limit reached; try later",
+            false,
+        ),
+        jira_application::ErrorKind::InvalidInput => {
+            ("Comment not posted · the comment text is invalid", false)
+        }
+        jira_application::ErrorKind::UnknownOutcome => (
+            "Jira may have accepted this comment. Refresh comments before retrying.",
+            true,
+        ),
+        _ => ("Comment not posted · Jira returned an error", false),
+    }
+}
+
+fn confirmed_comment_snapshot(
+    state: &CommentPostState,
+    selected_issue: Option<&IssueId>,
+) -> Option<(IssueId, String)> {
+    let CommentPostState::Confirming { issue_id, body, .. } = state else {
+        return None;
+    };
+    (selected_issue == Some(issue_id)).then(|| (issue_id.clone(), body.clone()))
+}
+
+fn comment_target_is_current(
+    remote_issue_id: Option<&IssueId>,
+    selected_issue: Option<&IssueId>,
+    expected_issue: &IssueId,
+) -> bool {
+    remote_issue_id.or(selected_issue) == Some(expected_issue)
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RemoteLookupState {
+    Idle,
+    Loading {
+        query: String,
+    },
+    Loaded {
+        query: String,
+        issue: Issue,
+        detail: IssueDetailViewModel,
+    },
+    Error {
+        query: String,
+        message: String,
+    },
 }
 
 fn detail_result_is_current(
@@ -116,6 +240,25 @@ fn detail_result_is_current(
     expected_generation: u64,
 ) -> bool {
     generation == expected_generation && selected_issue == Some(expected_issue)
+}
+
+fn remote_lookup_result_is_current(
+    current_query: &str,
+    expected_query: &str,
+    generation: u64,
+    expected_generation: u64,
+) -> bool {
+    generation == expected_generation
+        && current_query
+            .trim()
+            .eq_ignore_ascii_case(expected_query.trim())
+}
+
+fn local_issue_id_for_key(issues: &[Issue], key: &IssueKey) -> Option<IssueId> {
+    issues
+        .iter()
+        .find(|issue| issue.key.as_str().eq_ignore_ascii_case(key.as_str()))
+        .map(|issue| issue.id.clone())
 }
 
 pub struct Dashboard {
@@ -134,13 +277,25 @@ pub struct Dashboard {
     operation_in_progress: bool,
     polling_task: Option<gpui::Task<()>>,
     automatic_polling_paused: bool,
-    issue_scope: IssueScope,
     authenticated_account: Option<AccountId>,
     status_filter: IssueStatusFilter,
+    search_query: String,
+    search_input: Option<Entity<InputState>>,
+    search_subscriptions: Vec<Subscription>,
     detail_state: DetailState,
     detail_generation: u64,
     detail_cancellation: Option<CancellationToken>,
     detail_task: Option<gpui::Task<()>>,
+    remote_lookup: RemoteLookupState,
+    remote_lookup_generation: u64,
+    remote_lookup_cancellation: Option<CancellationToken>,
+    remote_lookup_task: Option<gpui::Task<()>>,
+    comment_input: Option<Entity<TextareaState>>,
+    comment_subscriptions: Vec<Subscription>,
+    comment_state: CommentPostState,
+    comment_generation: u64,
+    comment_cancellation: Option<CancellationToken>,
+    comment_task: Option<gpui::Task<()>>,
 }
 
 impl Dashboard {
@@ -153,10 +308,10 @@ impl Dashboard {
                 let issue = domain_issues
                     .iter()
                     .find(|issue| issue.id == event.issue_id);
-                UpdateViewModel::from_domain(event, issue)
+                UpdateViewModel::from_domain(event, issue, &users)
             })
             .collect();
-        let issues = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All);
+        let issues = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All, "");
         let selected_issue = issues.first().map(|issue| issue.id.clone());
 
         Self {
@@ -175,13 +330,25 @@ impl Dashboard {
             operation_in_progress: false,
             polling_task: None,
             automatic_polling_paused: false,
-            issue_scope: IssueScope::All,
             authenticated_account: None,
             status_filter: IssueStatusFilter::All,
+            search_query: String::new(),
+            search_input: None,
+            search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
+            remote_lookup: RemoteLookupState::Idle,
+            remote_lookup_generation: 0,
+            remote_lookup_cancellation: None,
+            remote_lookup_task: None,
+            comment_input: None,
+            comment_subscriptions: Vec::new(),
+            comment_state: CommentPostState::Idle,
+            comment_generation: 0,
+            comment_cancellation: None,
+            comment_task: None,
         }
     }
 
@@ -204,17 +371,31 @@ impl Dashboard {
                 "Environment bootstrap · My issues unavailable".to_owned()
             },
             site_label: session.site_label,
-            mode_label: "Live read-only sync · best-effort desktop notifications".to_owned(),
+            mode_label:
+                "Live Jira sync · explicit comments only · best-effort desktop notifications"
+                    .to_owned(),
             operation_in_progress: true,
             polling_task: None,
             automatic_polling_paused: false,
-            issue_scope: IssueScope::All,
             authenticated_account: initial_authenticated_account,
             status_filter: IssueStatusFilter::All,
+            search_query: String::new(),
+            search_input: None,
+            search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
+            remote_lookup: RemoteLookupState::Idle,
+            remote_lookup_generation: 0,
+            remote_lookup_cancellation: None,
+            remote_lookup_task: None,
+            comment_input: None,
+            comment_subscriptions: Vec::new(),
+            comment_state: CommentPostState::Idle,
+            comment_generation: 0,
+            comment_cancellation: None,
+            comment_task: None,
         };
 
         let site_id = session.site_id;
@@ -231,10 +412,13 @@ impl Dashboard {
             {
                 Ok(authenticated_user) => {
                     let authenticated_account = authenticated_user.account_id.clone();
-                    match LiveWorkspace::initialize(
+                    let jira_read: Arc<dyn JiraReadPort> = jira.clone();
+                    let jira_write: Arc<dyn JiraCommentWritePort> = jira.clone();
+                    match LiveWorkspace::initialize_with_comment_writer(
                         site_id,
                         Some(authenticated_account),
-                        jira,
+                        jira_read,
+                        jira_write,
                         cache,
                     )
                     .await
@@ -242,7 +426,7 @@ impl Dashboard {
                         Ok(workspace) => {
                             let workspace = Arc::new(workspace);
                             workspace
-                                .load_cached()
+                                .load_cached_for_authenticated_account()
                                 .await
                                 .map(|cached| (workspace, cached, authenticated_user))
                                 .map_err(|error| safe_sync_error(&error).to_owned())
@@ -285,9 +469,6 @@ impl Dashboard {
         let Some(workspace) = self.workspace.clone() else {
             return;
         };
-        let issue_scope = self.issue_scope;
-        let authenticated_account = self.authenticated_account.clone();
-
         let policy = DefaultPollingPolicy;
         let task = cx.spawn(async move |this, cx| {
             let mut delay = policy.next_delay_after_success();
@@ -313,25 +494,6 @@ impl Dashboard {
 
                 let cancellation = CancellationToken::new();
                 let result = workspace.refresh_automatically(&cancellation).await;
-                let result = match result {
-                    Ok(mut result)
-                        if issue_scope == IssueScope::Mine
-                            && authenticated_account.as_ref().is_some() =>
-                    {
-                        let account = authenticated_account
-                            .clone()
-                            .expect("authenticated account checked above");
-                        match workspace.load_cached_for_assignee(account).await {
-                            Ok(cached) => {
-                                result.cached = cached;
-                                Ok(result)
-                            }
-                            Err(error) => Err(error),
-                        }
-                    }
-                    Ok(result) => Ok(result),
-                    Err(error) => Err(error),
-                };
                 let next_delay = match this.update(cx, |this, cx| {
                     this.operation_in_progress = false;
                     match result {
@@ -402,7 +564,12 @@ impl Dashboard {
     }
 
     fn rebuild_issue_views(&mut self, refresh_detail: bool, cx: &mut Context<Self>) {
-        self.issues = issue_views_for_filter(&self.domain_issues, &self.users, self.status_filter);
+        self.issues = issue_views_for_filter(
+            &self.domain_issues,
+            &self.users,
+            self.status_filter,
+            &self.search_query,
+        );
         let selected_visible = self
             .selected_issue
             .as_ref()
@@ -428,6 +595,99 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        if self.search_query == query {
+            return;
+        }
+        self.clear_remote_lookup();
+        self.invalidate_comment_selection();
+        self.search_query = query;
+        self.rebuild_issue_views(false, cx);
+        cx.notify();
+    }
+
+    fn clear_remote_lookup(&mut self) {
+        if let Some(cancellation) = self.remote_lookup_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.remote_lookup_task.take();
+        self.remote_lookup_generation = self.remote_lookup_generation.wrapping_add(1);
+        self.remote_lookup = RemoteLookupState::Idle;
+    }
+
+    fn search_jira(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_query.trim().to_owned();
+        let Some(key) = crate::presentation::normalized_issue_key(&query) else {
+            self.clear_remote_lookup();
+            self.sync_message = "Jira lookup · enter a valid issue key such as IX-123".to_owned();
+            cx.notify();
+            return;
+        };
+
+        if let Some(issue_id) = local_issue_id_for_key(&self.domain_issues, &key) {
+            self.clear_remote_lookup();
+            self.select_issue(issue_id, cx, true);
+            return;
+        }
+
+        self.invalidate_comment_selection();
+        let Some(workspace) = self.workspace.clone() else {
+            self.remote_lookup = RemoteLookupState::Error {
+                query,
+                message: "Jira lookup unavailable · live workspace is not ready".to_owned(),
+            };
+            cx.notify();
+            return;
+        };
+
+        if let Some(cancellation) = self.remote_lookup_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.remote_lookup_task.take();
+        self.remote_lookup_generation = self.remote_lookup_generation.wrapping_add(1);
+        let generation = self.remote_lookup_generation;
+        let cancellation = CancellationToken::new();
+        self.remote_lookup_cancellation = Some(cancellation.clone());
+        self.remote_lookup = RemoteLookupState::Loading {
+            query: query.clone(),
+        };
+        let expected_query = query.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace.lookup_issue(key, &cancellation).await;
+            let _ = this.update(cx, |this, cx| {
+                if !remote_lookup_result_is_current(
+                    &this.search_query,
+                    &expected_query,
+                    this.remote_lookup_generation,
+                    generation,
+                ) {
+                    return;
+                }
+                this.remote_lookup_cancellation = None;
+                this.remote_lookup_task = None;
+                this.remote_lookup = match result {
+                    Ok(detail) => {
+                        let issue = detail.core.issue.clone();
+                        let detail = IssueDetailViewModel::from_domain(&detail, &this.users);
+                        RemoteLookupState::Loaded {
+                            query: expected_query.clone(),
+                            issue,
+                            detail,
+                        }
+                    }
+                    Err(error) => RemoteLookupState::Error {
+                        query: expected_query.clone(),
+                        message: safe_lookup_error(&error).to_owned(),
+                    },
+                };
+                cx.notify();
+            });
+        });
+        self.remote_lookup_task = Some(task);
+        cx.notify();
+    }
+
     fn invalidate_detail_selection(&mut self) {
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel();
@@ -436,6 +696,23 @@ impl Dashboard {
         self.detail_generation = self.detail_generation.wrapping_add(1);
         self.selected_issue = None;
         self.detail_state = DetailState::Empty;
+    }
+
+    fn invalidate_comment_selection(&mut self) {
+        self.comment_generation = self.comment_generation.wrapping_add(1);
+        self.comment_input = None;
+        self.comment_subscriptions.clear();
+        if !matches!(&self.comment_state, CommentPostState::Posting { .. }) {
+            if let Some(cancellation) = self.comment_cancellation.take() {
+                cancellation.cancel();
+            }
+            self.comment_task.take();
+            self.comment_state = CommentPostState::Idle;
+        } else {
+            // A dispatched POST may have succeeded even if its UI selection is
+            // gone; its completion is ignored by the generation guard.
+            self.comment_state = CommentPostState::Idle;
+        }
     }
 
     fn select_issue(&mut self, issue_id: IssueId, cx: &mut Context<Self>, force: bool) {
@@ -451,6 +728,7 @@ impl Dashboard {
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel();
         }
+        self.invalidate_comment_selection();
         self.detail_task.take();
         self.detail_generation = self.detail_generation.wrapping_add(1);
         let generation = self.detail_generation;
@@ -469,7 +747,7 @@ impl Dashboard {
         };
         let task = cx.spawn(async move |this, cx| {
             let result = workspace
-                .fetch_issue_detail(issue_id.clone(), &cancellation)
+                .fetch_issue_detail(IssueLocator::Id(issue_id.clone()), &cancellation)
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !detail_result_is_current(
@@ -483,7 +761,9 @@ impl Dashboard {
                 this.detail_cancellation = None;
                 this.detail_task = None;
                 this.detail_state = match result {
-                    Ok(detail) => DetailState::Loaded(IssueDetailViewModel::from_domain(&detail)),
+                    Ok(detail) => {
+                        DetailState::Loaded(IssueDetailViewModel::from_domain(&detail, &this.users))
+                    }
                     Err(error) => DetailState::Error {
                         issue_id: issue_id.clone(),
                         message: safe_detail_error(&error).to_owned(),
@@ -503,66 +783,170 @@ impl Dashboard {
         self.select_issue(issue_id, cx, true);
     }
 
+    fn begin_comment_confirmation(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            &self.comment_state,
+            CommentPostState::Error {
+                unknown_outcome: true,
+                ..
+            }
+        ) {
+            self.sync_message =
+                "Refresh comments before retrying a comment with an unknown outcome".to_owned();
+            cx.notify();
+            return;
+        }
+        let Some(input) = self.comment_input.as_ref() else {
+            return;
+        };
+        let Some(issue) = self.comment_target_issue() else {
+            return;
+        };
+        let body = input.read(cx).value().to_string().trim().to_owned();
+        if body.trim().is_empty() {
+            self.comment_state = CommentPostState::Error {
+                issue_id: issue.id.clone(),
+                message: "Comment not posted · enter a non-empty comment".to_owned(),
+                unknown_outcome: false,
+            };
+        } else if body.len() > jira_application::MAX_COMMENT_BYTES {
+            self.comment_state = CommentPostState::Error {
+                issue_id: issue.id.clone(),
+                message: "Comment not posted · comment exceeds the byte limit".to_owned(),
+                unknown_outcome: false,
+            };
+        } else if body.chars().count() > jira_application::MAX_COMMENT_CHARS {
+            self.comment_state = CommentPostState::Error {
+                issue_id: issue.id.clone(),
+                message: "Comment not posted · comment exceeds the character limit".to_owned(),
+                unknown_outcome: false,
+            };
+        } else {
+            let chars = body.chars().count();
+            let bytes = body.len();
+            self.comment_state = CommentPostState::Confirming {
+                issue_id: issue.id.clone(),
+                issue_key: issue.key.as_str().to_owned(),
+                body,
+                chars,
+                bytes,
+            };
+        }
+        cx.notify();
+    }
+
+    fn cancel_comment_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.comment_state = CommentPostState::Idle;
+        cx.notify();
+    }
+
+    fn post_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(target_issue_id) = self.comment_target_issue().map(|issue| issue.id.clone())
+        else {
+            return;
+        };
+        let Some((issue_id, body)) =
+            confirmed_comment_snapshot(&self.comment_state, Some(&target_issue_id))
+        else {
+            return;
+        };
+        let Some(workspace) = self.workspace.clone() else {
+            self.comment_state = CommentPostState::Error {
+                issue_id,
+                message: "Comment not posted · live Jira workspace is not ready".to_owned(),
+                unknown_outcome: false,
+            };
+            cx.notify();
+            return;
+        };
+        let generation = self.comment_generation.wrapping_add(1);
+        self.comment_generation = generation;
+        let cancellation = CancellationToken::new();
+        self.comment_cancellation = Some(cancellation.clone());
+        self.comment_state = CommentPostState::Posting {
+            issue_id: issue_id.clone(),
+        };
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace
+                .create_comment(IssueLocator::Id(issue_id.clone()), body, &cancellation)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.comment_generation != generation
+                    || !comment_target_is_current(
+                        match &this.remote_lookup {
+                            RemoteLookupState::Loaded { issue, .. } => Some(&issue.id),
+                            RemoteLookupState::Idle
+                            | RemoteLookupState::Loading { .. }
+                            | RemoteLookupState::Error { .. } => None,
+                        },
+                        this.selected_issue.as_ref(),
+                        &issue_id,
+                    )
+                {
+                    return;
+                }
+                this.comment_cancellation = None;
+                this.comment_task = None;
+                match result {
+                    Ok(_) => {
+                        this.comment_input = None;
+                        this.comment_subscriptions.clear();
+                        this.comment_state = CommentPostState::Idle;
+                        if matches!(
+                            &this.remote_lookup,
+                            RemoteLookupState::Loaded { issue, .. } if issue.id == issue_id
+                        ) {
+                            this.search_jira(cx);
+                        } else {
+                            this.reload_selected_detail(cx);
+                        }
+                    }
+                    Err(error) => {
+                        let (message, unknown_outcome) = comment_error_message(&error);
+                        this.comment_state = CommentPostState::Error {
+                            issue_id: issue_id.clone(),
+                            message: message.to_owned(),
+                            unknown_outcome,
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.comment_task = Some(task);
+        cx.notify();
+    }
+
+    fn refresh_comments(&mut self, cx: &mut Context<Self>) {
+        if !matches!(&self.comment_state, CommentPostState::Posting { .. }) {
+            if matches!(
+                &self.comment_state,
+                CommentPostState::Error {
+                    unknown_outcome: true,
+                    ..
+                }
+            ) {
+                self.comment_state = CommentPostState::Idle;
+            }
+            if matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }) {
+                self.search_jira(cx);
+            } else {
+                self.reload_selected_detail(cx);
+            }
+        }
+    }
+
     fn apply_cached(&mut self, cached: CachedWorkspace, cx: &mut Context<Self>) {
         let CachedWorkspace { issues, events } = cached;
         let updates = events
             .iter()
             .map(|event| {
                 let issue = issues.iter().find(|issue| issue.id == event.issue_id);
-                UpdateViewModel::from_domain(event, issue)
+                UpdateViewModel::from_domain(event, issue, &self.users)
             })
             .collect();
         self.apply_live_issues(issues, true, cx);
         self.updates = updates;
-    }
-
-    fn set_issue_scope(&mut self, scope: IssueScope, cx: &mut Context<Self>) {
-        if self.issue_scope == scope || self.operation_in_progress {
-            return;
-        }
-        let Some(workspace) = self.workspace.clone() else {
-            return;
-        };
-        let Some(account_id) = self.authenticated_account.clone() else {
-            return;
-        };
-        self.issue_scope = scope;
-        self.polling_task.take();
-        self.operation_in_progress = true;
-        self.sync_message = match scope {
-            IssueScope::All => "Loading all cached Jira Project issues…".to_owned(),
-            IssueScope::Mine => "Loading your cached Jira Project issues…".to_owned(),
-        };
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = match scope {
-                IssueScope::All => workspace.load_cached().await,
-                IssueScope::Mine => workspace.load_cached_for_assignee(account_id).await,
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.operation_in_progress = false;
-                match result {
-                    Ok(cached) => {
-                        this.apply_cached(cached, cx);
-                        this.start_automatic_polling(cx);
-                        this.sync_message = match scope {
-                            IssueScope::All => {
-                                "Showing all cached Jira Project issues".to_owned()
-                            }
-                            IssueScope::Mine => {
-                                "Showing your cached Jira Project issues".to_owned()
-                            }
-                        };
-                    }
-                    Err(error) => {
-                        this.sync_message = safe_sync_error(&error).to_owned();
-                        this.start_automatic_polling(cx);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn begin_refresh(&mut self, cx: &mut Context<Self>) {
@@ -575,33 +959,12 @@ impl Dashboard {
             return;
         };
         let cancellation = CancellationToken::new();
-        let issue_scope = self.issue_scope;
-        let authenticated_account = self.authenticated_account.clone();
         self.operation_in_progress = true;
         self.sync_message = "Refreshing Jira…".to_owned();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = workspace.refresh(&cancellation).await;
-            let result = match result {
-                Ok(mut result)
-                    if issue_scope == IssueScope::Mine
-                        && authenticated_account.as_ref().is_some() =>
-                {
-                    let account = authenticated_account
-                        .clone()
-                        .expect("authenticated account checked above");
-                    match workspace.load_cached_for_assignee(account).await {
-                        Ok(cached) => {
-                            result.cached = cached;
-                            Ok(result)
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                Ok(result) => Ok(result),
-                Err(error) => Err(error),
-            };
             let _ = this.update(cx, |this, cx| {
                 this.operation_in_progress = false;
                 match result {
@@ -633,30 +996,9 @@ impl Dashboard {
         }
         self.operation_in_progress = true;
         self.sync_message = "Marking updates read…".to_owned();
-        let issue_scope = self.issue_scope;
-        let authenticated_account = self.authenticated_account.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = workspace.mark_all_read().await;
-            let result = match result {
-                Ok(mut result)
-                    if issue_scope == IssueScope::Mine
-                        && authenticated_account.as_ref().is_some() =>
-                {
-                    let account = authenticated_account
-                        .clone()
-                        .expect("authenticated account checked above");
-                    match workspace.load_cached_for_assignee(account).await {
-                        Ok(cached) => {
-                            result.cached = cached;
-                            Ok(result)
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                Ok(result) => Ok(result),
-                Err(error) => Err(error),
-            };
             let _ = this.update(cx, |this, cx| {
                 this.operation_in_progress = false;
                 match result {
@@ -712,7 +1054,7 @@ impl Dashboard {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Read-only workspace"),
+                                    .child("Read-only sync · explicit comments"),
                             ),
                     ),
             )
@@ -739,7 +1081,7 @@ impl Dashboard {
                         cx,
                     ))
                     .child(self.nav_item(
-                        "Updates",
+                        "Local updates",
                         self.unread_count(),
                         self.section == Section::Updates,
                         Section::Updates,
@@ -754,7 +1096,7 @@ impl Dashboard {
                             .text_xs()
                             .font_semibold()
                             .text_color(cx.theme().muted_foreground)
-                            .child("VIEW"),
+                            .child("Jira Project VIEW"),
                     )
                     .child(
                         v_flex()
@@ -854,7 +1196,7 @@ impl Dashboard {
                     .gap_0p5()
                     .child(div().text_lg().font_semibold().child(match self.section {
                         Section::Issues => "Jira Project issues",
-                        Section::Updates => "Update inbox",
+                        Section::Updates => "Local updates",
                     }))
                     .child(
                         div()
@@ -864,41 +1206,16 @@ impl Dashboard {
                     ),
             )
             .child(
-                h_flex()
-                    .gap_2()
-                    .when(self.section == Section::Issues, |this| {
-                        this.child(
-                            Button::new("all-issues")
-                                .label("All issues")
-                                .when(self.issue_scope == IssueScope::All, |button| {
-                                    button.primary()
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_issue_scope(IssueScope::All, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("my-issues")
-                                .label("My issues")
-                                .when(self.issue_scope == IssueScope::Mine, |button| {
-                                    button.primary()
-                                })
-                                .disabled(self.authenticated_account.is_none())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_issue_scope(IssueScope::Mine, cx)
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("refresh")
-                            .primary()
-                            .label(if self.operation_in_progress {
-                                "Refreshing…"
-                            } else {
-                                "Refresh"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
-                    ),
+                h_flex().gap_2().child(
+                    Button::new("refresh")
+                        .primary()
+                        .label(if self.operation_in_progress {
+                            "Refreshing…"
+                        } else {
+                            "Refresh"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
+                ),
             )
     }
 
@@ -906,6 +1223,21 @@ impl Dashboard {
         h_flex()
             .size_full()
             .min_w_0()
+            .on_action(cx.listener(|this, _: &StatusAll, _, cx| {
+                this.set_status_filter(IssueStatusFilter::All, cx)
+            }))
+            .on_action(cx.listener(|this, _: &StatusToDo, _, cx| {
+                this.set_status_filter(IssueStatusFilter::ToDo, cx)
+            }))
+            .on_action(cx.listener(|this, _: &StatusInProgress, _, cx| {
+                this.set_status_filter(IssueStatusFilter::InProgress, cx)
+            }))
+            .on_action(cx.listener(|this, _: &StatusDone, _, cx| {
+                this.set_status_filter(IssueStatusFilter::Done, cx)
+            }))
+            .on_action(cx.listener(|this, _: &StatusUncategorized, _, cx| {
+                this.set_status_filter(IssueStatusFilter::Uncategorized, cx)
+            }))
             .child(
                 v_flex()
                     .h_full()
@@ -924,63 +1256,144 @@ impl Dashboard {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "{} matching Jira Project issues · {}",
+                                "{} matching Jira Project issues · My issues",
                                 self.issues.len(),
-                                match self.issue_scope {
-                                    IssueScope::All => "All issues",
-                                    IssueScope::Mine => "My issues",
-                                }
                             ))
                             .child("Updated newest first"),
                     )
+                    .when_some(self.search_input.clone(), |this, input| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .min_w_0()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .child(Input::new(&input).cleanable(true).min_w_0().flex_1())
+                                .child(
+                                    Button::new("search-jira").label("Search Jira").on_click(
+                                        cx.listener(|this, _, _, cx| this.search_jira(cx)),
+                                    ),
+                                ),
+                        )
+                    })
                     .child(
                         h_flex()
                             .h(px(44.))
                             .px_3()
                             .gap_1()
                             .flex_shrink_0()
+                            .min_w_0()
                             .border_b_1()
                             .border_color(cx.theme().border)
-                            .child(self.status_filter_button(IssueStatusFilter::All, cx))
-                            .child(self.status_filter_button(IssueStatusFilter::ToDo, cx))
-                            .child(self.status_filter_button(IssueStatusFilter::InProgress, cx))
-                            .child(self.status_filter_button(IssueStatusFilter::Done, cx))
-                            .child(self.status_filter_button(IssueStatusFilter::Uncategorized, cx)),
+                            .child(self.status_filter_dropdown()),
                     )
                     .child(
                         v_flex()
                             .id("issue-list")
                             .flex_1()
                             .overflow_y_scroll()
+                            .when_some(self.remote_lookup_view(), |this, issue| {
+                                this.child(self.issue_row_with_label(
+                                    &issue,
+                                    "Jira lookup result",
+                                    cx,
+                                ))
+                            })
                             .children(self.issues.iter().map(|issue| self.issue_row(issue, cx))),
                     ),
             )
             .child(self.issue_detail(cx))
     }
 
-    fn status_filter_button(
-        &self,
-        filter: IssueStatusFilter,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let id = match filter {
-            IssueStatusFilter::All => "status-filter-all",
-            IssueStatusFilter::ToDo => "status-filter-to-do",
-            IssueStatusFilter::InProgress => "status-filter-in-progress",
-            IssueStatusFilter::Done => "status-filter-done",
-            IssueStatusFilter::Uncategorized => "status-filter-uncategorized",
-        };
-        Button::new(id)
-            .label(filter.label())
-            .when(self.status_filter == filter, |button| button.primary())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_status_filter(filter, cx);
-            }))
+    fn status_filter_dropdown(&self) -> impl IntoElement {
+        let selected = self.status_filter;
+        Button::new("status-filter-menu")
+            .label(selected.label())
+            .dropdown_menu(move |menu, _, _| {
+                menu.menu_with_check(
+                    IssueStatusFilter::All.label(),
+                    selected == IssueStatusFilter::All,
+                    Box::new(StatusAll),
+                )
+                .menu_with_check(
+                    IssueStatusFilter::ToDo.label(),
+                    selected == IssueStatusFilter::ToDo,
+                    Box::new(StatusToDo),
+                )
+                .menu_with_check(
+                    IssueStatusFilter::InProgress.label(),
+                    selected == IssueStatusFilter::InProgress,
+                    Box::new(StatusInProgress),
+                )
+                .menu_with_check(
+                    IssueStatusFilter::Done.label(),
+                    selected == IssueStatusFilter::Done,
+                    Box::new(StatusDone),
+                )
+                .menu_with_check(
+                    IssueStatusFilter::Uncategorized.label(),
+                    selected == IssueStatusFilter::Uncategorized,
+                    Box::new(StatusUncategorized),
+                )
+            })
+    }
+
+    fn remote_lookup_view(&self) -> Option<IssueViewModel> {
+        match &self.remote_lookup {
+            RemoteLookupState::Loaded { issue, .. } => {
+                Some(IssueViewModel::from_domain(issue, &self.users))
+            }
+            RemoteLookupState::Idle
+            | RemoteLookupState::Loading { .. }
+            | RemoteLookupState::Error { .. } => None,
+        }
+    }
+
+    fn selected_issue_view(&self) -> Option<IssueViewModel> {
+        let selected = self.selected_issue.as_ref()?;
+        self.issues
+            .iter()
+            .find(|issue| &issue.id == selected)
+            .cloned()
+            .or_else(|| {
+                self.domain_issues
+                    .iter()
+                    .find(|issue| &issue.id == selected)
+                    .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+            })
+    }
+
+    fn comment_target_issue(&self) -> Option<&Issue> {
+        match &self.remote_lookup {
+            RemoteLookupState::Loaded { issue, .. } => Some(issue),
+            RemoteLookupState::Idle
+            | RemoteLookupState::Loading { .. }
+            | RemoteLookupState::Error { .. } => self
+                .selected_issue
+                .as_ref()
+                .and_then(|id| self.domain_issues.iter().find(|issue| &issue.id == id)),
+        }
     }
 
     fn issue_row(&self, issue: &IssueViewModel, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.selected_issue.as_ref() == Some(&issue.id);
+        self.issue_row_with_label(issue, "", cx)
+    }
+
+    fn issue_row_with_label(
+        &self,
+        issue: &IssueViewModel,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.selected_issue.as_ref() == Some(&issue.id)
+            || matches!(
+                &self.remote_lookup,
+                RemoteLookupState::Loaded { issue: remote, .. } if remote.id == issue.id
+            );
         let issue_id = issue.id.clone();
+        let is_remote_result = !label.is_empty();
         v_flex()
             .id(issue.id.to_string())
             .w_full()
@@ -994,7 +1407,10 @@ impl Dashboard {
                 this.hover(|style| style.bg(cx.theme().list_hover))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_issue(issue_id.clone(), cx, false);
+                if !is_remote_result {
+                    this.clear_remote_lookup();
+                    this.select_issue(issue_id.clone(), cx, false);
+                }
             }))
             .child(
                 h_flex()
@@ -1027,6 +1443,14 @@ impl Dashboard {
                             .child(issue.status.clone()),
                     ),
             )
+            .when(!label.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().link)
+                        .child(label.to_owned()),
+                )
+            })
             .child(div().text_sm().font_semibold().child(issue.summary.clone()))
             .child(
                 h_flex()
@@ -1040,57 +1464,98 @@ impl Dashboard {
     }
 
     fn issue_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let issue = self
-            .selected_issue
-            .as_ref()
-            .and_then(|selected| self.issues.iter().find(|issue| &issue.id == selected));
+        let issue = match &self.remote_lookup {
+            RemoteLookupState::Loaded { .. } => self.remote_lookup_view(),
+            RemoteLookupState::Loading { .. } | RemoteLookupState::Error { .. } => None,
+            RemoteLookupState::Idle => self.selected_issue_view(),
+        };
+        let lookup_query = match &self.remote_lookup {
+            RemoteLookupState::Loading { query } | RemoteLookupState::Error { query, .. } => {
+                Some(query.as_str())
+            }
+            RemoteLookupState::Idle | RemoteLookupState::Loaded { .. } => None,
+        };
         let project = issue
+            .as_ref()
             .map(|issue| issue.project.clone())
             .unwrap_or_else(|| "Jira".to_owned());
         let key = issue
+            .as_ref()
             .map(|issue| issue.key.clone())
+            .or_else(|| lookup_query.map(str::to_owned))
             .unwrap_or_else(|| "—".to_owned());
         let summary = issue
+            .as_ref()
             .map(|issue| issue.summary.clone())
-            .unwrap_or_else(|| "No issues loaded".to_owned());
+            .unwrap_or_else(|| {
+                if lookup_query.is_some() {
+                    "Jira lookup".to_owned()
+                } else {
+                    "No issues loaded".to_owned()
+                }
+            });
         let issue_type = issue
+            .as_ref()
             .map(|issue| issue.issue_type.clone())
             .unwrap_or_else(|| "—".to_owned());
         let status = issue
+            .as_ref()
             .map(|issue| issue.status.clone())
             .unwrap_or_else(|| "Ready to refresh".to_owned());
         let priority = issue
+            .as_ref()
             .map(|issue| issue.priority.clone())
             .unwrap_or_else(|| "—".to_owned());
-        let description = match &self.detail_state {
+        let detail_state = match &self.remote_lookup {
+            RemoteLookupState::Loaded { detail, .. } => DetailState::Loaded(detail.clone()),
+            RemoteLookupState::Loading { query } => DetailState::RemoteLoading {
+                query: query.clone(),
+            },
+            RemoteLookupState::Error { query, message } => DetailState::RemoteError {
+                query: query.clone(),
+                message: message.clone(),
+            },
+            RemoteLookupState::Idle => self.detail_state.clone(),
+        };
+        let description = match &detail_state {
             DetailState::Loaded(detail) => detail.description.clone(),
-            _ => issue.map_or_else(
+            _ => issue.as_ref().map_or_else(
                 || "Select an issue to load its details.".to_owned(),
                 |issue| issue.description.clone(),
             ),
         };
         let assignee = issue
+            .as_ref()
             .map(|issue| issue.assignee.clone())
             .unwrap_or_else(|| "—".to_owned());
         let reporter = issue
+            .as_ref()
             .map(|issue| issue.reporter.clone())
             .unwrap_or_else(|| "—".to_owned());
         let status_category = issue
+            .as_ref()
             .map(|issue| issue.status_category.clone())
             .unwrap_or_else(|| "—".to_owned());
         let parent = issue
+            .as_ref()
             .and_then(|issue| issue.parent.clone())
             .unwrap_or_else(|| "None".to_owned());
         let created = issue
+            .as_ref()
             .map(|issue| issue.created.clone())
             .unwrap_or_else(|| "—".to_owned());
         let updated = issue
+            .as_ref()
             .map(|issue| issue.updated.clone())
             .unwrap_or_else(|| "—".to_owned());
         let due_date = issue
+            .as_ref()
             .map(|issue| issue.due_date.clone())
             .unwrap_or_else(|| "—".to_owned());
-        let labels = issue.map(|issue| issue.labels.clone()).unwrap_or_default();
+        let labels = issue
+            .as_ref()
+            .map(|issue| issue.labels.clone())
+            .unwrap_or_default();
         v_flex()
             .id("issue-detail")
             .h_full()
@@ -1118,6 +1583,17 @@ impl Dashboard {
                             .child(self.pill(issue_type, cx))
                             .child(self.pill(status, cx))
                             .child(self.pill(priority, cx)),
+                    )
+                    .when(
+                        matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }),
+                        |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().link)
+                                    .child("Jira lookup result"),
+                            )
+                        },
                     ),
             )
             .child(
@@ -1159,11 +1635,15 @@ impl Dashboard {
                         ),
                 )
             })
-            .child(self.render_detail_state(cx))
+            .child(self.render_detail_state_for(&detail_state, cx))
     }
 
-    fn render_detail_state(&self, cx: &mut Context<Self>) -> AnyElement {
-        match &self.detail_state {
+    fn render_detail_state_for(
+        &self,
+        detail_state: &DetailState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match detail_state {
             DetailState::Empty => v_flex()
                 .gap_2()
                 .child(
@@ -1198,6 +1678,16 @@ impl Dashboard {
                         .child("Loading issue details…"),
                 )
                 .into_any_element(),
+            DetailState::RemoteLoading { query } => v_flex()
+                .gap_2()
+                .child(div().text_sm().font_semibold().child("Jira lookup"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("Looking up {query}…")),
+                )
+                .into_any_element(),
             DetailState::Error { message, .. } => v_flex()
                 .gap_2()
                 .child(
@@ -1206,6 +1696,16 @@ impl Dashboard {
                         .font_semibold()
                         .child("Comments and attachments"),
                 )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(message.clone()),
+                )
+                .into_any_element(),
+            DetailState::RemoteError { message, .. } => v_flex()
+                .gap_2()
+                .child(div().text_sm().font_semibold().child("Jira lookup"))
                 .child(
                     div()
                         .text_sm()
@@ -1286,13 +1786,129 @@ impl Dashboard {
                 };
                 v_flex()
                     .gap_3()
-                    .child(div().text_sm().font_semibold().child("Comments"))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(div().text_sm().font_semibold().child("Comments"))
+                            .child(
+                                Button::new("refresh-comments")
+                                    .ghost()
+                                    .label("Refresh comments")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.refresh_comments(cx)),
+                                    ),
+                            ),
+                    )
                     .child(comments)
                     .child(div().text_sm().font_semibold().child("Attachments"))
                     .child(attachments)
+                    .child(self.render_comment_composer(cx))
                     .into_any_element()
             }
         }
+    }
+
+    fn render_comment_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(input) = self.comment_input.as_ref() else {
+            return div().into_any_element();
+        };
+        let state = self.comment_state.clone();
+        let body = match &state {
+            CommentPostState::Confirming { body, .. } => body.clone(),
+            _ => input.read(cx).value().to_string(),
+        };
+        let posting = matches!(&state, CommentPostState::Posting { .. });
+        let editing_confirmed = matches!(&state, CommentPostState::Confirming { .. });
+        let mut composer = v_flex()
+            .gap_2()
+            .child(div().text_sm().font_semibold().child("Add comment"))
+            .child(
+                Textarea::new(input)
+                    .aria_label("Comment text")
+                    .disabled(posting || editing_confirmed),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{} characters · {} bytes",
+                        body.chars().count(),
+                        body.len()
+                    )),
+            );
+        composer = match state {
+            CommentPostState::Confirming {
+                issue_key,
+                body: _,
+                chars,
+                bytes,
+                ..
+            } => composer
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(format!(
+                            "Post this comment to {issue_key}? {chars} characters · {bytes} bytes"
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("post-comment-now")
+                                .primary()
+                                .label("Post now")
+                                .on_click(cx.listener(|this, _, _, cx| this.post_comment(cx))),
+                        )
+                        .child(Button::new("cancel-comment").label("Cancel").on_click(
+                            cx.listener(|this, _, _, cx| this.cancel_comment_confirmation(cx)),
+                        )),
+                ),
+            CommentPostState::Posting { .. } => composer.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Posting comment…"),
+            ),
+            CommentPostState::Error {
+                message,
+                unknown_outcome,
+                ..
+            } => composer
+                .child(div().text_sm().text_color(cx.theme().danger).child(message))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("post-comment")
+                                .primary()
+                                .label("Post comment")
+                                .disabled(posting)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.begin_comment_confirmation(cx)
+                                })),
+                        )
+                        .when(unknown_outcome, |this| {
+                            this.child(
+                                Button::new("refresh-comments-after-unknown")
+                                    .label("Refresh comments")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.refresh_comments(cx)),
+                                    ),
+                            )
+                        }),
+                ),
+            CommentPostState::Idle => composer.child(
+                Button::new("post-comment")
+                    .primary()
+                    .label("Post comment")
+                    .disabled(posting)
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_comment_confirmation(cx))),
+            ),
+        };
+        composer.into_any_element()
     }
 
     fn detail_field(
@@ -1326,6 +1942,50 @@ impl Dashboard {
             .into_any_element()
     }
 
+    fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input.is_some() {
+            return;
+        }
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search issue key or summary"));
+        self.search_subscriptions
+            .push(cx.subscribe_in(&input, window, {
+                let input = input.clone();
+                move |this, _, event: &InputEvent, _window, cx| match event {
+                    InputEvent::Change => {
+                        this.set_search_query(input.read(cx).value().to_string(), cx);
+                    }
+                    InputEvent::PressEnter { .. } => this.search_jira(cx),
+                    InputEvent::Focus | InputEvent::Blur => {}
+                }
+            }));
+        self.search_input = Some(input);
+    }
+
+    fn ensure_comment_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.comment_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(4)
+                .placeholder("Write a Jira comment")
+        });
+        self.comment_subscriptions.push(cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                    if matches!(&this.comment_state, CommentPostState::Error { .. }) {
+                        this.comment_state = CommentPostState::Idle;
+                    }
+                }
+            },
+        ));
+        self.comment_input = Some(input);
+    }
+
     fn render_updates(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
@@ -1342,7 +2002,10 @@ impl Dashboard {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} unread local updates", self.unread_count())),
+                            .child(format!(
+                                "{} unread local updates · Changes detected by Jira Desk, not Jira notifications",
+                                self.unread_count()
+                            )),
                     )
                     .child(
                         Button::new("mark-all-read")
@@ -1436,7 +2099,9 @@ impl Dashboard {
 }
 
 impl Render for Dashboard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_search_input(window, cx);
+        self.ensure_comment_input(window, cx);
         let content = match self.section {
             Section::Issues => self.render_issues(cx).into_any_element(),
             Section::Updates => self.render_updates(cx).into_any_element(),
@@ -1461,6 +2126,7 @@ impl Render for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::normalized_issue_key;
     use crate::sample_data::{sample_issues, sample_users};
 
     #[test]
@@ -1469,7 +2135,7 @@ mod tests {
         let display_name = authenticated_user.display_name.clone();
         let account_id = authenticated_user.account_id.clone();
         let (users, account) = authenticated_identity(Some(authenticated_user));
-        let views = issue_views_for_filter(&sample_issues(), &users, IssueStatusFilter::All);
+        let views = issue_views_for_filter(&sample_issues(), &users, IssueStatusFilter::All, "");
 
         assert_eq!(account, Some(account_id));
         assert_eq!(views[0].assignee, display_name);
@@ -1479,8 +2145,8 @@ mod tests {
     fn status_filter_rebuilds_from_loaded_domain_issues_without_remote_state() {
         let domain_issues = sample_issues();
         let users = sample_users();
-        let all = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All);
-        let done = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::Done);
+        let all = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All, "");
+        let done = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::Done, "");
 
         assert_eq!(all.len(), 5);
         assert_eq!(done.len(), 1);
@@ -1495,5 +2161,160 @@ mod tests {
         assert!(!detail_result_is_current(Some(&second), &first, 2, 1));
         assert!(!detail_result_is_current(Some(&first), &first, 2, 1));
         assert!(detail_result_is_current(Some(&second), &second, 2, 2));
+    }
+
+    #[test]
+    fn exact_local_key_hit_returns_id_without_remote_lookup() {
+        let issues = sample_issues();
+        let key = IssueKey::new("DESK-163").expect("key");
+        let expected = issues
+            .iter()
+            .find(|issue| issue.key == key)
+            .map(|issue| issue.id.clone());
+
+        assert_eq!(local_issue_id_for_key(&issues, &key), expected);
+    }
+
+    #[test]
+    fn invalid_key_is_rejected_before_a_remote_lookup() {
+        assert!(normalized_issue_key("summary text").is_none());
+        assert!(normalized_issue_key("IX-").is_none());
+    }
+
+    #[test]
+    fn remote_result_can_be_present_even_when_local_status_filter_hides_it() {
+        let issues = sample_issues();
+        let users = sample_users();
+        let remote = issues
+            .iter()
+            .find(|issue| issue.key.as_str() == "DESK-163")
+            .expect("sample issue")
+            .clone();
+        let local_done = issue_views_for_filter(&issues, &users, IssueStatusFilter::ToDo, "");
+        let remote_view = IssueViewModel::from_domain(&remote, &users);
+
+        assert!(local_done.iter().all(|issue| issue.id != remote.id));
+        assert_eq!(remote_view.key, "DESK-163");
+    }
+
+    #[test]
+    fn stale_remote_results_are_rejected_after_query_changes() {
+        assert!(!remote_lookup_result_is_current("IX-2", "IX-1", 2, 1));
+        assert!(!remote_lookup_result_is_current("IX-2", "IX-1", 2, 2));
+        assert!(remote_lookup_result_is_current(" ix-1 ", "IX-1", 2, 2));
+    }
+
+    #[test]
+    fn clearing_search_cancels_and_removes_remote_result() {
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.remote_lookup = RemoteLookupState::Error {
+            query: "IX-404".to_owned(),
+            message: "not found".to_owned(),
+        };
+        let generation = dashboard.remote_lookup_generation;
+
+        dashboard.clear_remote_lookup();
+
+        assert_eq!(dashboard.remote_lookup, RemoteLookupState::Idle);
+        assert_eq!(dashboard.remote_lookup_generation, generation + 1);
+    }
+
+    #[test]
+    fn comment_failures_have_definite_and_unknown_outcome_messages() {
+        let definite = ApplicationError::new(
+            jira_application::ErrorKind::Authorization,
+            "server detail must not reach UI",
+        );
+        let (message, unknown) = comment_error_message(&definite);
+        assert_eq!(
+            message,
+            "Comment not posted · Jira denied comment permission"
+        );
+        assert!(!unknown);
+        assert!(!message.contains("server detail"));
+
+        let uncertain = ApplicationError::new(
+            jira_application::ErrorKind::UnknownOutcome,
+            "secret response",
+        );
+        let (message, unknown) = comment_error_message(&uncertain);
+        assert!(unknown);
+        assert!(message.contains("Refresh comments"));
+        assert!(!message.contains("secret response"));
+    }
+
+    #[test]
+    fn comment_post_state_keeps_confirmation_issue_and_sizes() {
+        let issue_id = IssueId::new("100").expect("issue");
+        let state = CommentPostState::Confirming {
+            issue_id: issue_id.clone(),
+            issue_key: "IX-100".to_owned(),
+            body: "hello".to_owned(),
+            chars: 5,
+            bytes: 7,
+        };
+        assert_eq!(
+            state,
+            CommentPostState::Confirming {
+                issue_id,
+                issue_key: "IX-100".to_owned(),
+                body: "hello".to_owned(),
+                chars: 5,
+                bytes: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn confirmed_comment_snapshot_uses_original_body_and_rejects_other_issue() {
+        let issue_a = IssueId::new("100").expect("issue");
+        let issue_b = IssueId::new("200").expect("issue");
+        let state = CommentPostState::Confirming {
+            issue_id: issue_a.clone(),
+            issue_key: "IX-100".to_owned(),
+            body: "original body".to_owned(),
+            chars: 13,
+            bytes: 13,
+        };
+
+        let edited_editor_value = "edited after confirmation";
+        let snapshot = confirmed_comment_snapshot(&state, Some(&issue_a));
+        assert_eq!(
+            snapshot,
+            Some((issue_a.clone(), "original body".to_owned()))
+        );
+        assert_ne!(
+            snapshot.as_ref().map(|(_, body)| body),
+            Some(&edited_editor_value.to_owned())
+        );
+        assert_eq!(confirmed_comment_snapshot(&state, Some(&issue_b)), None);
+        assert_eq!(confirmed_comment_snapshot(&state, None), None);
+        assert_eq!(
+            confirmed_comment_snapshot(
+                &CommentPostState::Posting {
+                    issue_id: issue_a.clone()
+                },
+                Some(&issue_a)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_lookup_identity_can_authorize_comment_independently_of_local_selection() {
+        let remote_id = IssueId::new("remote-100").expect("issue");
+        let local_id = IssueId::new("local-200").expect("issue");
+
+        assert!(comment_target_is_current(
+            Some(&remote_id),
+            Some(&local_id),
+            &remote_id
+        ));
+        assert!(!comment_target_is_current(
+            Some(&remote_id),
+            Some(&local_id),
+            &local_id
+        ));
+        assert!(comment_target_is_current(None, Some(&local_id), &local_id));
     }
 }

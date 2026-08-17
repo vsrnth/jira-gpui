@@ -4,8 +4,9 @@ use crate::models::{
 };
 use jira_application::{IssueCommentsPage, PageCursor};
 use jira_domain::{
-    AccountId, AttachmentMetadata, Issue, IssueComment, IssueDetailCore, IssueId, IssueKey,
-    IssueType, JiraSiteId, ParentIssue, Priority, Project, Status, Timestamp, User,
+    AccountId, AttachmentMetadata, Issue, IssueComment, IssueCommentAuthor, IssueDetailCore,
+    IssueId, IssueKey, IssueType, JiraSiteId, ParentIssue, Priority, Project, Status, Timestamp,
+    User,
 };
 use serde_json::Value;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -46,7 +47,7 @@ impl IssueMapper {
         let comments = page
             .comments
             .into_iter()
-            .map(map_comment)
+            .map(|comment| self.map_comment(comment))
             .collect::<Result<Vec<_>, _>>()?;
         let next_start_at = page
             .total
@@ -59,6 +60,13 @@ impl IssueMapper {
             next_cursor: None::<PageCursor>,
             total: page.total,
         })
+    }
+
+    /// Maps one comment returned by Jira after a successful comment creation.
+    /// The public method keeps HTTP response mapping at the adapter boundary while allowing
+    /// callers to preserve the transport-neutral domain comment.
+    pub fn map_comment(&self, comment: JiraComment) -> Result<IssueComment, MappingError> {
+        map_comment(comment)
     }
 
     /// Maps an enhanced-search page to the framework-independent domain model.
@@ -235,11 +243,21 @@ fn map_comment(comment: JiraComment) -> Result<IssueComment, MappingError> {
         .as_ref()
         .and_then(adf_comment_text)
         .ok_or(MappingError::MissingRequiredField("comment body"))?;
-    let author = comment.author.map(domain_account_id).transpose()?;
+    let author = comment.author.map(map_comment_author).transpose()?;
     let created_at = parse_timestamp(comment.created)?;
     let updated_at = comment.updated.map(parse_timestamp).transpose()?;
     IssueComment::new(comment.id, author, body, created_at, updated_at, Vec::new())
         .map_err(MappingError::InvalidDomainValue)
+}
+
+fn map_comment_author(user: JiraUser) -> Result<IssueCommentAuthor, MappingError> {
+    let display_name = user.display_name.trim();
+    // Display names are optional metadata. Invalid or oversized values must not discard a
+    // comment whose stable account ID is valid.
+    let display_name =
+        (!display_name.is_empty() && display_name.len() <= 255).then_some(display_name.to_owned());
+    let account_id = domain_account_id(user)?;
+    IssueCommentAuthor::new(account_id, display_name).map_err(MappingError::InvalidDomainValue)
 }
 
 /// Extracts only user-visible ADF text, preserving block boundaries while ignoring links,
@@ -541,14 +559,47 @@ mod tests {
         assert_eq!(mapped.next_start_at, Some(2));
         assert_eq!(mapped.total, Some(3));
         assert_eq!(
-            mapped.comments[0].author.as_ref().unwrap().as_str(),
+            mapped.comments[0]
+                .author
+                .as_ref()
+                .unwrap()
+                .account_id
+                .as_str(),
             "557058:commenter"
+        );
+        assert_eq!(
+            mapped.comments[0]
+                .author
+                .as_ref()
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Asha")
         );
         assert_eq!(mapped.comments[0].body, "Looks good");
         assert!(
             serde_json::to_string(&mapped.comments[0])
                 .unwrap()
                 .contains("Looks good")
+        );
+    }
+
+    #[test]
+    fn maps_one_created_comment_through_the_public_adapter_mapper() {
+        let page: JiraCommentPage =
+            serde_json::from_str(include_str!("../tests/fixtures/comments-page.json")).unwrap();
+        let comment = page.comments.into_iter().next().expect("fixture comment");
+
+        let mapped = IssueMapper.map_comment(comment).expect("mapped comment");
+
+        assert_eq!(mapped.id.as_str(), "20001");
+        assert_eq!(mapped.body, "Looks good");
+        assert_eq!(
+            mapped
+                .author
+                .as_ref()
+                .and_then(|author| author.display_name.as_deref()),
+            Some("Asha")
         );
     }
 
@@ -571,6 +622,52 @@ mod tests {
             IssueMapper.map_comment_page(page),
             Err(MappingError::MissingRequiredField("comment body"))
         ));
+    }
+
+    #[test]
+    fn blank_missing_and_oversized_author_names_fall_back_without_dropping_account_id() {
+        let mut blank: JiraCommentPage =
+            serde_json::from_str(include_str!("../tests/fixtures/comments-page.json")).unwrap();
+        blank.comments[0]
+            .author
+            .as_mut()
+            .expect("fixture author")
+            .display_name = "   ".to_owned();
+        let mapped = IssueMapper.map_comment_page(blank).unwrap();
+        let author = mapped.comments[0].author.as_ref().expect("author");
+        assert_eq!(author.account_id.as_str(), "557058:commenter");
+        assert_eq!(author.display_name, None);
+
+        let mut oversized: JiraCommentPage =
+            serde_json::from_str(include_str!("../tests/fixtures/comments-page.json")).unwrap();
+        oversized.comments[0]
+            .author
+            .as_mut()
+            .expect("fixture author")
+            .display_name = "x".repeat(256);
+        let mapped = IssueMapper.map_comment_page(oversized).unwrap();
+        assert_eq!(
+            mapped.comments[0]
+                .author
+                .as_ref()
+                .expect("author")
+                .display_name,
+            None
+        );
+
+        let missing: JiraCommentPage = serde_json::from_value(serde_json::json!({
+            "startAt": 0,
+            "comments": [{
+                "id": "1",
+                "author": {"accountId": "account-without-name"},
+                "created": "2026-08-16T10:00:00.000+0000",
+                "body": {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"body"}]}]}
+            }]
+        })).unwrap();
+        let mapped = IssueMapper.map_comment_page(missing).unwrap();
+        let author = mapped.comments[0].author.as_ref().expect("author");
+        assert_eq!(author.account_id.as_str(), "account-without-name");
+        assert_eq!(author.display_name, None);
     }
 
     #[test]

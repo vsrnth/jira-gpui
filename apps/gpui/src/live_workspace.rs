@@ -7,14 +7,16 @@
 use std::sync::Arc;
 
 use jira_application::{
-    ApplicationError, Clock, DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort,
-    IssueCatalogService, IssueDetailConfig, IssueDetailRequest, IssueDetailService, IssueListQuery,
-    JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
-    UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
+    AddCommentRequest, ApplicationError, CancellationToken, Clock, CommentService,
+    DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort, IssueCatalogService,
+    IssueDetailConfig, IssueDetailRequest, IssueDetailService, IssueListQuery, IssueLocator,
+    JiraCommentWritePort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome,
+    SyncRequest, SyncService, UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort,
+    UserSetService,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
-    AccountId, EventId, Issue, IssueDetail, IssueId, JiraSiteId, Timestamp, UpdateEvent, UserSetId,
+    AccountId, EventId, Issue, IssueDetail, IssueKey, JiraSiteId, Timestamp, UpdateEvent, UserSetId,
 };
 use jira_storage::SqliteStore;
 
@@ -52,6 +54,7 @@ pub struct LiveWorkspace {
     catalog: IssueCatalogService,
     feed: UpdateFeedService,
     detail: IssueDetailService,
+    comments: CommentService,
     cache: Arc<SqliteStore>,
     sync: SyncService,
 }
@@ -62,6 +65,23 @@ impl LiveWorkspace {
         site_id: JiraSiteId,
         authenticated_account: Option<AccountId>,
         jira: Arc<dyn JiraReadPort>,
+        cache: Arc<SqliteStore>,
+    ) -> Result<Self, ApplicationError> {
+        Self::initialize_with_comment_writer(
+            site_id,
+            authenticated_account,
+            jira,
+            Arc::new(UnsupportedCommentWriter),
+            cache,
+        )
+        .await
+    }
+
+    pub async fn initialize_with_comment_writer(
+        site_id: JiraSiteId,
+        authenticated_account: Option<AccountId>,
+        jira: Arc<dyn JiraReadPort>,
+        comment_writer: Arc<dyn JiraCommentWritePort>,
         cache: Arc<SqliteStore>,
     ) -> Result<Self, ApplicationError> {
         let members = authenticated_account.iter().cloned().collect::<Vec<_>>();
@@ -106,6 +126,7 @@ impl LiveWorkspace {
         let cache_port: Arc<dyn IssueCachePort> = cache.clone();
         let catalog = IssueCatalogService::new(jira.clone(), cache_port.clone());
         let detail = IssueDetailService::new(jira.clone(), IssueDetailConfig::default());
+        let comments = CommentService::new(comment_writer);
         let events = Arc::new(NoopEventSink);
         let feed = UpdateFeedService::new(
             cache.clone() as Arc<dyn jira_application::UpdateFeedPort>,
@@ -129,6 +150,7 @@ impl LiveWorkspace {
             catalog,
             feed,
             detail,
+            comments,
             cache,
             sync,
         })
@@ -149,17 +171,48 @@ impl LiveWorkspace {
     /// Fetch one issue's complete read-only detail through the application service.
     pub async fn fetch_issue_detail(
         &self,
-        issue_id: IssueId,
-        cancellation: &jira_application::CancellationToken,
+        locator: IssueLocator,
+        cancellation: &CancellationToken,
     ) -> Result<IssueDetail, ApplicationError> {
         self.detail
             .fetch(
                 IssueDetailRequest {
                     site_id: self.site_id.clone(),
-                    issue_id,
+                    locator,
                 },
                 cancellation,
             )
+            .await
+    }
+
+    /// Create exactly one explicitly confirmed Jira comment. The application
+    /// service validates the plain-text body and deliberately performs no
+    /// retry after dispatch.
+    pub async fn create_comment(
+        &self,
+        locator: IssueLocator,
+        body: String,
+        cancellation: &CancellationToken,
+    ) -> Result<jira_domain::IssueComment, ApplicationError> {
+        self.comments
+            .create(
+                AddCommentRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                    body,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Look up one exact Jira key without adding it to the local cache.
+    pub async fn lookup_issue(
+        &self,
+        key: IssueKey,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<IssueDetail, ApplicationError> {
+        self.fetch_issue_detail(IssueLocator::Key(key), cancellation)
             .await
     }
 
@@ -176,6 +229,19 @@ impl LiveWorkspace {
         account_id: AccountId,
     ) -> Result<CachedWorkspace, ApplicationError> {
         self.load_cached_with_assignees(vec![account_id]).await
+    }
+
+    /// Load only the authenticated user's local view. A missing identity is
+    /// never treated as permission to show the project-wide cache.
+    pub async fn load_cached_for_authenticated_account(
+        &self,
+    ) -> Result<CachedWorkspace, ApplicationError> {
+        let Some(account_id) = self.authenticated_account.clone() else {
+            return Err(ApplicationError::invalid_input(
+                "authenticated Jira identity is required",
+            ));
+        };
+        self.load_cached_for_assignee(account_id).await
     }
 
     async fn load_cached_with_assignees(
@@ -202,6 +268,10 @@ impl LiveWorkspace {
             }
         }
 
+        let displayed_issue_ids = issues
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect::<std::collections::HashSet<_>>();
         let events = self
             .feed
             .list(&UpdateFeedQuery {
@@ -211,7 +281,10 @@ impl LiveWorkspace {
                 before: None,
                 limit: MAX_FEED_EVENTS,
             })
-            .await?;
+            .await?
+            .into_iter()
+            .filter(|event| displayed_issue_ids.contains(&event.issue_id))
+            .collect();
         Ok(CachedWorkspace { issues, events })
     }
 
@@ -259,21 +332,35 @@ impl LiveWorkspace {
                     site_id: self.site_id.clone(),
                     user_set_id: self.user_set_id.clone(),
                     assignees: None,
+                    notification_assignees: self
+                        .authenticated_account
+                        .clone()
+                        .map(|account_id| vec![account_id]),
                     mode,
                 },
                 cancellation,
             )
             .await?;
-        let cached = self.load_cached().await?;
+        let cached = self.load_cached_for_authenticated_account().await?;
         Ok(RefreshResult { cached, outcome })
     }
 
-    /// Mark every update in this workspace's site as read and reload local data.
+    /// Mark every currently displayed update as read and reload local data.
     ///
     /// This action only updates the local cache; it never contacts Jira.
     pub async fn mark_all_read(&self) -> Result<FeedActionResult, ApplicationError> {
-        let changed = self.feed.mark_all_read(&self.site_id).await?;
-        let cached = self.load_cached().await?;
+        let displayed = self.load_cached_for_authenticated_account().await?;
+        let event_ids = displayed
+            .events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let changed = if event_ids.is_empty() {
+            0
+        } else {
+            self.feed.mark_read(&self.site_id, &event_ids, true).await?
+        };
+        let cached = self.load_cached_for_authenticated_account().await?;
         Ok(FeedActionResult { cached, changed })
     }
 
@@ -286,13 +373,43 @@ impl LiveWorkspace {
         event_ids: &[EventId],
         read: bool,
     ) -> Result<FeedActionResult, ApplicationError> {
+        let displayed = self.load_cached_for_authenticated_account().await?;
+        let displayed_ids = displayed
+            .events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        if event_ids
+            .iter()
+            .any(|event_id| !displayed_ids.contains(event_id))
+        {
+            return Err(ApplicationError::invalid_input(
+                "update is outside the authenticated issue view",
+            ));
+        }
         let changed = if event_ids.is_empty() {
             0
         } else {
             self.feed.mark_read(&self.site_id, event_ids, read).await?
         };
-        let cached = self.load_cached().await?;
+        let cached = self.load_cached_for_authenticated_account().await?;
         Ok(FeedActionResult { cached, changed })
+    }
+}
+
+#[derive(Debug)]
+struct UnsupportedCommentWriter;
+
+impl JiraCommentWritePort for UnsupportedCommentWriter {
+    fn create_comment<'a>(
+        &'a self,
+        _request: &'a AddCommentRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> jira_application::PortFuture<'a, jira_domain::IssueComment> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            jira_application::ErrorKind::Internal,
+            "comment creation is unavailable in this workspace",
+        ))))
     }
 }
 
@@ -320,8 +437,9 @@ mod tests {
         UserSearchRequest,
     };
     use jira_domain::{
-        AttachmentMetadata, IssueComment, IssueDetailCore, IssueId, IssueKey, IssueType,
-        JiraSiteId, NotificationDelivery, Priority, Project, Status, UpdateReadState, User,
+        AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetailCore, IssueId, IssueKey,
+        IssueType, JiraSiteId, NotificationDelivery, Priority, Project, Status, UpdateReadState,
+        User,
     };
     use time::macros::datetime;
 
@@ -664,6 +782,17 @@ mod tests {
     }
 
     #[test]
+    fn mark_read_rejects_events_outside_authenticated_issue_view() {
+        let jira = Arc::new(FakeJira::default());
+        let workspace = make_workspace(jira, Arc::new(SqliteStore::in_memory().expect("store")));
+        let event_id = EventId::new("not-displayed").expect("event");
+
+        let error = block_on(workspace.mark_read(&[event_id], true)).expect_err("scope error");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn cached_loading_does_not_contact_jira() {
         let jira = Arc::new(FakeJira::default());
         let cache = Arc::new(SqliteStore::in_memory().expect("store"));
@@ -685,14 +814,24 @@ mod tests {
             next_cursor: None,
             server_time: Some(datetime!(2026-01-03 00:00 UTC)),
         });
+        jira.push_page(IssuePage {
+            issues: vec![
+                issue("Changed account-a summary"),
+                issue_for("Changed account-b summary", "account-b"),
+            ],
+            next_cursor: None,
+            server_time: Some(datetime!(2026-01-04 00:00 UTC)),
+        });
         let workspace = make_workspace(
             jira.clone(),
             Arc::new(SqliteStore::in_memory().expect("store")),
         );
         let cancellation = CancellationToken::new();
         block_on(workspace.refresh(&cancellation)).expect("baseline refresh");
+        let _reconciliation =
+            block_on(workspace.refresh(&cancellation)).expect("reconciliation refresh");
         let requests_after_sync = jira.request_count();
-        assert_eq!(jira.assignee_filters(), vec![None]);
+        assert_eq!(jira.assignee_filters(), vec![None, None]);
 
         let all = block_on(workspace.load_cached()).expect("load all local issues");
         assert_eq!(all.issues.len(), 2);
@@ -700,6 +839,16 @@ mod tests {
         let mine = block_on(workspace.load_cached_for_assignee(account("account-a")))
             .expect("load local my filter");
         assert_eq!(mine.issues.len(), 1);
+        assert!(
+            mine.events
+                .iter()
+                .all(|event| event.issue_id == mine.issues[0].id)
+        );
+        assert!(
+            all.events
+                .iter()
+                .any(|event| event.issue_id != mine.issues[0].id)
+        );
         assert_eq!(jira.request_count(), requests_after_sync);
     }
 
@@ -722,7 +871,10 @@ mod tests {
             comments: vec![
                 IssueComment::new(
                     "comment-1",
-                    Some(account("account-a")),
+                    Some(
+                        IssueCommentAuthor::new(account("account-a"), None::<String>)
+                            .expect("author"),
+                    ),
                     "A complete comment",
                     datetime!(2026-01-03 00:00 UTC),
                     None,
@@ -738,7 +890,7 @@ mod tests {
         let workspace = make_workspace(jira, Arc::new(SqliteStore::in_memory().expect("store")));
 
         let detail = block_on(workspace.fetch_issue_detail(
-            IssueId::new("10001").expect("issue"),
+            IssueLocator::Id(IssueId::new("10001").expect("issue")),
             &CancellationToken::new(),
         ))
         .expect("issue detail");

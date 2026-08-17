@@ -49,6 +49,7 @@ impl DefaultPollingPolicy {
             | ErrorKind::NotFound
             | ErrorKind::Storage
             | ErrorKind::Notification
+            | ErrorKind::UnknownOutcome
             | ErrorKind::Internal => None,
         }
     }
@@ -162,6 +163,7 @@ mod tests {
             ErrorKind::NotFound,
             ErrorKind::Storage,
             ErrorKind::Notification,
+            ErrorKind::UnknownOutcome,
             ErrorKind::Internal,
         ] {
             assert_eq!(policy.next_delay_after_failure(&error(kind), 1), None);

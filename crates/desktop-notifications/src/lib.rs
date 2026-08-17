@@ -33,6 +33,7 @@ fn event_kind_label(kind: &UpdateKind) -> &'static str {
     match kind {
         UpdateKind::IssueAddedToView => "Issue added",
         UpdateKind::IssueRemovedFromView => "Issue removed",
+        UpdateKind::IssueUpdated => "Issue updated",
         UpdateKind::StatusChanged { .. } => "Status changed",
         UpdateKind::AssigneeChanged { .. } => "Assignee changed",
         UpdateKind::PriorityChanged { .. } => "Priority changed",
@@ -89,6 +90,7 @@ mod tests {
         let cases = vec![
             (UpdateKind::IssueAddedToView, "Issue added"),
             (UpdateKind::IssueRemovedFromView, "Issue removed"),
+            (UpdateKind::IssueUpdated, "Issue updated"),
             (
                 UpdateKind::StatusChanged {
                     old: change.clone(),

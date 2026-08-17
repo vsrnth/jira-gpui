@@ -10,6 +10,8 @@ pub enum ErrorKind {
     Cancelled,
     InvalidInput,
     NotFound,
+    /// A write may have been accepted even though its response was not observed.
+    UnknownOutcome,
     Storage,
     Upstream,
     Notification,

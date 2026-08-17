@@ -14,6 +14,7 @@ fn main() {
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1240.), px(780.)), cx)),
             window_decorations: Some(WindowDecorations::Client),
+            app_id: Some("dev.jiradesk.JiraDesk".to_owned()),
             ..TitleBar::window_options()
         };
 
