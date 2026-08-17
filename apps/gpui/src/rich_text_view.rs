@@ -5,16 +5,16 @@
 //! turns that safe projection into ordinary GPUI elements; links remain visibly
 //! styled but inert.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, Hsla, Image, ImageSource as GpuiImageSource, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    div, img, px,
+    AnyElement, App, ElementId, Hsla, Image, ImageSource as GpuiImageSource,
+    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
 };
 use gpui_component::{
-    Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, spinner::Spinner,
-    v_flex,
+    Icon, IconName, StyledExt as _, button::Button, h_flex, scroll::ScrollableElement as _,
+    spinner::Spinner, v_flex,
 };
 use jira_domain::{
     PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
@@ -37,6 +37,7 @@ const MAX_IMAGE_LABEL_BYTES: usize = 512;
 const MAX_ATTACHMENT_FILENAME_BYTES: usize = 512;
 const MAX_ATTACHMENT_LOOKAHEAD_BYTES: usize = 16;
 const MAX_IMAGE_HEIGHT: f32 = 720.;
+const RENDER_SURFACE_STRIDE: usize = MAX_RENDER_NODES + 1;
 const RENDER_OMITTED_LABEL: &str = "Some content was omitted by Jira Desk.";
 const FALLBACK_IMAGE_GALLERY_LABEL: &str = "Image attachments";
 const FALLBACK_IMAGE_GALLERY_NOTE: &str = "Candidate attachments · exact placement unavailable.";
@@ -174,6 +175,43 @@ pub(crate) struct RichTextPalette {
     pub danger: Hsla,
 }
 
+/// Callback used by the presentation layer to perform a safe attachment action.
+///
+/// The renderer deliberately emits only the attachment ID. The caller owns the
+/// authenticated download flow and resolves that ID against the loaded issue detail.
+#[derive(Clone)]
+pub(crate) struct RichAttachmentCardAction(Rc<RichAttachmentActionHandler>);
+
+type RichAttachmentActionHandler = dyn Fn(&str, &mut Window, &mut App);
+
+impl RichAttachmentCardAction {
+    pub(crate) fn new(handler: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
+        Self(Rc::new(handler))
+    }
+
+    fn invoke(&self, attachment_id: &str, window: &mut Window, cx: &mut App) {
+        (self.0)(attachment_id, window, cx);
+    }
+}
+
+#[derive(Clone)]
+struct RenderContext<'a> {
+    palette: RichTextPalette,
+    image_states: &'a RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
+    attachment_action: Option<RichAttachmentCardAction>,
+}
+
+impl<'a> RenderContext<'a> {
+    fn with_source(&self, source: DiagnosticImageSource) -> Self {
+        Self {
+            source,
+            ..self.clone()
+        }
+    }
+}
+
 pub(crate) fn render_rich_text(
     document: &RichTextDocument,
     palette: RichTextPalette,
@@ -181,18 +219,35 @@ pub(crate) fn render_rich_text(
     surface_ordinal: usize,
     source: DiagnosticImageSource,
 ) -> AnyElement {
+    render_rich_text_with_actions(
+        document,
+        palette,
+        image_states,
+        surface_ordinal,
+        source,
+        None,
+    )
+}
+
+pub(crate) fn render_rich_text_with_actions(
+    document: &RichTextDocument,
+    palette: RichTextPalette,
+    image_states: &RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
+    attachment_action: Option<RichAttachmentCardAction>,
+) -> AnyElement {
+    let context = RenderContext {
+        palette,
+        image_states,
+        surface_ordinal,
+        source,
+        attachment_action,
+    };
     let mut budget = RenderBudget::default();
     let mut blocks = Vec::new();
     for block in document.blocks.iter().take(MAX_RENDER_CHILDREN) {
-        blocks.push(render_block(
-            block,
-            palette,
-            image_states,
-            surface_ordinal,
-            source,
-            0,
-            &mut budget,
-        ));
+        blocks.push(render_block(block, &context, 0, &mut budget));
         if budget.omitted {
             break;
         }
@@ -203,7 +258,7 @@ pub(crate) fn render_rich_text(
 
     let mut content = v_flex().min_w_0().gap_3().children(blocks);
     if document.truncated || budget.omitted {
-        content = content.child(div().text_xs().text_color(palette.muted).child(
+        content = content.child(div().text_xs().text_color(context.palette.muted).child(
             if document.truncated {
                 "Content truncated by Jira Desk."
             } else {
@@ -223,10 +278,7 @@ pub(crate) fn render_rich_text(
             }
             gallery.push(render_image(
                 image,
-                palette,
-                image_states,
-                surface_ordinal,
-                DiagnosticImageSource::FallbackCandidate,
+                &context.with_source(DiagnosticImageSource::FallbackCandidate),
                 &mut budget,
             ));
         }
@@ -239,13 +291,13 @@ pub(crate) fn render_rich_text(
                         div()
                             .text_sm()
                             .font_semibold()
-                            .text_color(palette.foreground)
+                            .text_color(context.palette.foreground)
                             .child(FALLBACK_IMAGE_GALLERY_LABEL),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(palette.muted)
+                            .text_color(context.palette.muted)
                             .child(FALLBACK_IMAGE_GALLERY_NOTE),
                     )
                     .children(gallery),
@@ -257,25 +309,22 @@ pub(crate) fn render_rich_text(
 
 fn render_block(
     block: &RichBlock,
-    palette: RichTextPalette,
-    image_states: &RichImageRenderStates,
-    surface_ordinal: usize,
-    source: DiagnosticImageSource,
+    context: &RenderContext<'_>,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
     if !budget.enter(depth) {
-        return omitted_element(palette);
+        return omitted_element(context.palette);
     }
 
     match block {
-        RichBlock::Paragraph(content) => render_inline_line(content, palette, depth, budget),
+        RichBlock::Paragraph(content) => render_inline_line(content, context, depth, budget),
         RichBlock::Heading { level, content } => {
             let element = div()
                 .min_w_0()
                 .font_semibold()
-                .text_color(palette.foreground)
-                .child(render_inlines(content, palette, depth, budget));
+                .text_color(context.palette.foreground)
+                .child(render_inlines(content, context, depth, budget));
             match heading_size(*level) {
                 HeadingSize::TwoXl => element.text_2xl().into_any_element(),
                 HeadingSize::Xl => element.text_xl().into_any_element(),
@@ -284,26 +333,10 @@ fn render_block(
                 HeadingSize::Sm => element.text_sm().into_any_element(),
             }
         }
-        RichBlock::BulletList(items) => render_list(
-            items,
-            None,
-            palette,
-            image_states,
-            surface_ordinal,
-            source,
-            depth,
-            budget,
-        ),
-        RichBlock::OrderedList { order, items } => render_list(
-            items,
-            Some(*order),
-            palette,
-            image_states,
-            surface_ordinal,
-            source,
-            depth,
-            budget,
-        ),
+        RichBlock::BulletList(items) => render_list(items, None, context, depth, budget),
+        RichBlock::OrderedList { order, items } => {
+            render_list(items, Some(*order), context, depth, budget)
+        }
         RichBlock::CodeBlock { language, text } => {
             let mut code = v_flex()
                 .min_w_0()
@@ -311,16 +344,16 @@ fn render_block(
                 .p_3()
                 .rounded(px(4.))
                 .border_1()
-                .border_color(palette.border)
-                .bg(palette.code_surface)
+                .border_color(context.palette.border)
+                .bg(context.palette.code_surface)
                 .text_sm()
-                .text_color(palette.foreground)
+                .text_color(context.palette.foreground)
                 .font_family("monospace");
             if let Some(language) = language {
                 code = code.child(
                     div()
                         .text_xs()
-                        .text_color(palette.muted)
+                        .text_color(context.palette.muted)
                         .child(budget.text(language)),
                 );
             }
@@ -333,19 +366,11 @@ fn render_block(
             .gap_2()
             .pl_3()
             .border_l_2()
-            .border_color(palette.muted)
-            .children(render_blocks(
-                content,
-                palette,
-                image_states,
-                surface_ordinal,
-                source,
-                depth,
-                budget,
-            ))
+            .border_color(context.palette.muted)
+            .children(render_blocks(content, context, depth, budget))
             .into_any_element(),
         RichBlock::Panel { kind, content } => {
-            let accent = panel_accent(*kind, palette);
+            let accent = panel_accent(*kind, context.palette);
             v_flex()
                 .min_w_0()
                 .gap_2()
@@ -354,30 +379,15 @@ fn render_block(
                 .border_1()
                 .border_color(accent)
                 .bg(accent.opacity(0.08))
-                .children(render_blocks(
-                    content,
-                    palette,
-                    image_states,
-                    surface_ordinal,
-                    source,
-                    depth,
-                    budget,
-                ))
+                .children(render_blocks(content, context, depth, budget))
                 .into_any_element()
         }
-        RichBlock::Image(image) => render_image(
-            image,
-            palette,
-            image_states,
-            surface_ordinal,
-            source,
-            budget,
-        ),
+        RichBlock::Image(image) => render_image(image, context, budget),
         RichBlock::Placeholder { label } => div()
             .min_w_0()
             .text_sm()
             .italic()
-            .text_color(palette.muted)
+            .text_color(context.palette.muted)
             .child(budget.text(label))
             .into_any_element(),
     }
@@ -385,10 +395,7 @@ fn render_block(
 
 fn render_image(
     image: &RichImage,
-    palette: RichTextPalette,
-    image_states: &RichImageRenderStates,
-    surface_ordinal: usize,
-    source: DiagnosticImageSource,
+    context: &RenderContext<'_>,
     budget: &mut RenderBudget,
 ) -> AnyElement {
     let image_ordinal = budget.image_ordinal;
@@ -401,23 +408,27 @@ fn render_image(
         .gap_2()
         .rounded(px(6.))
         .border_1()
-        .border_color(palette.border)
+        .border_color(context.palette.border)
         // The ID is internal GPUI bookkeeping, never rendered or exposed as an
-        // accessibility label. The budget ordinal makes repeated attachments
-        // unique within this render pass.
-        .id(format!(
-            "rich-image-{}-{}",
-            image.attachment_id, budget.nodes
+        // accessibility label. A dedicated element ordinal makes repeated
+        // attachments unique within this render pass.
+        .id(ElementId::named_usize(
+            "rich-image",
+            render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal()),
         ))
         .aria_label(accessible_label);
 
-    let diagnostic_context =
-        image_states.context_for(&image.attachment_id, image_ordinal, surface_ordinal, source);
-    match image_render_state(image_states, image) {
+    let diagnostic_context = context.image_states.context_for(
+        &image.attachment_id,
+        image_ordinal,
+        context.surface_ordinal,
+        context.source,
+    );
+    match image_render_state(context.image_states, image) {
         Some(RichImageRenderState::Ready(image)) => {
             let unavailable = format!("Image unavailable · {name}");
-            let loading_color = palette.muted;
-            let fallback_color = palette.muted;
+            let loading_color = context.palette.muted;
+            let fallback_color = context.palette.muted;
             frame = frame.child(
                 img(GpuiImageSource::Image(image.clone()))
                     .max_w_full()
@@ -475,7 +486,7 @@ fn render_image(
                     .items_center()
                     .justify_center()
                     .text_sm()
-                    .text_color(palette.muted)
+                    .text_color(context.palette.muted)
                     .child(budget.text(&unavailable)),
             );
         }
@@ -498,7 +509,7 @@ fn render_image(
                     .items_center()
                     .justify_center()
                     .text_sm()
-                    .text_color(palette.muted)
+                    .text_color(context.palette.muted)
                     .child(budget.text(&unavailable)),
             );
         }
@@ -508,7 +519,7 @@ fn render_image(
         .child(
             div()
                 .text_xs()
-                .text_color(palette.muted)
+                .text_color(context.palette.muted)
                 .child(budget.text(&name)),
         )
         .into_any_element()
@@ -539,10 +550,7 @@ fn image_render_state<'a>(
 
 fn render_blocks(
     blocks: &[RichBlock],
-    palette: RichTextPalette,
-    image_states: &RichImageRenderStates,
-    surface_ordinal: usize,
-    source: DiagnosticImageSource,
+    context: &RenderContext<'_>,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> Vec<AnyElement> {
@@ -550,10 +558,7 @@ fn render_blocks(
     for block in blocks.iter().take(MAX_RENDER_CHILDREN) {
         rendered.push(render_block(
             block,
-            palette,
-            image_states,
-            surface_ordinal,
-            source,
+            context,
             depth.saturating_add(1),
             budget,
         ));
@@ -567,14 +572,10 @@ fn render_blocks(
     rendered
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_list(
     items: &[RichListItem],
     order: Option<u32>,
-    palette: RichTextPalette,
-    image_states: &RichImageRenderStates,
-    surface_ordinal: usize,
-    source: DiagnosticImageSource,
+    context: &RenderContext<'_>,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
@@ -597,16 +598,13 @@ fn render_list(
                         .w(px(18.))
                         .flex_shrink_0()
                         .text_sm()
-                        .text_color(palette.muted)
+                        .text_color(context.palette.muted)
                         .text_right()
                         .child(marker),
                 )
                 .child(v_flex().min_w_0().flex_1().gap_2().children(render_blocks(
                     &item.blocks,
-                    palette,
-                    image_states,
-                    surface_ordinal,
-                    source,
+                    context,
                     depth,
                     budget,
                 )))
@@ -624,21 +622,21 @@ fn render_list(
 
 fn render_inline_line(
     content: &[RichInline],
-    palette: RichTextPalette,
+    context: &RenderContext<'_>,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
     div()
         .min_w_0()
         .text_sm()
-        .text_color(palette.foreground)
-        .child(render_inlines(content, palette, depth, budget))
+        .text_color(context.palette.foreground)
+        .child(render_inlines(content, context, depth, budget))
         .into_any_element()
 }
 
 fn render_inlines(
     content: &[RichInline],
-    palette: RichTextPalette,
+    context: &RenderContext<'_>,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
@@ -652,7 +650,7 @@ fn render_inlines(
         if matches!(inline, RichInline::HardBreak) {
             lines.push(Vec::new());
         } else if let Some(line) = lines.last_mut() {
-            line.push(render_inline(inline, palette, budget));
+            line.push(render_inline(inline, context, budget));
         }
         if budget.omitted {
             break;
@@ -681,7 +679,7 @@ fn inline_line_count(content: &[RichInline]) -> usize {
 
 fn render_inline(
     inline: &RichInline,
-    palette: RichTextPalette,
+    context: &RenderContext<'_>,
     budget: &mut RenderBudget,
 ) -> AnyElement {
     match inline {
@@ -691,7 +689,7 @@ fn render_inline(
                 element = match mark {
                     RichMark::Code => element
                         .font_family("monospace")
-                        .bg(palette.code_surface)
+                        .bg(context.palette.code_surface)
                         .px_1()
                         .rounded(px(2.)),
                     RichMark::Emphasis => element.italic(),
@@ -700,42 +698,60 @@ fn render_inline(
                     // Safe hrefs are intentionally not activated here: this
                     // adapter has no existing opener contract to delegate to.
                     RichMark::Link { .. } => element
-                        .text_color(palette.link)
+                        .text_color(context.palette.link)
                         .underline()
-                        .text_decoration_color(palette.link),
+                        .text_decoration_color(context.palette.link),
                 };
             }
             element.into_any_element()
         }
         RichInline::Mention { label, .. } => div()
-            .text_color(palette.info)
+            .text_color(context.palette.info)
             .child(if label.trim().is_empty() {
                 "Mention".to_owned()
             } else {
                 budget.text(label)
             })
             .into_any_element(),
-        RichInline::AttachmentCard(card) => render_attachment_card(card, palette, budget),
+        RichInline::AttachmentCard(card) => render_attachment_card(card, context, budget),
         RichInline::Placeholder { label } => div()
             .italic()
-            .text_color(palette.muted)
+            .text_color(context.palette.muted)
             .child(budget.text(label))
             .into_any_element(),
         RichInline::HardBreak => div().into_any_element(),
     }
 }
 
-/// Render an ADF inline attachment card as an inert, compact Jira-like chip.
+/// Render an ADF inline attachment card as either an inert chip or an action button.
 ///
-/// The domain model deliberately carries only attachment metadata. In particular, this
-/// renderer does not turn the card into a link or initiate a download; the explicit
-/// attachment list remains the only place where downloading is offered.
+/// The domain model deliberately carries only attachment metadata. The optional action
+/// keeps authenticated download behavior in the presentation layer while making the
+/// inline card discoverable and keyboard-accessible when that layer supplies one.
 fn render_attachment_card(
     card: &RichAttachmentCard,
-    palette: RichTextPalette,
+    context: &RenderContext<'_>,
     budget: &mut RenderBudget,
 ) -> AnyElement {
     let filename = budget.text(&bounded_attachment_filename(&card.filename));
+    let attachment_id = card.attachment_id.clone();
+    if let Some(action) = context.attachment_action.clone() {
+        return Button::new(ElementId::named_usize(
+            "rich-attachment-card",
+            render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal()),
+        ))
+        .compact()
+        .outline()
+        .max_w_full()
+        .max_w(px(520.))
+        .overflow_hidden()
+        .icon(IconName::File)
+        .label(filename)
+        .tooltip("Download attachment")
+        .on_click(move |_, window, cx| action.invoke(&attachment_id, window, cx))
+        .into_any_element();
+    }
+
     h_flex()
         .min_w_0()
         .max_w(px(520.))
@@ -744,9 +760,9 @@ fn render_attachment_card(
         .py(px(1.))
         .rounded(px(3.))
         .border_1()
-        .border_color(palette.border)
-        .bg(palette.code_surface)
-        .child(Icon::new(IconName::File).text_color(palette.muted))
+        .border_color(context.palette.border)
+        .bg(context.palette.code_surface)
+        .child(Icon::new(IconName::File).text_color(context.palette.muted))
         .child(
             div()
                 .min_w_0()
@@ -830,6 +846,7 @@ fn omitted_element(palette: RichTextPalette) -> AnyElement {
 struct RenderBudget {
     nodes: usize,
     image_ordinal: usize,
+    element_ordinal: usize,
     text_bytes: usize,
     omitted: bool,
 }
@@ -842,6 +859,12 @@ impl RenderBudget {
         }
         self.nodes += 1;
         true
+    }
+
+    fn next_element_ordinal(&mut self) -> usize {
+        let ordinal = self.element_ordinal.min(MAX_RENDER_NODES);
+        self.element_ordinal = self.element_ordinal.saturating_add(1);
+        ordinal
     }
 
     fn text(&mut self, value: &str) -> String {
@@ -888,6 +911,14 @@ fn insert_soft_wraps(value: &str) -> String {
     wrapped
 }
 
+/// Give each rendered surface an isolated ordinal namespace without putting
+/// untrusted Jira identifiers into GPUI element IDs.
+fn render_element_ordinal(surface_ordinal: usize, node_ordinal: usize) -> usize {
+    surface_ordinal
+        .saturating_mul(RENDER_SURFACE_STRIDE)
+        .saturating_add(node_ordinal.min(MAX_RENDER_NODES))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HeadingSize {
     TwoXl,
@@ -928,10 +959,11 @@ mod tests {
     use jira_domain::{RichAttachmentCard, RichBlock, RichImage, RichInline, RichTextDocument};
 
     use super::{
-        HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_TEXT_BYTES, RenderBudget, RichImageRenderState,
-        RichImageRenderStates, RichTextPalette, bounded_attachment_filename, heading_size,
-        image_render_state, inline_line_count, normalize_attachment_filename, render_rich_text,
-        rich_image_name,
+        HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_NODES, MAX_RENDER_TEXT_BYTES, RenderBudget,
+        RichAttachmentCardAction, RichImageRenderState, RichImageRenderStates, RichTextPalette,
+        bounded_attachment_filename, heading_size, image_render_state, inline_line_count,
+        normalize_attachment_filename, render_element_ordinal, render_rich_text,
+        render_rich_text_with_actions, rich_image_name,
     };
     use crate::diagnostics::{
         DecodeFallbackReason, DiagnosticEvent, DiagnosticFlow, DiagnosticsSink, ImageSource,
@@ -947,6 +979,16 @@ mod tests {
         assert_eq!(heading_size(5), HeadingSize::Sm);
         assert_eq!(heading_size(6), HeadingSize::Sm);
         assert_eq!(heading_size(0), HeadingSize::Sm);
+    }
+
+    #[test]
+    fn render_element_ordinals_are_distinct_per_surface_and_bounded() {
+        assert_ne!(render_element_ordinal(0, 12), render_element_ordinal(1, 12));
+        assert_eq!(
+            render_element_ordinal(0, MAX_RENDER_NODES + 1),
+            MAX_RENDER_NODES
+        );
+        assert_eq!(render_element_ordinal(usize::MAX, usize::MAX), usize::MAX);
     }
 
     #[test]
@@ -981,6 +1023,14 @@ mod tests {
             normalize_attachment_filename("  App\n\tkey\u{0000} data 💾  ").0,
             "App key� data 💾"
         );
+    }
+
+    #[test]
+    fn consecutive_inline_elements_consume_distinct_ordinals() {
+        let mut budget = RenderBudget::default();
+        let first = render_element_ordinal(2, budget.next_element_ordinal());
+        let second = render_element_ordinal(2, budget.next_element_ordinal());
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -1028,6 +1078,46 @@ mod tests {
         );
 
         let _ = rendered;
+    }
+
+    #[test]
+    fn attachment_card_renders_with_download_action() {
+        let document = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::AttachmentCard(
+                RichAttachmentCard {
+                    attachment_id: "10002".to_owned(),
+                    filename: "App key data.csv".to_owned(),
+                    mime_type: Some("text/csv".to_owned()),
+                    size_bytes: Some(128),
+                },
+            )])],
+            false,
+        );
+        let palette = RichTextPalette {
+            foreground: gpui::Hsla::default(),
+            muted: gpui::Hsla::default(),
+            border: gpui::Hsla::default(),
+            code_surface: gpui::Hsla::default(),
+            link: gpui::Hsla::default(),
+            info: gpui::Hsla::default(),
+            warning: gpui::Hsla::default(),
+            success: gpui::Hsla::default(),
+            danger: gpui::Hsla::default(),
+        };
+        let action = RichAttachmentCardAction::new(|attachment_id, _, _| {
+            assert_eq!(attachment_id, "10002");
+        });
+        let rendered = render_rich_text_with_actions(
+            &document,
+            palette,
+            &RichImageRenderStates::default(),
+            0,
+            ImageSource::ResolvedAdf,
+            Some(action.clone()),
+        );
+
+        let _ = rendered;
+        assert!(std::mem::size_of_val(&action) > 0);
     }
 
     #[test]

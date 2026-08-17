@@ -17,6 +17,7 @@ use gpui_component::{
     button::Button,
     button::ButtonVariants as _,
     combobox::{Combobox, ComboboxEvent, ComboboxState},
+    dialog::Cancel,
     h_flex, h_resizable,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     notification::Notification,
@@ -48,7 +49,8 @@ use crate::{
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
-        RichImageRenderState, RichImageRenderStates, RichTextPalette, render_rich_text,
+        RichAttachmentCardAction, RichImageRenderState, RichImageRenderStates, RichTextPalette,
+        render_rich_text, render_rich_text_with_actions,
     },
     sample_data::{sample_issues, sample_updates, sample_users},
     semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
@@ -341,6 +343,41 @@ fn attachment_issue_id(
     remote_issue: Option<&IssueId>,
 ) -> Option<IssueId> {
     remote_issue.cloned().or_else(|| selected_issue.cloned())
+}
+
+fn unique_attachment_for_id(
+    attachments: &[crate::presentation::AttachmentViewModel],
+    attachment_id: &str,
+) -> Option<crate::presentation::AttachmentViewModel> {
+    if attachment_id.trim().is_empty() {
+        return None;
+    }
+
+    let mut matches = attachments
+        .iter()
+        .filter(|attachment| !attachment.id.trim().is_empty() && attachment.id == attachment_id);
+    let attachment = matches.next()?.clone();
+    matches.next().is_none().then_some(attachment)
+}
+
+fn inline_attachment_for_download(
+    expected_issue_id: &IssueId,
+    active_issue_id: &IssueId,
+    attachments: &[crate::presentation::AttachmentViewModel],
+    attachment_id: &str,
+) -> Option<crate::presentation::AttachmentViewModel> {
+    (expected_issue_id == active_issue_id)
+        .then(|| unique_attachment_for_id(attachments, attachment_id))
+        .flatten()
+}
+
+fn should_close_status_filter_after_change(
+    previous: IssueStatusSelection,
+    next: IssueStatusSelection,
+) -> bool {
+    previous == IssueStatusSelection::All
+        && next.values().len() == 1
+        && next != IssueStatusSelection::All
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1905,6 +1942,35 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn download_inline_attachment(
+        &mut self,
+        expected_issue_id: &IssueId,
+        attachment_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (active_issue_id, attachments) = match &self.remote_lookup {
+            RemoteLookupState::Loaded { issue, detail, .. } => {
+                (issue.id.clone(), detail.attachments.as_slice())
+            }
+            _ => match (&self.selected_issue, &self.detail_state) {
+                (Some(issue_id), DetailState::Loaded(detail)) => {
+                    (issue_id.clone(), detail.attachments.as_slice())
+                }
+                _ => return,
+            },
+        };
+        let Some(attachment) = inline_attachment_for_download(
+            expected_issue_id,
+            &active_issue_id,
+            attachments,
+            attachment_id,
+        ) else {
+            return;
+        };
+        self.download_attachment(attachment, window, cx);
+    }
+
     fn invalidate_attachment_download(&mut self) {
         if let Some(cancellation) = self.attachment_download_cancellation.take() {
             cancellation.cancel();
@@ -2665,6 +2731,29 @@ impl Dashboard {
         Combobox::new(state)
             .w_full()
             .cleanable(true)
+            .footer(|_, cx| {
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Select one or more statuses"),
+                    )
+                    .child(
+                        Button::new("status-filter-done")
+                            .secondary()
+                            .outline()
+                            .compact()
+                            .label("Done")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(Cancel), cx);
+                            }),
+                    )
+            })
             .render_trigger(|trigger, _, _| {
                 let selection = IssueStatusSelection::from_values(
                     trigger.selection().iter().map(|(_, item)| *item.value()),
@@ -2908,15 +2997,37 @@ impl Dashboard {
                 .as_ref()
                 .and_then(|issue| issue.rich_description.clone()),
         };
+        let detail_issue_id = match &self.remote_lookup {
+            RemoteLookupState::Loaded { issue, .. } => Some(issue.id.clone()),
+            _ if matches!(&detail_state, DetailState::Loaded(_)) => self.selected_issue.clone(),
+            _ => None,
+        };
+        let inline_attachment_action = detail_issue_id.map(|expected_issue_id| {
+            let dashboard = cx.entity().downgrade();
+            RichAttachmentCardAction::new(move |attachment_id, window, app| {
+                if let Some(dashboard) = dashboard.upgrade() {
+                    let expected_issue_id = expected_issue_id.clone();
+                    dashboard.update(app, |this, cx| {
+                        this.download_inline_attachment(
+                            &expected_issue_id,
+                            attachment_id,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            })
+        });
         let description_content = rich_description
             .as_ref()
             .map(|document| {
-                render_rich_text(
+                render_rich_text_with_actions(
                     document,
                     self.rich_text_palette(cx),
                     self.active_image_states(),
                     0,
                     ImageSource::ResolvedAdf,
+                    inline_attachment_action.clone(),
                 )
             })
             .unwrap_or_else(|| div().text_sm().child(description).into_any_element());
@@ -3145,65 +3256,101 @@ impl Dashboard {
                 } else {
                     v_flex()
                         .min_w_0()
-                        .gap_3()
-                        .children(detail.comments.iter().enumerate().map(
-                            |(comment_index, comment)| {
-                                let body = comment
-                                    .rich_body
-                                    .as_ref()
-                                    .map(|document| {
-                                        render_rich_text(
-                                            document,
-                                            palette,
-                                            self.active_image_states(),
-                                            comment_index.saturating_add(1),
-                                            ImageSource::ResolvedAdf,
-                                        )
-                                    })
-                                    .unwrap_or_else(|| {
-                                        div()
-                                            .text_sm()
-                                            .child(comment.body.clone())
-                                            .into_any_element()
-                                    });
-                                v_flex()
-                                    .gap_1()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .child(
-                                        h_flex()
-                                            .min_w_0()
-                                            .flex_wrap()
-                                            .justify_between()
-                                            .child(
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .flex_wrap()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Issue"),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Jira exposes these comments at issue level"),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap_3()
+                                .border_l_1()
+                                .border_color(cx.theme().border)
+                                .pl_3()
+                                .children(detail.comments.iter().enumerate().map(
+                                    |(comment_index, comment)| {
+                                        let body = comment
+                                            .rich_body
+                                            .as_ref()
+                                            .map(|document| {
+                                                render_rich_text(
+                                                    document,
+                                                    palette,
+                                                    self.active_image_states(),
+                                                    comment_index.saturating_add(1),
+                                                    ImageSource::ResolvedAdf,
+                                                )
+                                            })
+                                            .unwrap_or_else(|| {
                                                 div()
-                                                    .min_w_0()
-                                                    .truncate()
                                                     .text_sm()
-                                                    .font_semibold()
-                                                    .child(comment.author.clone()),
+                                                    .child(comment.body.clone())
+                                                    .into_any_element()
+                                            });
+                                        v_flex()
+                                            .gap_1()
+                                            .p_3()
+                                            .rounded(cx.theme().radius)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .child(
+                                                h_flex()
+                                                    .min_w_0()
+                                                    .flex_wrap()
+                                                    .justify_between()
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .text_sm()
+                                                            .font_semibold()
+                                                            .child(comment.author.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_shrink_0()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(comment.created.clone()),
+                                                    ),
                                             )
                                             .child(
                                                 div()
-                                                    .flex_shrink_0()
                                                     .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
-                                                    .child(comment.created.clone()),
-                                            ),
-                                    )
-                                    .child(div().min_w_0().child(body))
-                                    .when_some(comment.updated.clone(), |this, updated| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("Updated {updated}")),
-                                        )
-                                    })
-                            },
-                        ))
+                                                    .child("On issue"),
+                                            )
+                                            .child(div().min_w_0().child(body))
+                                            .when_some(comment.updated.clone(), |this, updated| {
+                                                this.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(format!("Updated {updated}")),
+                                                )
+                                            })
+                                    },
+                                )),
+                        )
                         .into_any_element()
                 };
                 let attachments = if detail.attachments.is_empty() {
@@ -3272,7 +3419,9 @@ impl Dashboard {
                             .child(div().text_sm().font_semibold().child("Comments"))
                             .child(
                                 Button::new("refresh-comments")
-                                    .ghost()
+                                    .secondary()
+                                    .outline()
+                                    .compact()
                                     .label("Refresh comments")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.refresh_comments(cx)),
@@ -3388,6 +3537,9 @@ impl Dashboard {
                         .when(unknown_outcome, |this| {
                             this.child(
                                 Button::new("refresh-comments-after-unknown")
+                                    .secondary()
+                                    .outline()
+                                    .compact()
                                     .label("Refresh comments")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.refresh_comments(cx)),
@@ -3468,14 +3620,17 @@ impl Dashboard {
         self.status_subscriptions.push(cx.subscribe_in(
             &state,
             window,
-            |this, _, event: &ComboboxEvent<SearchableVec<StatusOption>>, _, cx| {
+            |this, _, event: &ComboboxEvent<SearchableVec<StatusOption>>, window, cx| {
                 let ComboboxEvent::Change(values) = event else {
                     return;
                 };
-                this.set_status_filter(
-                    IssueStatusSelection::from_values(values.iter().copied()),
-                    cx,
-                );
+                let next = IssueStatusSelection::from_values(values.iter().copied());
+                let close_after_change =
+                    should_close_status_filter_after_change(this.status_filter, next);
+                this.set_status_filter(next, cx);
+                if close_after_change {
+                    window.dispatch_action(Box::new(Cancel), cx);
+                }
             },
         ));
         self.status_combobox = Some(state);
@@ -3785,6 +3940,74 @@ mod tests {
                 gpui_component::IndexPath::new(2),
             ]
         );
+    }
+
+    #[test]
+    fn status_filter_closes_only_for_first_single_selection() {
+        assert!(should_close_status_filter_after_change(
+            IssueStatusSelection::All,
+            IssueStatusSelection::ToDo,
+        ));
+        assert!(!should_close_status_filter_after_change(
+            IssueStatusSelection::All,
+            IssueStatusSelection::from_values([
+                IssueStatusSelection::ToDo,
+                IssueStatusSelection::Done,
+            ]),
+        ));
+        assert!(!should_close_status_filter_after_change(
+            IssueStatusSelection::ToDo,
+            IssueStatusSelection::from_values([
+                IssueStatusSelection::ToDo,
+                IssueStatusSelection::Done,
+            ]),
+        ));
+    }
+
+    #[test]
+    fn inline_attachment_download_requires_one_nonempty_exact_id() {
+        let attachment = |id: &str| crate::presentation::AttachmentViewModel {
+            id: id.to_owned(),
+            filename: "report.csv".to_owned(),
+            mime_type: "text/csv".to_owned(),
+            size_bytes: 12,
+            size: "12 B".to_owned(),
+        };
+        let attachments = vec![attachment("attachment-1"), attachment("attachment-2")];
+        let current_issue = IssueId::new("100").expect("issue");
+        let stale_issue = IssueId::new("200").expect("issue");
+        assert_eq!(
+            inline_attachment_for_download(
+                &current_issue,
+                &current_issue,
+                &attachments,
+                "attachment-1",
+            )
+            .expect("current issue attachment")
+            .id,
+            "attachment-1"
+        );
+        assert!(
+            inline_attachment_for_download(
+                &current_issue,
+                &stale_issue,
+                &attachments,
+                "attachment-1",
+            )
+            .is_none()
+        );
+        assert_eq!(
+            unique_attachment_for_id(&attachments, "attachment-1")
+                .expect("exact attachment")
+                .id,
+            "attachment-1"
+        );
+        assert!(unique_attachment_for_id(&attachments, "").is_none());
+        assert!(unique_attachment_for_id(&attachments, "missing").is_none());
+        let duplicate = vec![attachment("attachment-1"), attachment("attachment-1")];
+        assert!(unique_attachment_for_id(&duplicate, "attachment-1").is_none());
+        let empty_id = vec![attachment("")];
+        assert!(unique_attachment_for_id(&empty_id, "").is_none());
     }
 
     #[test]
