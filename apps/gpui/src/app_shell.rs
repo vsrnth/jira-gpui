@@ -3,10 +3,10 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div, px,
+    Pixels, Render, Styled as _, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, StyledExt as _, TitleBar, button::Button,
+    ActiveTheme as _, Disableable as _, Root, StyledExt as _, Theme, TitleBar, button::Button,
     button::ButtonVariants as _, h_flex, input::Input, input::InputState,
     scroll::ScrollableElement as _, v_flex,
 };
@@ -14,6 +14,13 @@ use gpui_component::{
 use crate::Dashboard;
 use crate::config::{LiveSession, StartupSelection, live_session_from_manual_configuration};
 use crate::responsive::layout_for_width;
+
+const NOTIFICATION_SIDE_MARGIN: f32 = 16.0;
+
+fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) -> f32 {
+    let available_width = (viewport_width - NOTIFICATION_SIDE_MARGIN * 2.0).max(0.0);
+    preferred_width.min(available_width)
+}
 
 /// The top-level view: either the configured dashboard or the first-run form.
 pub struct AppShell {
@@ -24,6 +31,7 @@ pub struct AppShell {
     connection_error: Option<String>,
     connection_status: Option<String>,
     connecting: bool,
+    notification_width: Pixels,
 }
 
 impl AppShell {
@@ -49,6 +57,7 @@ impl AppShell {
             connection_error,
             connection_status,
             connecting: false,
+            notification_width: cx.theme().notification.width,
         }
     }
 
@@ -262,14 +271,22 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let notification_width = notification_width_for_viewport(
+            window.viewport_size().width.as_f32(),
+            self.notification_width.as_f32(),
+        );
+        Theme::global_mut(cx).notification.width = px(notification_width);
+        let notification_layer = Root::render_notification_layer(window, cx);
         let content = if let Some(dashboard) = &self.dashboard {
             div()
+                .min_w_0()
                 .min_h_0()
                 .flex_1()
                 .child(dashboard.clone())
                 .into_any_element()
         } else {
             div()
+                .min_w_0()
                 .min_h_0()
                 .flex_1()
                 .child(self.render_connection_form(window, cx))
@@ -278,8 +295,28 @@ impl Render for AppShell {
 
         v_flex()
             .size_full()
+            .min_w_0()
             .child(TitleBar::new().child(div().text_sm().font_semibold().child("Jira Desk")))
             .child(content)
+            .when_some(notification_layer, |this, layer| this.child(layer))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notification_width_for_viewport;
+
+    #[test]
+    fn notification_width_preserves_margins_on_narrow_viewports() {
+        assert_eq!(notification_width_for_viewport(320.0, 382.0), 288.0);
+        assert_eq!(notification_width_for_viewport(360.0, 382.0), 328.0);
+        assert_eq!(notification_width_for_viewport(390.0, 382.0), 358.0);
+    }
+
+    #[test]
+    fn notification_width_caps_at_preferred_desktop_width() {
+        assert_eq!(notification_width_for_viewport(1_024.0, 382.0), 382.0);
+        assert_eq!(notification_width_for_viewport(1_024.0, 300.0), 300.0);
     }
 }

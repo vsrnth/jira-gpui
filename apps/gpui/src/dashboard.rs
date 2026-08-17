@@ -4,15 +4,19 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    actions, div, px,
+    div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, WindowExt as _,
     button::Button,
     button::ButtonVariants as _,
-    h_flex,
+    combobox::{Combobox, ComboboxEvent, ComboboxState},
+    h_flex, h_resizable,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    menu::DropdownMenu as _,
+    notification::Notification,
+    resizable_panel,
+    scroll::ScrollableElement as _,
+    searchable_list::{SearchableListItem, SearchableVec},
     v_flex,
 };
 use jira_application::{
@@ -20,26 +24,16 @@ use jira_application::{
     JiraReadPort, SyncMode,
 };
 
-actions!(
-    jira_dashboard,
-    [
-        StatusAll,
-        StatusToDo,
-        StatusInProgress,
-        StatusDone,
-        StatusUncategorized
-    ]
-);
 use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     presentation::{
-        IssueDetailViewModel, IssueStatusFilter, IssueViewModel, UpdateViewModel,
-        issue_views_for_filter,
+        IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
+        UpdateViewModel, issue_views_for_filter,
     },
-    responsive::{LayoutMode, layout_for_width},
+    responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{RichTextPalette, render_rich_text},
     sample_data::{sample_issues, sample_updates, sample_users},
     semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
@@ -141,6 +135,57 @@ fn authenticated_identity(user: Option<User>) -> (Vec<User>, Option<AccountId>) 
 enum Section {
     Issues,
     Updates,
+}
+
+struct RefreshNotification;
+struct CommentNotification;
+
+#[derive(Clone, Debug)]
+struct StatusOption(IssueStatusSelection);
+
+impl SearchableListItem for StatusOption {
+    type Value = IssueStatusSelection;
+
+    fn title(&self) -> gpui::SharedString {
+        self.0.label().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
+fn status_filter_trigger_label(selection: IssueStatusSelection) -> String {
+    let count = selection.values().len();
+    if count > 1 {
+        format!("{count} statuses")
+    } else {
+        selection.label().to_owned()
+    }
+}
+
+fn status_options() -> SearchableVec<StatusOption> {
+    SearchableVec::new([
+        StatusOption(IssueStatusSelection::ToDo),
+        StatusOption(IssueStatusSelection::InProgress),
+        StatusOption(IssueStatusSelection::Done),
+        StatusOption(IssueStatusSelection::Uncategorized),
+    ])
+}
+
+fn status_filter_indices(selection: IssueStatusSelection) -> Vec<gpui_component::IndexPath> {
+    let selected = selection.values();
+    [
+        IssueStatusSelection::ToDo,
+        IssueStatusSelection::InProgress,
+        IssueStatusSelection::Done,
+        IssueStatusSelection::Uncategorized,
+    ]
+    .into_iter()
+    .enumerate()
+    .filter(|(_, value)| selected.contains(value))
+    .map(|(index, _)| gpui_component::IndexPath::new(index))
+    .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +328,8 @@ pub struct Dashboard {
     automatic_polling_paused: bool,
     authenticated_account: Option<AccountId>,
     status_filter: IssueStatusFilter,
+    status_combobox: Option<Entity<ComboboxState<SearchableVec<StatusOption>>>>,
+    status_subscriptions: Vec<Subscription>,
     search_query: String,
     search_input: Option<Entity<InputState>>,
     search_subscriptions: Vec<Subscription>,
@@ -337,6 +384,8 @@ impl Dashboard {
             automatic_polling_paused: false,
             authenticated_account: None,
             status_filter: IssueStatusFilter::All,
+            status_combobox: None,
+            status_subscriptions: Vec::new(),
             search_query: String::new(),
             search_input: None,
             search_subscriptions: Vec::new(),
@@ -385,6 +434,8 @@ impl Dashboard {
             automatic_polling_paused: false,
             authenticated_account: initial_authenticated_account,
             status_filter: IssueStatusFilter::All,
+            status_combobox: None,
+            status_subscriptions: Vec::new(),
             search_query: String::new(),
             search_input: None,
             search_subscriptions: Vec::new(),
@@ -846,7 +897,7 @@ impl Dashboard {
         cx.notify();
     }
 
-    fn post_comment(&mut self, cx: &mut Context<Self>) {
+    fn post_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target_issue_id) = self.comment_target_issue().map(|issue| issue.id.clone())
         else {
             return;
@@ -862,6 +913,11 @@ impl Dashboard {
                 message: "Comment not posted · live Jira workspace is not ready".to_owned(),
                 unknown_outcome: false,
             };
+            window.push_notification(
+                Notification::error("Comment not posted · live Jira workspace is not ready")
+                    .id::<CommentNotification>(),
+                cx,
+            );
             cx.notify();
             return;
         };
@@ -872,11 +928,11 @@ impl Dashboard {
         self.comment_state = CommentPostState::Posting {
             issue_id: issue_id.clone(),
         };
-        let task = cx.spawn(async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             let result = workspace
                 .create_comment(IssueLocator::Id(issue_id.clone()), body, &cancellation)
                 .await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.comment_generation != generation
                     || !comment_target_is_current(
                         match &this.remote_lookup {
@@ -898,6 +954,11 @@ impl Dashboard {
                         this.comment_input = None;
                         this.comment_subscriptions.clear();
                         this.comment_state = CommentPostState::Idle;
+                        window.push_notification(
+                            Notification::success("Comment posted to Jira.")
+                                .id::<CommentNotification>(),
+                            cx,
+                        );
                         if matches!(
                             &this.remote_lookup,
                             RemoteLookupState::Loaded { issue, .. } if issue.id == issue_id
@@ -909,6 +970,10 @@ impl Dashboard {
                     }
                     Err(error) => {
                         let (message, unknown_outcome) = comment_error_message(&error);
+                        window.push_notification(
+                            Notification::error(message).id::<CommentNotification>(),
+                            cx,
+                        );
                         this.comment_state = CommentPostState::Error {
                             issue_id: issue_id.clone(),
                             message: message.to_owned(),
@@ -955,12 +1020,17 @@ impl Dashboard {
         self.updates = updates;
     }
 
-    fn begin_refresh(&mut self, cx: &mut Context<Self>) {
+    fn begin_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.operation_in_progress {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
             self.sync_message = "Refresh unavailable · local workspace is not ready".to_owned();
+            window.push_notification(
+                Notification::error("Refresh unavailable · local workspace is not ready")
+                    .id::<RefreshNotification>(),
+                cx,
+            );
             cx.notify();
             return;
         };
@@ -969,18 +1039,31 @@ impl Dashboard {
         self.sync_message = "Refreshing Jira…".to_owned();
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = workspace.refresh(&cancellation).await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.operation_in_progress = false;
                 match result {
                     Ok(outcome) => {
+                        let issue_count = outcome.cached.issues.len();
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Refresh complete · {issue_count} issues"
+                            ))
+                            .id::<RefreshNotification>(),
+                            cx,
+                        );
                         this.sync_message = refresh_complete_message(&outcome);
                         this.apply_cached(outcome.cached, cx);
                         this.start_automatic_polling(cx);
                     }
                     Err(error) => {
-                        this.sync_message = safe_sync_error(&error).to_owned();
+                        let message = safe_sync_error(&error);
+                        window.push_notification(
+                            Notification::error(message).id::<RefreshNotification>(),
+                            cx,
+                        );
+                        this.sync_message = message.to_owned();
                     }
                 }
                 cx.notify();
@@ -1309,7 +1392,10 @@ impl Dashboard {
                             } else {
                                 "Refresh"
                             })
-                            .on_click(cx.listener(|this, _, _, cx| this.begin_refresh(cx))),
+                            .loading(self.operation_in_progress)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.begin_refresh(window, cx)),
+                            ),
                     ),
             )
             .child(
@@ -1326,8 +1412,8 @@ impl Dashboard {
         let mobile = layout.is_mobile();
         let issue_list = v_flex()
             .h_full()
-            .when(mobile, |this| this.w_full())
-            .when(!mobile, |this| this.w(px(layout.issue_list_width())))
+            .w_full()
+            .min_w_0()
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().border)
@@ -1417,7 +1503,7 @@ impl Dashboard {
                     .min_h_0()
                     .flex_1()
                     .when(mobile, |this| this.w_full())
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .when_some(self.remote_lookup_view(), |this, issue| {
                         this.child(self.issue_row_with_label(
                             &issue,
@@ -1434,85 +1520,74 @@ impl Dashboard {
             )
             .into_any_element();
 
-        h_flex()
-            .size_full()
-            .min_w_0()
-            .on_action(cx.listener(|this, _: &StatusAll, _, cx| {
-                this.set_status_filter(IssueStatusFilter::All, cx)
-            }))
-            .on_action(cx.listener(|this, _: &StatusToDo, _, cx| {
-                this.set_status_filter(IssueStatusFilter::ToDo, cx)
-            }))
-            .on_action(cx.listener(|this, _: &StatusInProgress, _, cx| {
-                this.set_status_filter(IssueStatusFilter::InProgress, cx)
-            }))
-            .on_action(cx.listener(|this, _: &StatusDone, _, cx| {
-                this.set_status_filter(IssueStatusFilter::Done, cx)
-            }))
-            .on_action(cx.listener(|this, _: &StatusUncategorized, _, cx| {
-                this.set_status_filter(IssueStatusFilter::Uncategorized, cx)
-            }))
-            .when(mobile && self.mobile_detail_open, |this| {
-                this.child(
-                    v_flex()
-                        .size_full()
-                        .min_w_0()
+        let panes = match issues_pane_mode(layout, self.mobile_detail_open) {
+            IssuesPaneMode::ListAndDetail => {
+                let (list_min, list_max) = layout.issue_list_range();
+                let detail = v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .child(self.issue_detail(layout, cx));
+                h_resizable(layout.resizable_id())
+                    .child(
+                        resizable_panel()
+                            .size(px(layout.issue_list_width()))
+                            .size_range(px(list_min)..px(list_max))
+                            .flex_none()
+                            .child(issue_list),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size_range(px(layout.detail_min_width())..px(4_096.))
+                            .child(detail),
+                    )
+                    .into_any_element()
+            }
+            IssuesPaneMode::ListOnly => issue_list,
+            IssuesPaneMode::DetailOnly => v_flex()
+                .size_full()
+                .min_w_0()
+                .child(
+                    h_flex()
+                        .h(px(44.))
+                        .px_3()
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
                         .child(
-                            h_flex()
-                                .h(px(44.))
-                                .px_3()
-                                .flex_shrink_0()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .child(
-                                    Button::new("mobile-detail-back")
-                                        .compact()
-                                        .ghost()
-                                        .label("Back to issues")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.mobile_detail_open = false;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(self.issue_detail(layout, cx)),
+                            Button::new("mobile-detail-back")
+                                .compact()
+                                .ghost()
+                                .label("Back to issues")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.mobile_detail_open = false;
+                                    cx.notify();
+                                })),
+                        ),
                 )
-            })
-            .when(!mobile || !self.mobile_detail_open, |this| {
-                this.child(issue_list)
-            })
+                .child(self.issue_detail(layout, cx))
+                .into_any_element(),
+        };
+
+        h_flex().size_full().min_w_0().child(panes)
     }
 
     fn status_filter_dropdown(&self) -> impl IntoElement {
-        let selected = self.status_filter;
-        Button::new("status-filter-menu")
-            .label(selected.label())
-            .dropdown_menu(move |menu, _, _| {
-                menu.menu_with_check(
-                    IssueStatusFilter::All.label(),
-                    selected == IssueStatusFilter::All,
-                    Box::new(StatusAll),
-                )
-                .menu_with_check(
-                    IssueStatusFilter::ToDo.label(),
-                    selected == IssueStatusFilter::ToDo,
-                    Box::new(StatusToDo),
-                )
-                .menu_with_check(
-                    IssueStatusFilter::InProgress.label(),
-                    selected == IssueStatusFilter::InProgress,
-                    Box::new(StatusInProgress),
-                )
-                .menu_with_check(
-                    IssueStatusFilter::Done.label(),
-                    selected == IssueStatusFilter::Done,
-                    Box::new(StatusDone),
-                )
-                .menu_with_check(
-                    IssueStatusFilter::Uncategorized.label(),
-                    selected == IssueStatusFilter::Uncategorized,
-                    Box::new(StatusUncategorized),
-                )
+        let state = self
+            .status_combobox
+            .as_ref()
+            .expect("status combobox initialized before issue rendering");
+        Combobox::new(state)
+            .w_full()
+            .cleanable(true)
+            .render_trigger(|trigger, _, _| {
+                let selection = IssueStatusSelection::from_values(
+                    trigger.selection().iter().map(|(_, item)| *item.value()),
+                );
+                div()
+                    .min_w_0()
+                    .w_full()
+                    .truncate()
+                    .child(status_filter_trigger_label(selection))
             })
     }
 
@@ -2091,6 +2166,12 @@ impl Dashboard {
             .gap_2()
             .child(div().text_sm().font_semibold().child("Add comment"))
             .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Plain text accepted · sent as safe Jira ADF"),
+            )
+            .child(
                 Textarea::new(input)
                     .w_full()
                     .aria_label("Comment text")
@@ -2131,7 +2212,11 @@ impl Dashboard {
                             Button::new("post-comment-now")
                                 .primary()
                                 .label("Post now")
-                                .on_click(cx.listener(|this, _, _, cx| this.post_comment(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.post_comment(window, cx)
+                                    }),
+                                ),
                         )
                         .child(Button::new("cancel-comment").label("Cancel").on_click(
                             cx.listener(|this, _, _, cx| this.cancel_comment_confirmation(cx)),
@@ -2229,6 +2314,33 @@ impl Dashboard {
             .text_xs()
             .child(label)
             .into_any_element()
+    }
+
+    fn ensure_status_combobox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.status_combobox.is_some() {
+            return;
+        }
+
+        let selected_indices = status_filter_indices(self.status_filter);
+        let state = cx.new(|cx| {
+            ComboboxState::new(status_options(), selected_indices, window, cx)
+                .multiple(true)
+                .searchable(false)
+        });
+        self.status_subscriptions.push(cx.subscribe_in(
+            &state,
+            window,
+            |this, _, event: &ComboboxEvent<SearchableVec<StatusOption>>, _, cx| {
+                let ComboboxEvent::Change(values) = event else {
+                    return;
+                };
+                this.set_status_filter(
+                    IssueStatusSelection::from_values(values.iter().copied()),
+                    cx,
+                );
+            },
+        ));
+        self.status_combobox = Some(state);
     }
 
     fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2411,7 +2523,6 @@ impl Dashboard {
             .w_full()
             .h(px(48.))
             .flex_shrink_0()
-            .gap_2()
             .px_2()
             .items_center()
             .border_b_1()
@@ -2443,6 +2554,7 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_status_combobox(window, cx);
         self.ensure_search_input(window, cx);
         self.ensure_comment_input(window, cx);
         let layout = layout_for_width(f32::from(window.viewport_size().width));
@@ -2456,11 +2568,12 @@ impl Render for Dashboard {
             .min_w_0()
             .flex_1()
             .child(self.render_header(layout, cx))
-            .child(div().min_h_0().flex_1().child(content));
+            .child(div().min_w_0().min_h_0().flex_1().child(content));
 
         if layout.is_mobile() {
             v_flex()
                 .size_full()
+                .min_w_0()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(self.render_mobile_nav(cx))
@@ -2468,6 +2581,7 @@ impl Render for Dashboard {
         } else {
             h_flex()
                 .size_full()
+                .min_w_0()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(self.render_sidebar(layout, cx))
@@ -2481,6 +2595,59 @@ mod tests {
     use super::*;
     use crate::presentation::normalized_issue_key;
     use crate::sample_data::{sample_issues, sample_users};
+    use gpui_component::searchable_list::SearchableListDelegate as _;
+
+    #[test]
+    fn status_filter_trigger_summary_is_deterministic() {
+        assert_eq!(
+            status_filter_trigger_label(IssueStatusSelection::All),
+            "All statuses"
+        );
+        assert_eq!(
+            status_filter_trigger_label(IssueStatusSelection::Done),
+            "Done"
+        );
+        assert_eq!(
+            status_filter_trigger_label(IssueStatusSelection::from_values([
+                IssueStatusSelection::Done,
+                IssueStatusSelection::ToDo,
+            ])),
+            "2 statuses"
+        );
+    }
+
+    #[test]
+    fn status_options_keep_combobox_values_and_labels_aligned() {
+        let options = status_options();
+        let values = [
+            IssueStatusSelection::ToDo,
+            IssueStatusSelection::InProgress,
+            IssueStatusSelection::Done,
+            IssueStatusSelection::Uncategorized,
+        ];
+        for (index, expected) in values.into_iter().enumerate() {
+            let item = options
+                .item(gpui_component::IndexPath::new(index))
+                .expect("status option");
+            assert_eq!(*item.value(), expected);
+            assert_eq!(item.title(), expected.label());
+        }
+    }
+
+    #[test]
+    fn status_filter_initial_indices_follow_presentation_order() {
+        assert_eq!(status_filter_indices(IssueStatusSelection::All), Vec::new());
+        assert_eq!(
+            status_filter_indices(IssueStatusSelection::from_values([
+                IssueStatusSelection::Done,
+                IssueStatusSelection::ToDo,
+            ])),
+            vec![
+                gpui_component::IndexPath::new(0),
+                gpui_component::IndexPath::new(2),
+            ]
+        );
+    }
 
     #[test]
     fn authenticated_user_is_seeded_for_display_mapping_and_account_filtering() {

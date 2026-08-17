@@ -23,11 +23,14 @@ impl IssueMapper {
         site_id: JiraSiteId,
         issue: JiraIssue,
     ) -> Result<IssueDetailCore, MappingError> {
-        let rich_description = issue.fields.description.as_ref().and_then(parse_adf);
-        let description = rich_description
+        let (rich_description, description) = issue
+            .fields
+            .description
             .as_ref()
-            .map(RichTextDocument::plain_text)
-            .filter(|text| !text.is_empty());
+            .and_then(visible_adf)
+            .map_or((None, None), |(document, text)| {
+                (Some(document), Some(text))
+            });
         let attachments = issue
             .fields
             .attachment
@@ -251,13 +254,17 @@ fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, Map
 }
 
 fn map_comment(comment: JiraComment) -> Result<IssueComment, MappingError> {
-    let rich_body = comment.body.as_ref().and_then(parse_adf);
-    let body = rich_body
-        .as_ref()
-        .map(RichTextDocument::plain_text)
-        .filter(|text| !text.is_empty())
-        .or_else(|| comment.body.as_ref().and_then(adf_comment_text))
-        .ok_or(MappingError::MissingRequiredField("comment body"))?;
+    let (rich_body, body) = match comment.body.as_ref().and_then(visible_adf) {
+        Some((document, text)) => (Some(document), text),
+        None => (
+            None,
+            comment
+                .body
+                .as_ref()
+                .and_then(adf_comment_text)
+                .ok_or(MappingError::MissingRequiredField("comment body"))?,
+        ),
+    };
     let author = comment.author.map(map_comment_author).transpose()?;
     let created_at = parse_timestamp(comment.created)?;
     let updated_at = comment.updated.map(parse_timestamp).transpose()?;
@@ -304,6 +311,12 @@ pub fn parse_adf(value: &Value) -> Option<RichTextDocument> {
     let mut state = AdfParserState::default();
     let blocks = parse_blocks(content, 1, &mut state);
     Some(RichTextDocument::new(blocks, state.truncated))
+}
+
+fn visible_adf(value: &Value) -> Option<(RichTextDocument, String)> {
+    let document = parse_adf(value)?;
+    let text = document.plain_text();
+    (!text.is_empty()).then_some((document, text))
 }
 
 #[derive(Default)]
@@ -930,6 +943,33 @@ mod tests {
         assert_eq!(detail.attachments.len(), 1);
         assert_eq!(detail.attachments[0].id, "10001");
         assert_eq!(detail.attachments[0].size_bytes, 2048);
+    }
+
+    #[test]
+    fn drops_rich_content_when_issue_or_comment_adf_has_no_visible_text() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc",
+            "version": 1,
+            "content": []
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+        assert!(detail.issue.description_text.is_none());
+        assert!(detail.issue.rich_description.is_none());
+
+        let mut page: JiraCommentPage =
+            serde_json::from_str(include_str!("../tests/fixtures/comments-page.json")).unwrap();
+        page.comments[0].body = Some(serde_json::json!({
+            "type": "doc",
+            "version": 1,
+            "content": [{"type": "paragraph", "content": []}]
+        }));
+        let mapped = IssueMapper.map_comment_page(page).unwrap();
+        assert_eq!(mapped.comments[0].body, UNSUPPORTED_CONTENT);
+        assert!(mapped.comments[0].rich_body.is_none());
     }
 
     #[test]

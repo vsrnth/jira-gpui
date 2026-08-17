@@ -11,6 +11,27 @@ pub(crate) enum LayoutMode {
     Wide,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IssuesPaneMode {
+    ListOnly,
+    DetailOnly,
+    ListAndDetail,
+}
+
+/// Selects which issue panes the dashboard should attach for the current mode.
+///
+pub(crate) fn issues_pane_mode(layout: LayoutMode, mobile_detail_open: bool) -> IssuesPaneMode {
+    if layout.is_mobile() {
+        if mobile_detail_open {
+            IssuesPaneMode::DetailOnly
+        } else {
+            IssuesPaneMode::ListOnly
+        }
+    } else {
+        IssuesPaneMode::ListAndDetail
+    }
+}
+
 pub(crate) fn layout_for_width(width: f32) -> LayoutMode {
     if width >= 1_200.0 {
         LayoutMode::Wide
@@ -49,6 +70,33 @@ impl LayoutMode {
         }
     }
 
+    pub(crate) fn issue_list_range(self) -> (f32, f32) {
+        match self {
+            Self::Compact => (280.0, 420.0),
+            Self::Standard => (320.0, 520.0),
+            Self::Wide => (360.0, 640.0),
+            Self::Mobile => (0.0, 0.0),
+        }
+    }
+
+    pub(crate) fn detail_min_width(self) -> f32 {
+        match self {
+            Self::Compact => 280.0,
+            Self::Standard => 320.0,
+            Self::Wide => 360.0,
+            Self::Mobile => 0.0,
+        }
+    }
+
+    pub(crate) fn resizable_id(self) -> &'static str {
+        match self {
+            Self::Compact => "issues-panes-compact",
+            Self::Standard => "issues-panes-standard",
+            Self::Wide => "issues-panes-wide",
+            Self::Mobile => "issues-panes-mobile-unused",
+        }
+    }
+
     pub(crate) fn detail_padding(self) -> f32 {
         match self {
             Self::Wide => 24.0,
@@ -73,7 +121,45 @@ impl LayoutMode {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutMode, layout_for_width};
+    use super::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width};
+
+    #[test]
+    fn issue_panes_keep_desktop_detail_visible() {
+        for layout in [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide] {
+            assert_eq!(
+                issues_pane_mode(layout, false),
+                IssuesPaneMode::ListAndDetail
+            );
+            assert_eq!(
+                issues_pane_mode(layout, true),
+                IssuesPaneMode::ListAndDetail
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_issue_panes_switch_between_list_and_detail() {
+        assert_eq!(
+            issues_pane_mode(LayoutMode::Mobile, false),
+            IssuesPaneMode::ListOnly
+        );
+        assert_eq!(
+            issues_pane_mode(LayoutMode::Mobile, true),
+            IssuesPaneMode::DetailOnly
+        );
+    }
+
+    #[test]
+    fn desktop_resizable_defaults_are_within_bounded_ranges() {
+        let layouts = [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide];
+        for layout in layouts {
+            let (min, max) = layout.issue_list_range();
+            assert!(min <= layout.issue_list_width());
+            assert!(layout.issue_list_width() <= max);
+            assert!(layout.detail_min_width() <= max);
+            assert!(!layout.resizable_id().is_empty());
+        }
+    }
 
     #[test]
     fn breakpoints_are_inclusive_at_the_wider_mode() {

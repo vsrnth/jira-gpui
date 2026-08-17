@@ -11,36 +11,80 @@ use jira_domain::{
 };
 use time::{Date, OffsetDateTime};
 
+/// A compact, presentation-only selection of Jira status categories.
+///
+/// The empty selection means all statuses. Non-empty selections are ORed, which makes this type
+/// directly usable as the value of a multi-select Combobox. Bit masks also make duplicate values
+/// harmless and preserve a deterministic category order for trigger rendering.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum IssueStatusFilter {
-    #[default]
-    All,
-    ToDo,
-    InProgress,
-    Done,
-    Uncategorized,
-}
+pub struct IssueStatusSelection(u8);
 
-impl IssueStatusFilter {
+/// Compatibility name retained while callers migrate from the former single-value contract.
+pub type IssueStatusFilter = IssueStatusSelection;
+
+#[allow(non_upper_case_globals)]
+impl IssueStatusSelection {
+    const TO_DO_MASK: u8 = 1 << 0;
+    const IN_PROGRESS_MASK: u8 = 1 << 1;
+    const DONE_MASK: u8 = 1 << 2;
+    const UNCATEGORIZED_MASK: u8 = 1 << 3;
+    const KNOWN_MASK: u8 =
+        Self::TO_DO_MASK | Self::IN_PROGRESS_MASK | Self::DONE_MASK | Self::UNCATEGORIZED_MASK;
+
+    /// Empty selection: no status restriction.
+    pub const All: Self = Self(0);
+    pub const ToDo: Self = Self(Self::TO_DO_MASK);
+    pub const InProgress: Self = Self(Self::IN_PROGRESS_MASK);
+    pub const Done: Self = Self(Self::DONE_MASK);
+    pub const Uncategorized: Self = Self(Self::UNCATEGORIZED_MASK);
+
+    /// Combines Combobox values into one normalized selection.
+    pub fn from_values(values: impl IntoIterator<Item = Self>) -> Self {
+        let mask = values.into_iter().fold(0, |mask, value| mask | value.0) & Self::KNOWN_MASK;
+        Self(mask)
+    }
+
+    /// Returns selected singleton values in stable presentation order.
+    pub fn values(self) -> Vec<Self> {
+        [
+            Self::ToDo,
+            Self::InProgress,
+            Self::Done,
+            Self::Uncategorized,
+        ]
+        .into_iter()
+        .filter(|value| self.0 & value.0 != 0)
+        .collect()
+    }
+
+    pub fn is_all(self) -> bool {
+        self.0 == 0
+    }
+
     pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All statuses",
-            Self::ToDo => "To do",
-            Self::InProgress => "In progress",
-            Self::Done => "Done",
-            Self::Uncategorized => "Uncategorized",
+        match self.0 {
+            0 => "All statuses",
+            Self::TO_DO_MASK => "To do",
+            Self::IN_PROGRESS_MASK => "In progress",
+            Self::DONE_MASK => "Done",
+            Self::UNCATEGORIZED_MASK => "Uncategorized",
+            _ => "Multiple statuses",
         }
     }
 
     pub fn matches(self, category: &str) -> bool {
-        let category = category.trim().to_ascii_lowercase();
-        match self {
-            Self::All => true,
-            Self::ToDo => category == "to do",
-            Self::InProgress => category == "in progress",
-            Self::Done => category == "done",
-            Self::Uncategorized => category.is_empty(),
+        if self.is_all() {
+            return true;
         }
+        let category = category.trim().to_ascii_lowercase();
+        let value = match category.as_str() {
+            "to do" => Self::ToDo,
+            "in progress" => Self::InProgress,
+            "done" => Self::Done,
+            "" => Self::Uncategorized,
+            _ => return false,
+        };
+        self.0 & value.0 != 0
     }
 }
 
@@ -50,6 +94,7 @@ pub fn issue_views_for_filter(
     filter: IssueStatusFilter,
     search: &str,
 ) -> Vec<IssueViewModel> {
+    let filter = IssueStatusSelection::from_values(filter.values());
     let search = search.trim().to_ascii_lowercase();
     let mut identities = IdentityDirectory::from_users(users);
     for issue in issues {
@@ -511,6 +556,55 @@ mod tests {
         assert!(IssueStatusFilter::Uncategorized.matches(""));
         assert!(!IssueStatusFilter::Uncategorized.matches("In Review"));
         assert!(IssueStatusFilter::Uncategorized.matches("  "));
+    }
+
+    #[test]
+    fn status_selection_empty_means_all() {
+        let selection = IssueStatusSelection::from_values([]);
+
+        assert_eq!(selection, IssueStatusSelection::All);
+        assert!(selection.matches("To Do"));
+        assert!(selection.matches("In Progress"));
+        assert!(selection.matches("Done"));
+        assert!(selection.matches(""));
+    }
+
+    #[test]
+    fn status_selection_matches_one_category() {
+        let selection = IssueStatusSelection::from_values([IssueStatusSelection::Done]);
+
+        assert!(selection.matches("done"));
+        assert!(!selection.matches("to do"));
+        assert_eq!(selection.values(), vec![IssueStatusSelection::Done]);
+        assert_eq!(selection.label(), "Done");
+    }
+
+    #[test]
+    fn status_selection_ors_multiple_categories_and_normalizes_duplicates() {
+        let selection = IssueStatusSelection::from_values([
+            IssueStatusSelection::Done,
+            IssueStatusSelection::ToDo,
+            IssueStatusSelection::Done,
+        ]);
+
+        assert!(selection.matches("Done"));
+        assert!(selection.matches("To Do"));
+        assert!(!selection.matches("In Progress"));
+        assert_eq!(
+            selection.values(),
+            vec![IssueStatusSelection::ToDo, IssueStatusSelection::Done]
+        );
+        assert_eq!(selection.label(), "Multiple statuses");
+    }
+
+    #[test]
+    fn status_selection_keeps_uncategorized_explicit() {
+        let selection = IssueStatusSelection::from_values([IssueStatusSelection::Uncategorized]);
+
+        assert!(selection.matches(""));
+        assert!(selection.matches("  "));
+        assert!(!selection.matches("Done"));
+        assert_eq!(selection.label(), "Uncategorized");
     }
 
     #[test]
