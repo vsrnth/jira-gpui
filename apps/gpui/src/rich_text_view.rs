@@ -13,10 +13,12 @@ use gpui::{
     div, img, px,
 };
 use gpui_component::{
-    StyledExt as _, h_flex, scroll::ScrollableElement as _, spinner::Spinner, v_flex,
+    Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, spinner::Spinner,
+    v_flex,
 };
 use jira_domain::{
-    PanelKind, RichBlock, RichImage, RichInline, RichListItem, RichMark, RichTextDocument,
+    PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
+    RichTextDocument,
 };
 
 use crate::diagnostics::{
@@ -32,6 +34,8 @@ const MAX_RENDER_NODES: usize = 4_096;
 const MAX_RENDER_CHILDREN: usize = 1_024;
 const MAX_RENDER_TEXT_BYTES: usize = 1_000_000;
 const MAX_IMAGE_LABEL_BYTES: usize = 512;
+const MAX_ATTACHMENT_FILENAME_BYTES: usize = 512;
+const MAX_ATTACHMENT_LOOKAHEAD_BYTES: usize = 16;
 const MAX_IMAGE_HEIGHT: f32 = 720.;
 const RENDER_OMITTED_LABEL: &str = "Some content was omitted by Jira Desk.";
 const FALLBACK_IMAGE_GALLERY_LABEL: &str = "Image attachments";
@@ -711,6 +715,7 @@ fn render_inline(
                 budget.text(label)
             })
             .into_any_element(),
+        RichInline::AttachmentCard(card) => render_attachment_card(card, palette, budget),
         RichInline::Placeholder { label } => div()
             .italic()
             .text_color(palette.muted)
@@ -718,6 +723,97 @@ fn render_inline(
             .into_any_element(),
         RichInline::HardBreak => div().into_any_element(),
     }
+}
+
+/// Render an ADF inline attachment card as an inert, compact Jira-like chip.
+///
+/// The domain model deliberately carries only attachment metadata. In particular, this
+/// renderer does not turn the card into a link or initiate a download; the explicit
+/// attachment list remains the only place where downloading is offered.
+fn render_attachment_card(
+    card: &RichAttachmentCard,
+    palette: RichTextPalette,
+    budget: &mut RenderBudget,
+) -> AnyElement {
+    let filename = budget.text(&bounded_attachment_filename(&card.filename));
+    h_flex()
+        .min_w_0()
+        .max_w(px(520.))
+        .gap_1()
+        .px_1()
+        .py(px(1.))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(palette.border)
+        .bg(palette.code_surface)
+        .child(Icon::new(IconName::File).text_color(palette.muted))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_sm()
+                .child(filename),
+        )
+        .into_any_element()
+}
+
+fn bounded_attachment_filename(value: &str) -> String {
+    let (value, truncated) = normalize_attachment_filename(value);
+    if value.is_empty() {
+        return "Unnamed attachment".to_owned();
+    }
+    if !truncated && value.len() <= MAX_ATTACHMENT_FILENAME_BYTES {
+        return value;
+    }
+
+    let ellipsis = '…';
+    let mut end = MAX_ATTACHMENT_FILENAME_BYTES.saturating_sub(ellipsis.len_utf8());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = value[..end].to_owned();
+    bounded.push(ellipsis);
+    bounded
+}
+
+/// Keep filenames readable and layout-safe without dropping printable Unicode. Jira can
+/// legally return unusual metadata, and a newline or control character must not turn an
+/// inline chip into a multi-line/broken description surface.
+fn normalize_attachment_filename(value: &str) -> (String, bool) {
+    let mut normalized = String::with_capacity(value.len().min(MAX_ATTACHMENT_FILENAME_BYTES));
+    let mut pending_space = false;
+    let mut scanned_bytes = 0usize;
+    let mut truncated = false;
+    for character in value.chars() {
+        let character_bytes = character.len_utf8();
+        if scanned_bytes.saturating_add(character_bytes)
+            > MAX_ATTACHMENT_FILENAME_BYTES.saturating_add(MAX_ATTACHMENT_LOOKAHEAD_BYTES)
+            || normalized.len() >= MAX_ATTACHMENT_FILENAME_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        scanned_bytes += character_bytes;
+        if character.is_whitespace() {
+            if !normalized.is_empty() {
+                pending_space = true;
+            }
+        } else if character.is_control() {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.push('\u{FFFD}');
+        } else {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.push(character);
+        }
+    }
+    (normalized, truncated)
 }
 
 fn omitted_element(palette: RichTextPalette) -> AnyElement {
@@ -829,11 +925,12 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use jira_domain::{RichImage, RichInline};
+    use jira_domain::{RichAttachmentCard, RichBlock, RichImage, RichInline, RichTextDocument};
 
     use super::{
         HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_TEXT_BYTES, RenderBudget, RichImageRenderState,
-        RichImageRenderStates, heading_size, image_render_state, inline_line_count,
+        RichImageRenderStates, RichTextPalette, bounded_attachment_filename, heading_size,
+        image_render_state, inline_line_count, normalize_attachment_filename, render_rich_text,
         rich_image_name,
     };
     use crate::diagnostics::{
@@ -866,6 +963,71 @@ mod tests {
             },
         ];
         assert_eq!(inline_line_count(&content), 2);
+    }
+
+    #[test]
+    fn attachment_filename_is_bounded_without_splitting_utf8() {
+        let filename = format!("{}終", "x".repeat(super::MAX_ATTACHMENT_FILENAME_BYTES));
+        let bounded = bounded_attachment_filename(&filename);
+
+        assert!(bounded.len() <= super::MAX_ATTACHMENT_FILENAME_BYTES);
+        assert!(bounded.ends_with('…'));
+        assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
+    #[test]
+    fn attachment_filename_normalizes_layout_breaking_metadata() {
+        assert_eq!(
+            normalize_attachment_filename("  App\n\tkey\u{0000} data 💾  ").0,
+            "App key� data 💾"
+        );
+    }
+
+    #[test]
+    fn very_large_attachment_filename_has_bounded_normalization_work_surface() {
+        let filename = "x".repeat(8 * 1024 * 1024);
+        let normalized = normalize_attachment_filename(&filename).0;
+        let bounded = bounded_attachment_filename(&filename);
+
+        assert!(normalized.len() <= super::MAX_ATTACHMENT_FILENAME_BYTES + 3);
+        assert!(bounded.len() <= super::MAX_ATTACHMENT_FILENAME_BYTES);
+        assert!(bounded.ends_with('…'));
+    }
+
+    #[test]
+    fn attachment_card_renders_through_rich_text_path() {
+        let document = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::AttachmentCard(
+                RichAttachmentCard {
+                    attachment_id: "10002".to_owned(),
+                    filename: "App key data.csv".to_owned(),
+                    mime_type: Some("text/csv".to_owned()),
+                    size_bytes: Some(128),
+                },
+            )])],
+            false,
+        );
+        let palette = RichTextPalette {
+            foreground: gpui::Hsla::default(),
+            muted: gpui::Hsla::default(),
+            border: gpui::Hsla::default(),
+            code_surface: gpui::Hsla::default(),
+            link: gpui::Hsla::default(),
+            info: gpui::Hsla::default(),
+            warning: gpui::Hsla::default(),
+            success: gpui::Hsla::default(),
+            danger: gpui::Hsla::default(),
+        };
+
+        let rendered = render_rich_text(
+            &document,
+            palette,
+            &RichImageRenderStates::default(),
+            0,
+            ImageSource::ResolvedAdf,
+        );
+
+        let _ = rendered;
     }
 
     #[test]

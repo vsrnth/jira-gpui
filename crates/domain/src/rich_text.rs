@@ -105,6 +105,21 @@ pub struct RichImage {
     pub height: Option<u32>,
 }
 
+/// Bounded metadata for an inline Jira attachment card.
+///
+/// The card intentionally retains no source URL. Callers may use the attachment ID to
+/// request metadata/content through an explicit application port, but the rich-text domain
+/// model never carries an arbitrary remote URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichAttachmentCard {
+    pub attachment_id: String,
+    pub filename: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RichListItem {
     pub blocks: Vec<RichBlock>,
@@ -122,6 +137,7 @@ pub enum RichInline {
         account_id: Option<AccountId>,
         label: String,
     },
+    AttachmentCard(RichAttachmentCard),
     Placeholder {
         label: String,
     },
@@ -291,6 +307,11 @@ fn append_inline_text(content: &[RichInline], output: &mut PlainTextBuilder, dep
             RichInline::Mention { label, .. } | RichInline::Placeholder { label } => {
                 output.push_str(label)
             }
+            RichInline::AttachmentCard(card) => {
+                output.push_str("[attachment: ");
+                output.push_str(&card.filename);
+                output.push_str("]");
+            }
         }
     }
 }
@@ -426,6 +447,25 @@ mod tests {
             !RichTextDocument::new(Vec::new(), false)
                 .with_fallback_images(vec![image])
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn attachment_cards_project_to_bounded_plain_text() {
+        let document = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::AttachmentCard(
+                super::RichAttachmentCard {
+                    attachment_id: "10002".to_owned(),
+                    filename: "partner-enrollment.csv".to_owned(),
+                    mime_type: Some("text/csv".to_owned()),
+                    size_bytes: Some(4096),
+                },
+            )])],
+            false,
+        );
+        assert_eq!(
+            document.plain_text(),
+            "[attachment: partner-enrollment.csv]"
         );
     }
 }

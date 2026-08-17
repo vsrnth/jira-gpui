@@ -5,8 +5,9 @@ use crate::models::{
 use jira_application::{IssueCommentsPage, PageCursor};
 use jira_domain::{
     AccountId, AttachmentMetadata, Issue, IssueComment, IssueCommentAuthor, IssueDetailCore,
-    IssueId, IssueKey, IssueType, JiraSiteId, PanelKind, ParentIssue, Priority, Project, RichBlock,
-    RichImage, RichInline, RichListItem, RichMark, RichTextDocument, Status, Timestamp, User,
+    IssueId, IssueKey, IssueType, JiraSiteId, PanelKind, ParentIssue, Priority, Project,
+    RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark, RichTextDocument,
+    Status, Timestamp, User,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -540,8 +541,17 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
             label: UNSUPPORTED_CONTENT.to_owned(),
         },
         "rule" | "table" | "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date"
-        | "status" | "inlineCard" | "expand" | "nestedExpand" => RichBlock::Placeholder {
+        | "status" | "expand" | "nestedExpand" => RichBlock::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
+        },
+        "inlineCard" => match parse_inline_attachment_card(object, state) {
+            RichInline::AttachmentCard(card) => {
+                RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
+            }
+            RichInline::Placeholder { label } => RichBlock::Placeholder { label },
+            _ => RichBlock::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            },
         },
         _ => RichBlock::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
@@ -953,15 +963,113 @@ fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> 
                 .unwrap_or_else(|| "Mentioned user".to_owned());
             Some(RichInline::Mention { account_id, label })
         }
-        "emoji" | "date" | "status" | "inlineCard" | "mediaInline" => {
-            Some(RichInline::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
-            })
-        }
+        "emoji" | "date" | "status" | "mediaInline" => Some(RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        }),
+        "inlineCard" => Some(parse_inline_attachment_card(object, state)),
         _ => Some(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         }),
     }
+}
+
+fn parse_inline_attachment_card(
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> RichInline {
+    let Some(media) = state.media.as_ref() else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(attrs) = object.get("attrs").and_then(Value::as_object) else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(url) = attrs.get("url").and_then(Value::as_str) else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(attachment_id) = attachment_id_from_inline_card_url(url) else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let attachment = match unique_attachment(
+        media
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.id == attachment_id),
+    ) {
+        Ok(Some(attachment)) => attachment,
+        Ok(None) | Err(()) => {
+            return RichInline::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            };
+        }
+    };
+    RichInline::AttachmentCard(RichAttachmentCard {
+        attachment_id: attachment.id.clone(),
+        filename: attachment.filename.clone(),
+        mime_type: normalized_attachment_mime(attachment.mime_type.as_deref()),
+        size_bytes: Some(attachment.size_bytes),
+    })
+}
+
+fn attachment_id_from_inline_card_url(value: &str) -> Option<String> {
+    if value.len() > MAX_LINK_HREF_BYTES {
+        return None;
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed = Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().filter(|host| !host.is_empty()).is_none()
+        || parsed.username() != ""
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    let segments = parsed.path_segments()?.collect::<Vec<_>>();
+    let candidate = if segments.len() >= 3 && segments[0] == "secure" && segments[1] == "attachment"
+    {
+        segments[2]
+    } else if segments.len() == 6
+        && segments[0] == "rest"
+        && segments[1] == "api"
+        && segments[2] == "3"
+        && segments[3] == "attachment"
+        && segments[4] == "content"
+    {
+        segments[5]
+    } else {
+        return None;
+    };
+    (!candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')))
+    .then(|| candidate.to_owned())
+}
+
+fn normalized_attachment_mime(mime_type: Option<&str>) -> Option<String> {
+    let mime_type = mime_type?.split(';').next()?.trim();
+    let (kind, subtype) = mime_type.split_once('/')?;
+    if kind.is_empty()
+        || subtype.is_empty()
+        || mime_type.matches('/').count() != 1
+        || mime_type.len() > 255
+        || !mime_type.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'+' | b'-' | b'_')
+        })
+    {
+        return None;
+    }
+    Some(mime_type.to_ascii_lowercase())
 }
 
 fn parse_marks(values: Option<&Vec<Value>>) -> Vec<RichMark> {
@@ -1302,6 +1410,195 @@ mod tests {
         assert_eq!(detail.attachments.len(), 1);
         assert_eq!(detail.attachments[0].id, "10001");
         assert_eq!(detail.attachments[0].size_bytes, 2048);
+    }
+
+    #[test]
+    fn maps_inline_cards_to_existing_attachment_metadata_without_retaining_urls() {
+        let issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-inline-card.json"
+        ))
+        .unwrap();
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.expect("rich description");
+
+        let RichBlock::Paragraph(first) = &document.blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert!(matches!(
+            first.as_slice(),
+            [RichInline::Text { text, .. }, RichInline::AttachmentCard(card)]
+                if text == "Import file: "
+                    && card.attachment_id == "10002"
+                    && card.filename == "partner-enrollment.csv"
+                    && card.mime_type.as_deref() == Some("text/csv")
+                    && card.size_bytes == Some(4096)
+        ));
+        assert!(matches!(
+            &document.blocks[1],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::AttachmentCard(card)] if card.attachment_id == "10002")
+        ));
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some(
+                "Import file: [attachment: partner-enrollment.csv]\n[attachment: partner-enrollment.csv]"
+            )
+        );
+        let serialized = serde_json::to_string(&document).unwrap();
+        assert!(!serialized.contains("secure/attachment/10002"));
+        assert!(!serialized.contains("rest/api/3/attachment/content/10002"));
+    }
+
+    #[test]
+    fn extracts_only_supported_attachment_url_forms() {
+        assert_eq!(
+            attachment_id_from_inline_card_url(
+                "https://jira.example.test/secure/attachment/10002/partner-enrollment.csv"
+            ),
+            Some("10002".to_owned())
+        );
+        assert_eq!(
+            attachment_id_from_inline_card_url(
+                "https://jira.example.test/rest/api/3/attachment/content/10002"
+            ),
+            Some("10002".to_owned())
+        );
+
+        let oversized = format!(
+            "https://jira.example.test/secure/attachment/10002/{}",
+            "x".repeat(MAX_LINK_HREF_BYTES)
+        );
+        for url in [
+            "https://jira.example.test/browse/ENG-43",
+            "https://external.example/attachment/10002/file",
+            "https://jira.example.test/secure/attachment/",
+            "https://jira.example.test/rest/api/3/attachment/content/",
+            "https://jira.example.test/rest/api/3/attachment/content/10002/file.csv",
+            "/secure/attachment/10002/file.csv",
+            "https://:secret@jira.example.test/secure/attachment/10002/file.csv",
+            "https://user:secret@jira.example.test/secure/attachment/10002/file.csv",
+            "javascript:attachment/10002",
+            oversized.as_str(),
+        ] {
+            assert_eq!(attachment_id_from_inline_card_url(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn preserves_mixed_inline_card_sequence_order() {
+        let mut issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-inline-card.json"
+        ))
+        .unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "paragraph", "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "inlineCard", "attrs": {
+                        "url": "https://jira.example.test/secure/attachment/10002/file.csv"
+                    }},
+                    {"type": "hardBreak"},
+                    {"type": "text", "text": "after"}
+                ]
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.expect("rich description");
+        let RichBlock::Paragraph(content) = &document.blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [
+                RichInline::Text { text: before, .. },
+                RichInline::AttachmentCard(card),
+                RichInline::HardBreak,
+                RichInline::Text { text: after, .. }
+            ] if before == "before" && card.attachment_id == "10002" && after == "after"
+        ));
+    }
+
+    #[test]
+    fn keeps_unknown_trusted_attachment_id_unsupported() {
+        let mut issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-inline-card.json"
+        ))
+        .unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "inlineCard", "attrs": {
+                        "url": "https://jira.example.test/secure/attachment/99999/file.csv"
+                    }
+                }]
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some(UNSUPPORTED_CONTENT)
+        );
+        assert!(matches!(
+            &detail.issue.rich_description.unwrap().blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::Placeholder { label }] if label == UNSUPPORTED_CONTENT)
+        ));
+    }
+
+    #[test]
+    fn leaves_non_attachment_and_ambiguous_inline_card_urls_unsupported() {
+        let mut non_attachment: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-inline-card.json"
+        ))
+        .unwrap();
+        non_attachment.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "inlineCard",
+                    "attrs": {"url": "https://jira.example.test/browse/ENG-43"}
+                }]
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), non_attachment)
+            .unwrap();
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("[unsupported Jira content]")
+        );
+
+        let mut ambiguous: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-inline-card.json"
+        ))
+        .unwrap();
+        ambiguous.fields.attachment.push(JiraAttachment {
+            id: "10002".to_owned(),
+            filename: "different.csv".to_owned(),
+            size: 4096,
+            mime_type: Some("text/csv".to_owned()),
+        });
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), ambiguous)
+            .unwrap();
+        let document = detail.issue.rich_description.expect("rich description");
+        assert!(matches!(
+            &document.blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::Text { .. }, RichInline::Placeholder { label }] if label == UNSUPPORTED_CONTENT)
+        ));
+        assert!(
+            detail
+                .issue
+                .description_text
+                .unwrap()
+                .contains(UNSUPPORTED_CONTENT)
+        );
     }
 
     #[test]
