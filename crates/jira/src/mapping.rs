@@ -243,6 +243,7 @@ const MAX_ADF_DEPTH: usize = 64;
 const MAX_ADF_NODES: usize = 10_000;
 const MAX_LINK_HREF_BYTES: usize = 2_048;
 const MAX_LINK_TITLE_BYTES: usize = 512;
+const MAX_MEDIA_INLINE_ID_BYTES: usize = 255;
 const MAX_MEDIA_ALT_BYTES: usize = 512;
 const MAX_MEDIA_DIMENSION: u32 = 10_000;
 const UNSUPPORTED_CONTENT: &str = "[unsupported Jira content]";
@@ -330,7 +331,7 @@ fn parse_adf_internal(
     let mut state = AdfParserState {
         media: attachments.map(|attachments| AdfMediaContext {
             attachments,
-            file_media_count: count_file_media_nodes(value),
+            file_media_count: count_file_media_references(value),
         }),
         ..AdfParserState::default()
     };
@@ -537,8 +538,14 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
                 label: UNSUPPORTED_CONTENT.to_owned(),
             },
         },
-        "mediaInline" => RichBlock::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
+        "mediaInline" => match parse_media_inline_attachment_card(object, state) {
+            RichInline::AttachmentCard(card) => {
+                RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
+            }
+            RichInline::Placeholder { label } => RichBlock::Placeholder { label },
+            _ => RichBlock::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            },
         },
         "rule" | "table" | "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date"
         | "status" | "expand" | "nestedExpand" => RichBlock::Placeholder {
@@ -802,14 +809,14 @@ fn bounded_dimension(value: Option<&Value>) -> Option<u32> {
         .filter(|value| (1..=MAX_MEDIA_DIMENSION).contains(value))
 }
 
-fn count_file_media_nodes(value: &Value) -> usize {
+fn count_file_media_references(value: &Value) -> usize {
     let mut count = 0;
     let mut visited = 0;
-    count_file_media_nodes_inner(value, 0, &mut count, &mut visited);
+    count_file_media_references_inner(value, 0, &mut count, &mut visited);
     count
 }
 
-fn count_file_media_nodes_inner(
+fn count_file_media_references_inner(
     value: &Value,
     depth: usize,
     count: &mut usize,
@@ -820,22 +827,24 @@ fn count_file_media_nodes_inner(
     }
     *visited += 1;
     if let Some(object) = value.as_object() {
-        if object.get("type").and_then(Value::as_str) == Some("media")
-            && object
-                .get("attrs")
-                .and_then(Value::as_object)
-                .and_then(|attrs| attrs.get("type"))
-                .and_then(Value::as_str)
-                == Some("file")
+        if matches!(
+            object.get("type").and_then(Value::as_str),
+            Some("media" | "mediaInline")
+        ) && object
+            .get("attrs")
+            .and_then(Value::as_object)
+            .and_then(|attrs| attrs.get("type"))
+            .and_then(Value::as_str)
+            == Some("file")
         {
             *count = count.saturating_add(1);
         }
         for child in object.values() {
-            count_file_media_nodes_inner(child, depth + 1, count, visited);
+            count_file_media_references_inner(child, depth + 1, count, visited);
         }
     } else if let Some(values) = value.as_array() {
         for child in values {
-            count_file_media_nodes_inner(child, depth + 1, count, visited);
+            count_file_media_references_inner(child, depth + 1, count, visited);
         }
     }
 }
@@ -963,9 +972,10 @@ fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> 
                 .unwrap_or_else(|| "Mentioned user".to_owned());
             Some(RichInline::Mention { account_id, label })
         }
-        "emoji" | "date" | "status" | "mediaInline" => Some(RichInline::Placeholder {
+        "emoji" | "date" | "status" => Some(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         }),
+        "mediaInline" => Some(parse_media_inline_attachment_card(object, state)),
         "inlineCard" => Some(parse_inline_attachment_card(object, state)),
         _ => Some(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
@@ -1016,6 +1026,117 @@ fn parse_inline_attachment_card(
         mime_type: normalized_attachment_mime(attachment.mime_type.as_deref()),
         size_bytes: Some(attachment.size_bytes),
     })
+}
+
+fn parse_media_inline_attachment_card(
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> RichInline {
+    let Some(media) = state.media.as_ref() else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(attrs) = object.get("attrs").and_then(Value::as_object) else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    if attrs.get("type").and_then(Value::as_str) != Some("file") {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    }
+
+    let attachment = if let Some(id) = attrs
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(bounded_media_inline_id)
+    {
+        match unique_attachment(
+            media
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.id == id),
+        ) {
+            Ok(Some(attachment)) => Some(attachment),
+            Err(()) => {
+                return RichInline::Placeholder {
+                    label: UNSUPPORTED_CONTENT.to_owned(),
+                };
+            }
+            Ok(None) => None,
+        }
+    } else {
+        None
+    };
+
+    let attachment = attachment
+        .or_else(|| unique_media_filename_match(attrs, media))
+        .or_else(|| {
+            (media.file_media_count == 1 && media.attachments.len() == 1)
+                .then(|| &media.attachments[0])
+        });
+    let Some(attachment) = attachment else {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    RichInline::AttachmentCard(RichAttachmentCard {
+        attachment_id: attachment.id.clone(),
+        filename: attachment.filename.clone(),
+        mime_type: normalized_attachment_mime(attachment.mime_type.as_deref()),
+        size_bytes: Some(attachment.size_bytes),
+    })
+}
+
+fn unique_media_filename_match<'a>(
+    attrs: &serde_json::Map<String, Value>,
+    media: &'a AdfMediaContext<'_>,
+) -> Option<&'a AttachmentMetadata> {
+    let mut resolved = None;
+    for key in ["alt", "__fileName"] {
+        let Some(filename) = attrs
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(bounded_media_filename)
+        else {
+            continue;
+        };
+        let attachment = match unique_attachment(
+            media
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.filename == filename),
+        ) {
+            Ok(attachment) => attachment,
+            Err(()) => return None,
+        };
+        let Some(attachment) = attachment else {
+            continue;
+        };
+        if resolved.is_some_and(|previous: &AttachmentMetadata| previous.id != attachment.id) {
+            return None;
+        }
+        resolved = Some(attachment);
+    }
+    resolved
+}
+
+fn bounded_media_filename(value: &str) -> Option<&str> {
+    if value.len() > MAX_MEDIA_ALT_BYTES {
+        return None;
+    }
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn bounded_media_inline_id(value: &str) -> Option<&str> {
+    if value.len() > MAX_MEDIA_INLINE_ID_BYTES {
+        return None;
+    }
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn attachment_id_from_inline_card_url(value: &str) -> Option<String> {
@@ -1449,6 +1570,200 @@ mod tests {
         let serialized = serde_json::to_string(&document).unwrap();
         assert!(!serialized.contains("secure/attachment/10002"));
         assert!(!serialized.contains("rest/api/3/attachment/content/10002"));
+    }
+
+    #[test]
+    fn maps_media_inline_to_the_only_issue_attachment_without_leaking_media_services_data() {
+        let issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-media-inline.json"
+        ))
+        .unwrap();
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.expect("rich description");
+
+        let RichBlock::Paragraph(content) = &document.blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [RichInline::Text { text, .. }, RichInline::AttachmentCard(card)]
+                if text == "Carrier file: "
+                    && card.attachment_id == "10004"
+                    && card.filename == "carrier-enrollment.csv"
+                    && card.mime_type.as_deref() == Some("text/csv")
+                    && card.size_bytes == Some(8192)
+        ));
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("Carrier file: [attachment: carrier-enrollment.csv]")
+        );
+        let serialized = serde_json::to_string(&document).unwrap();
+        assert!(!serialized.contains("4478e39c-cf9b-41d1-ba92-68589487cd75"));
+        assert!(!serialized.contains("MediaServicesSample"));
+        assert!(!serialized.contains("jira.example.test"));
+    }
+
+    #[test]
+    fn leaves_media_inline_unsupported_with_multiple_issue_attachments() {
+        let mut issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-media-inline.json"
+        ))
+        .unwrap();
+        issue.fields.attachment.push(JiraAttachment {
+            id: "10005".to_owned(),
+            filename: "other.csv".to_owned(),
+            size: 1024,
+            mime_type: Some("text/csv".to_owned()),
+        });
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.expect("rich description");
+        assert!(matches!(
+            &document.blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::Text { .. }, RichInline::Placeholder { label }] if label == UNSUPPORTED_CONTENT)
+        ));
+    }
+
+    #[test]
+    fn leaves_media_inline_unsupported_with_multiple_file_media_references() {
+        let mut issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-media-inline.json"
+        ))
+        .unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "paragraph", "content": [
+                    {"type": "text", "text": "Carrier files: "},
+                    {"type": "mediaInline", "attrs": {
+                        "id": "4478e39c-cf9b-41d1-ba92-68589487cd75",
+                        "type": "file", "collection": "MediaServicesSample"
+                    }},
+                    {"type": "mediaInline", "attrs": {
+                        "id": "another-media-services-id",
+                        "type": "file", "collection": "MediaServicesSample"
+                    }}
+                ]
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.expect("rich description");
+        assert!(matches!(
+            &document.blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::Text { .. }, RichInline::Placeholder { label }, RichInline::Placeholder { label: second }] if label == UNSUPPORTED_CONTENT && second == UNSUPPORTED_CONTENT)
+        ));
+    }
+
+    #[test]
+    fn wraps_a_top_level_media_inline_attachment_card_in_a_paragraph() {
+        let mut issue: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-media-inline.json"
+        ))
+        .unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaInline", "attrs": {
+                    "id": "4478e39c-cf9b-41d1-ba92-68589487cd75",
+                    "type": "file", "collection": "MediaServicesSample"
+                }
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+            .unwrap();
+        assert!(matches!(
+            &detail.issue.rich_description.unwrap().blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::AttachmentCard(card)] if card.attachment_id == "10004")
+        ));
+    }
+
+    #[test]
+    fn resolves_media_inline_by_unique_id_or_allowlisted_filename_before_one_to_one_fallback() {
+        let mut by_id: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-media-inline.json"
+        ))
+        .unwrap();
+        by_id.fields.attachment.push(JiraAttachment {
+            id: "10005".to_owned(),
+            filename: "other.csv".to_owned(),
+            size: 1024,
+            mime_type: Some("text/csv".to_owned()),
+        });
+        by_id.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaInline", "attrs": {
+                    "id": "10004", "type": "file", "collection": "MediaServicesSample"
+                }
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), by_id)
+            .unwrap();
+        assert!(matches!(
+            &detail.issue.rich_description.unwrap().blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::AttachmentCard(card)] if card.attachment_id == "10004")
+        ));
+
+        let mut by_filename: JiraIssue = serde_json::from_str(include_str!(
+            "../tests/fixtures/issue-detail-media-inline.json"
+        ))
+        .unwrap();
+        by_filename.fields.attachment.push(JiraAttachment {
+            id: "10005".to_owned(),
+            filename: "other.csv".to_owned(),
+            size: 1024,
+            mime_type: Some("text/csv".to_owned()),
+        });
+        by_filename.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaInline", "attrs": {
+                    "id": "unmatched-media-services-id", "type": "file",
+                    "__fileName": "carrier-enrollment.csv",
+                    "collection": "MediaServicesSample"
+                }
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), by_filename)
+            .unwrap();
+        assert!(matches!(
+            &detail.issue.rich_description.unwrap().blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::AttachmentCard(card)] if card.attachment_id == "10004")
+        ));
+    }
+
+    #[test]
+    fn keeps_media_inline_unsupported_without_issue_attachment_context() {
+        let document = serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "mediaInline", "attrs": {
+                        "id": "4478e39c-cf9b-41d1-ba92-68589487cd75",
+                        "type": "file", "collection": "MediaServicesSample"
+                    }
+                }]
+            }]
+        });
+
+        let parsed = parse_adf(&document).expect("valid ADF");
+        assert_eq!(parsed.plain_text(), UNSUPPORTED_CONTENT);
+        assert!(matches!(
+            &parsed.blocks[0],
+            RichBlock::Paragraph(content)
+                if matches!(content.as_slice(), [RichInline::Placeholder { label }] if label == UNSUPPORTED_CONTENT)
+        ));
     }
 
     #[test]
@@ -1888,7 +2203,7 @@ mod tests {
         });
         let mut count = 0;
         let mut visited = 0;
-        count_file_media_nodes_inner(&document, 0, &mut count, &mut visited);
+        count_file_media_references_inner(&document, 0, &mut count, &mut visited);
 
         assert_eq!(count, 0);
         assert_eq!(visited, MAX_ADF_NODES);
