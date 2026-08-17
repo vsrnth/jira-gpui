@@ -121,7 +121,7 @@ fn safe_lookup_error(error: &ApplicationError) -> &'static str {
     }
 }
 
-const MAX_RICH_IMAGES: usize = 16;
+const MAX_RICH_IMAGES: usize = RichTextDocument::MAX_FALLBACK_IMAGES;
 const MAX_RICH_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
@@ -141,11 +141,37 @@ fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
     }
 }
 
-/// ADF metadata is only a preflight filter. Jira's authenticated response is
-/// authoritative for the bytes that GPUI will decode.
-fn fetched_image_format(cached_mime_type: &str, response_mime_type: &str) -> Option<ImageFormat> {
+fn image_format_from_bytes(bytes: &[u8]) -> Option<ImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(ImageFormat::Png)
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some(ImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(ImageFormat::Gif)
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some(ImageFormat::Webp)
+    } else {
+        None
+    }
+}
+
+/// Cached metadata must identify an allowlisted image. Authenticated responses
+/// may use an allowlisted image MIME or the original-content
+/// `application/octet-stream` MIME; in either case, the bytes must carry a
+/// strict image signature before GPUI decodes them.
+fn fetched_image_format(
+    cached_mime_type: &str,
+    response_mime_type: &str,
+    bytes: &[u8],
+) -> Option<ImageFormat> {
     image_format_for_mime(cached_mime_type)?;
-    image_format_for_mime(response_mime_type)
+    if !response_mime_type
+        .trim()
+        .eq_ignore_ascii_case("application/octet-stream")
+    {
+        image_format_for_mime(response_mime_type)?;
+    }
+    image_format_from_bytes(bytes)
 }
 
 /// Keep only a leaf filename suitable for a portal suggestion. The selected
@@ -294,6 +320,14 @@ fn collect_rich_images(document: &RichTextDocument) -> Vec<RichImage> {
             break;
         }
     }
+    for image in &document.fallback_images {
+        if seen.insert(image.attachment_id.clone()) {
+            images.push(image.clone());
+        }
+        if images.len() == MAX_RICH_IMAGES {
+            break;
+        }
+    }
     images
 }
 
@@ -404,8 +438,11 @@ async fn fetch_rich_image_states(
             Ok(image_bytes)
                 if image_bytes_fit_aggregate(resident_bytes, image_bytes.bytes.len()) =>
             {
-                let Some(format) = fetched_image_format(&image.mime_type, &image_bytes.mime_type)
-                else {
+                let Some(format) = fetched_image_format(
+                    &image.mime_type,
+                    &image_bytes.mime_type,
+                    &image_bytes.bytes,
+                ) else {
                     states.insert(image.attachment_id, RichImageRenderState::Failed);
                     continue;
                 };
@@ -3504,6 +3541,41 @@ mod tests {
     }
 
     #[test]
+    fn rich_image_collection_appends_fallback_candidates_after_resolved_images() {
+        let document = RichTextDocument::new(vec![RichBlock::Image(test_image("resolved"))], false)
+            .with_fallback_images(vec![
+                test_image("resolved"),
+                test_image("candidate-a"),
+                test_image("candidate-b"),
+            ]);
+
+        let images = collect_rich_images(&document);
+        assert_eq!(
+            images
+                .iter()
+                .map(|image| image.attachment_id.as_str())
+                .collect::<Vec<_>>(),
+            ["resolved", "candidate-a", "candidate-b"]
+        );
+    }
+
+    #[test]
+    fn fallback_image_candidates_obey_the_global_image_cap() {
+        let candidates = (0..(MAX_RICH_IMAGES + 4))
+            .map(|index| test_image(&format!("candidate-{index}")))
+            .collect();
+        let document = RichTextDocument::new(Vec::new(), false).with_fallback_images(candidates);
+
+        let images = collect_rich_images(&document);
+        assert_eq!(images.len(), MAX_RICH_IMAGES);
+        assert_eq!(images[0].attachment_id, "candidate-0");
+        assert_eq!(
+            images.last().map(|image| image.attachment_id.as_str()),
+            Some("candidate-15")
+        );
+    }
+
+    #[test]
     fn image_aggregate_limit_accepts_boundary_and_rejects_overflow() {
         assert!(image_bytes_fit_aggregate(0, MAX_RICH_IMAGE_BYTES));
         assert!(!image_bytes_fit_aggregate(1, MAX_RICH_IMAGE_BYTES));
@@ -3520,20 +3592,92 @@ mod tests {
     }
 
     #[test]
-    fn fetched_image_format_uses_response_mime_after_cached_preflight() {
+    fn fetched_image_format_uses_bytes_after_mime_preflight() {
         assert_eq!(
-            fetched_image_format("image/jpeg", " image/png "),
+            fetched_image_format("image/jpeg", " image/png ", b"\x89PNG\r\n\x1a\nrest of png",),
             Some(ImageFormat::Png)
         );
         assert_eq!(
-            fetched_image_format("image/png", "image/svg+xml"),
+            fetched_image_format("image/png", "image/svg+xml", b"\x89PNG\r\n\x1a\n"),
             None,
             "unsupported authenticated responses must not be decoded"
         );
         assert_eq!(
-            fetched_image_format("application/pdf", "image/png"),
+            fetched_image_format("application/pdf", "image/png", b"\x89PNG\r\n\x1a\n"),
             None,
             "non-image ADF metadata must still fail preflight"
+        );
+    }
+
+    #[test]
+    fn image_bytes_are_strictly_signature_detected() {
+        assert_eq!(
+            image_format_from_bytes(b"\x89PNG\r\n\x1a\nfixture"),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            image_format_from_bytes(b"\xff\xd8\xff\xe0fixture"),
+            Some(ImageFormat::Jpeg)
+        );
+        assert_eq!(
+            image_format_from_bytes(b"GIF87afixture"),
+            Some(ImageFormat::Gif)
+        );
+        assert_eq!(
+            image_format_from_bytes(b"GIF89afixture"),
+            Some(ImageFormat::Gif)
+        );
+
+        let mut webp = b"RIFFxxxxWEBP".to_vec();
+        webp.extend_from_slice(b"fixture");
+        assert_eq!(image_format_from_bytes(&webp), Some(ImageFormat::Webp));
+        assert_eq!(image_format_from_bytes(b"not an image"), None);
+    }
+
+    #[test]
+    fn fetched_image_format_accepts_bytes_when_response_mime_differs() {
+        assert_eq!(
+            fetched_image_format(
+                "image/png",
+                "image/jpeg",
+                b"\x89PNG\r\n\x1a\nvalid signature",
+            ),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            fetched_image_format("image/png", "image/png", b"not an image"),
+            None
+        );
+    }
+
+    #[test]
+    fn fetched_image_format_allows_octet_stream_only_for_known_images() {
+        assert_eq!(
+            fetched_image_format(
+                "image/png",
+                " application/octet-stream ",
+                b"\x89PNG\r\n\x1a\nvalid signature",
+            ),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            fetched_image_format("image/png", "application/octet-stream", b"not an image"),
+            None,
+            "octet-stream responses must have a strict image signature"
+        );
+        assert_eq!(
+            fetched_image_format(
+                "application/octet-stream",
+                "application/octet-stream",
+                b"\x89PNG\r\n\x1a\nvalid signature",
+            ),
+            None,
+            "cached attachment metadata must be an allowlisted image"
+        );
+        assert_eq!(
+            fetched_image_format("image/png", "application/pdf", b"\x89PNG\r\n\x1a\n"),
+            None,
+            "only octet-stream may use the original-content MIME exception"
         );
     }
 

@@ -29,6 +29,8 @@ const MAX_RENDER_TEXT_BYTES: usize = 1_000_000;
 const MAX_IMAGE_LABEL_BYTES: usize = 512;
 const MAX_IMAGE_HEIGHT: f32 = 720.;
 const RENDER_OMITTED_LABEL: &str = "Some content was omitted by Jira Desk.";
+const FALLBACK_IMAGE_GALLERY_LABEL: &str = "Image attachments";
+const FALLBACK_IMAGE_GALLERY_NOTE: &str = "Candidate attachments · exact placement unavailable.";
 
 /// The application-owned state for a Jira attachment image.
 ///
@@ -82,6 +84,40 @@ pub(crate) fn render_rich_text(
                 RENDER_OMITTED_LABEL
             },
         ));
+    }
+    if !document.fallback_images.is_empty() && !budget.omitted {
+        let mut gallery = Vec::new();
+        for image in document
+            .fallback_images
+            .iter()
+            .take(RichTextDocument::MAX_FALLBACK_IMAGES)
+        {
+            if !budget.enter(0) {
+                break;
+            }
+            gallery.push(render_image(image, palette, image_states, &mut budget));
+        }
+        if !gallery.is_empty() {
+            content = content.child(
+                v_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(palette.foreground)
+                            .child(FALLBACK_IMAGE_GALLERY_LABEL),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child(FALLBACK_IMAGE_GALLERY_NOTE),
+                    )
+                    .children(gallery),
+            );
+        }
     }
     content.into_any_element()
 }
@@ -677,5 +713,16 @@ mod tests {
         let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new()));
         let state = RichImageRenderState::Ready(image);
         assert!(matches!(state, RichImageRenderState::Ready(_)));
+    }
+
+    #[test]
+    fn fallback_gallery_is_labeled_as_unresolved_candidates() {
+        assert_eq!(super::FALLBACK_IMAGE_GALLERY_LABEL, "Image attachments");
+        assert!(super::FALLBACK_IMAGE_GALLERY_NOTE.contains("exact placement unavailable"));
+        assert!(
+            super::RichTextDocument::new(Vec::new(), false)
+                .fallback_images
+                .is_empty()
+        );
     }
 }

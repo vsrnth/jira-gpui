@@ -58,25 +58,46 @@ impl IssueMediaService {
             ..request
         };
 
-        let image = self
+        let (image, allow_octet_stream) = match self
             .jira
             .fetch_attachment_image(&port_request, cancellation)
-            .await?;
-        cancellation.check()?;
+            .await
+        {
+            Ok(image) => (image, false),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                cancellation.check()?;
+                let content_request = AttachmentDownloadRequest {
+                    site_id: port_request.site_id.clone(),
+                    issue_id: port_request.issue_id.clone(),
+                    attachment_id: requested_attachment_id.clone(),
+                    max_bytes: self
+                        .config
+                        .max_bytes
+                        .min(DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES),
+                };
+                let content = self
+                    .jira
+                    .fetch_attachment_content(&content_request, cancellation)
+                    .await?;
+                cancellation.check()?;
+                (
+                    AttachmentImage {
+                        attachment_id: content.attachment_id,
+                        mime_type: content.mime_type,
+                        bytes: content.bytes,
+                    },
+                    true,
+                )
+            }
+            Err(error) => return Err(error),
+        };
 
-        if image.attachment_id != requested_attachment_id {
-            return Err(upstream("Jira returned a different attachment"));
-        }
-        validate_attachment_id(&image.attachment_id)?;
-        if !is_allowed_image_mime(&image.mime_type) {
-            return Err(upstream("Jira returned an unsupported image type"));
-        }
-        if image.bytes.is_empty() {
-            return Err(upstream("Jira returned an empty attachment image"));
-        }
-        if image.bytes.len() > self.config.max_bytes {
-            return Err(upstream("Jira attachment image exceeded the size limit"));
-        }
+        validate_image(
+            &image,
+            &requested_attachment_id,
+            self.config.max_bytes,
+            allow_octet_stream,
+        )?;
 
         cancellation.check()?;
         Ok(image)
@@ -184,6 +205,34 @@ fn is_allowed_image_mime(value: &str) -> bool {
     )
 }
 
+fn validate_image(
+    image: &AttachmentImage,
+    requested_attachment_id: &str,
+    max_bytes: usize,
+    allow_octet_stream: bool,
+) -> Result<(), ApplicationError> {
+    if image.attachment_id != requested_attachment_id {
+        return Err(upstream("Jira returned a different attachment"));
+    }
+    validate_attachment_id(&image.attachment_id)?;
+    if !(is_allowed_image_mime(&image.mime_type)
+        || (allow_octet_stream
+            && image
+                .mime_type
+                .trim()
+                .eq_ignore_ascii_case("application/octet-stream")))
+    {
+        return Err(upstream("Jira returned an unsupported image type"));
+    }
+    if image.bytes.is_empty() {
+        return Err(upstream("Jira returned an empty attachment image"));
+    }
+    if image.bytes.len() > max_bytes {
+        return Err(upstream("Jira attachment image exceeded the size limit"));
+    }
+    Ok(())
+}
+
 fn upstream(message: &'static str) -> ApplicationError {
     ApplicationError::new(ErrorKind::Upstream, message)
 }
@@ -205,6 +254,7 @@ mod tests {
         image: Mutex<Option<Result<AttachmentImage, ApplicationError>>>,
         download: Mutex<Option<Result<AttachmentContent, ApplicationError>>>,
         image_request: Mutex<Option<AttachmentImageRequest>>,
+        download_request: Mutex<Option<AttachmentDownloadRequest>>,
         cancellation: Mutex<Option<CancellationToken>>,
     }
 
@@ -227,9 +277,10 @@ mod tests {
 
         fn fetch_attachment_content<'a>(
             &'a self,
-            _request: &'a AttachmentDownloadRequest,
+            request: &'a AttachmentDownloadRequest,
             _cancellation: &'a CancellationToken,
         ) -> PortFuture<'a, AttachmentContent> {
+            *self.download_request.lock().expect("download request lock") = Some(request.clone());
             let result = self
                 .download
                 .lock()
@@ -296,6 +347,7 @@ mod tests {
                 image: Mutex::new(Some(image)),
                 download: Mutex::new(None),
                 image_request: Mutex::new(None),
+                download_request: Mutex::new(None),
                 cancellation: Mutex::new(None),
             }),
             IssueMediaConfig {
@@ -338,11 +390,131 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_bounded_original_content_when_thumbnail_is_not_found() {
+        let fake = Arc::new(FakeJira {
+            image: Mutex::new(Some(Err(ApplicationError::new(
+                ErrorKind::NotFound,
+                "thumbnail unavailable",
+            )))),
+            download: Mutex::new(Some(Ok(content("att-1", "IMAGE/PNG", b"png")))),
+            image_request: Mutex::new(None),
+            download_request: Mutex::new(None),
+            cancellation: Mutex::new(None),
+        });
+        let fallback_service = IssueMediaService::new(
+            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            IssueMediaConfig {
+                max_bytes: 4,
+                ..IssueMediaConfig::default()
+            },
+        );
+        let image_request = request("att-1");
+
+        let result =
+            block_on(fallback_service.fetch(image_request.clone(), &CancellationToken::new()))
+                .expect("original image content");
+
+        assert_eq!(result, image("att-1", "IMAGE/PNG", b"png"));
+        assert_eq!(
+            fake.download_request
+                .lock()
+                .expect("download request lock")
+                .clone()
+                .expect("download request"),
+            AttachmentDownloadRequest {
+                site_id: image_request.site_id,
+                issue_id: image_request.issue_id,
+                attachment_id: "att-1".to_owned(),
+                max_bytes: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn allows_octet_stream_only_for_original_content_fallback() {
+        let fake = Arc::new(FakeJira {
+            image: Mutex::new(Some(Err(ApplicationError::new(
+                ErrorKind::NotFound,
+                "thumbnail unavailable",
+            )))),
+            download: Mutex::new(Some(Ok(content(
+                "att-1",
+                "application/octet-stream",
+                b"original bytes",
+            )))),
+            image_request: Mutex::new(None),
+            download_request: Mutex::new(None),
+            cancellation: Mutex::new(None),
+        });
+        let fallback_service = IssueMediaService::new(
+            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            IssueMediaConfig::default(),
+        );
+
+        let result = block_on(fallback_service.fetch(request("att-1"), &CancellationToken::new()))
+            .expect("octet-stream original fallback");
+        assert_eq!(result.mime_type, "application/octet-stream");
+
+        let direct = service(Ok(image("att-1", "application/octet-stream", b"bytes")));
+        let error = block_on(direct.fetch(request("att-1"), &CancellationToken::new()))
+            .expect_err("direct thumbnail octet-stream must be rejected");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+    }
+
+    #[test]
+    fn does_not_fallback_for_non_not_found_thumbnail_errors() {
+        for kind in [
+            ErrorKind::Authentication,
+            ErrorKind::Authorization,
+            ErrorKind::RateLimited,
+            ErrorKind::Offline,
+            ErrorKind::Cancelled,
+            ErrorKind::InvalidInput,
+            ErrorKind::UnknownOutcome,
+            ErrorKind::Storage,
+            ErrorKind::Upstream,
+            ErrorKind::Notification,
+            ErrorKind::Internal,
+        ] {
+            let error = block_on(
+                service(Err(ApplicationError::new(kind, "thumbnail failed")))
+                    .fetch(request("att-1"), &CancellationToken::new()),
+            )
+            .expect_err("non-NotFound thumbnail errors must not fall back");
+            assert_eq!(error.kind(), kind);
+        }
+    }
+
+    #[test]
+    fn rejects_cancelled_original_content_fallback() {
+        let fake = Arc::new(FakeJira {
+            image: Mutex::new(Some(Err(ApplicationError::new(
+                ErrorKind::NotFound,
+                "thumbnail unavailable",
+            )))),
+            download: Mutex::new(Some(Err(ApplicationError::cancelled()))),
+            image_request: Mutex::new(None),
+            download_request: Mutex::new(None),
+            cancellation: Mutex::new(None),
+        });
+        let service = IssueMediaService::new(
+            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            IssueMediaConfig::default(),
+        );
+
+        let error = block_on(service.fetch(request("att-1"), &CancellationToken::new()))
+            .expect_err("cancelled original content must be rejected");
+
+        assert_eq!(error.kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
     fn service_materializes_non_default_thumbnail_bounds_for_the_port() {
         let fake = Arc::new(FakeJira {
             image: Mutex::new(Some(Ok(image("att-1", "image/png", b"png")))),
             download: Mutex::new(None),
             image_request: Mutex::new(None),
+            download_request: Mutex::new(None),
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
@@ -414,6 +586,7 @@ mod tests {
             image: Mutex::new(Some(Ok(image("att-1", "image/png", b"x")))),
             download: Mutex::new(None),
             image_request: Mutex::new(None),
+            download_request: Mutex::new(None),
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
@@ -437,6 +610,7 @@ mod tests {
                 image: Mutex::new(None),
                 download: Mutex::new(Some(Ok(content("att-1", "application/pdf", b"pdf")))),
                 image_request: Mutex::new(None),
+                download_request: Mutex::new(None),
                 cancellation: Mutex::new(None),
             }),
             IssueMediaConfig::default(),

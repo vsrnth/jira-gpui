@@ -9,17 +9,32 @@ pub struct RichTextDocument {
     pub blocks: Vec<RichBlock>,
     #[serde(default)]
     pub truncated: bool,
+    /// Attachment candidates retained when Jira's ADF media reference cannot be
+    /// mapped unambiguously to a Jira attachment ID. Candidates are metadata only;
+    /// callers must not infer their position in the document.
+    #[serde(default)]
+    pub fallback_images: Vec<RichImage>,
 }
 
 impl RichTextDocument {
     /// Keep projections bounded even when a cached/public model was deserialized
     /// without passing through the Jira ADF parser.
+    pub const MAX_FALLBACK_IMAGES: usize = 16;
     pub const MAX_PLAIN_TEXT_BYTES: usize = 1_000_000;
     pub const MAX_PLAIN_TEXT_DEPTH: usize = 64;
     pub const MAX_PLAIN_TEXT_NODES: usize = 10_000;
 
     pub fn new(blocks: Vec<RichBlock>, truncated: bool) -> Self {
-        Self { blocks, truncated }
+        Self {
+            blocks,
+            truncated,
+            fallback_images: Vec::new(),
+        }
+    }
+
+    pub fn with_fallback_images(mut self, fallback_images: Vec<RichImage>) -> Self {
+        self.fallback_images = fallback_images;
+        self
     }
 
     /// Produces the bounded plain-text projection used by search and compatibility callers.
@@ -42,7 +57,7 @@ impl RichTextDocument {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty() && !self.truncated
+        self.blocks.is_empty() && self.fallback_images.is_empty() && !self.truncated
     }
 }
 
@@ -393,6 +408,24 @@ mod tests {
         assert_eq!(
             document.plain_text(),
             "[image: Architecture diagram]\n[image: screenshot.webp]"
+        );
+    }
+
+    #[test]
+    fn fallback_images_make_a_document_nonempty() {
+        let image = RichImage {
+            attachment_id: "10001".to_owned(),
+            filename: "diagram.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            alt_text: None,
+            width: None,
+            height: None,
+        };
+        assert!(RichTextDocument::new(Vec::new(), false).is_empty());
+        assert!(
+            !RichTextDocument::new(Vec::new(), false)
+                .with_fallback_images(vec![image])
+                .is_empty()
         );
     }
 }

@@ -9,6 +9,7 @@ use jira_domain::{
     RichImage, RichInline, RichListItem, RichMark, RichTextDocument, Status, Timestamp, User,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 use url::Url;
 
@@ -333,7 +334,12 @@ fn parse_adf_internal(
         ..AdfParserState::default()
     };
     let blocks = parse_blocks(content, 1, &mut state);
-    Some(RichTextDocument::new(blocks, state.truncated))
+    let fallback_images = if state.unresolved_file_media {
+        collect_fallback_images(attachments.unwrap_or_default(), &blocks)
+    } else {
+        Vec::new()
+    };
+    Some(RichTextDocument::new(blocks, state.truncated).with_fallback_images(fallback_images))
 }
 
 fn visible_adf(value: &Value) -> Option<(RichTextDocument, String)> {
@@ -356,6 +362,7 @@ struct AdfParserState<'a> {
     nodes: usize,
     text_bytes: usize,
     truncated: bool,
+    unresolved_file_media: bool,
     media: Option<AdfMediaContext<'a>>,
 }
 
@@ -605,12 +612,65 @@ fn parse_media_node(
             label: UNAVAILABLE_IMAGE.to_owned(),
         };
     }
-    resolve_media_image(attrs, media).map_or(
-        RichBlock::Placeholder {
-            label: UNAVAILABLE_IMAGE.to_owned(),
-        },
-        RichBlock::Image,
-    )
+    match resolve_media_image(attrs, media) {
+        Some(image) => RichBlock::Image(image),
+        None => {
+            state.unresolved_file_media = true;
+            RichBlock::Placeholder {
+                label: UNAVAILABLE_IMAGE.to_owned(),
+            }
+        }
+    }
+}
+
+fn collect_fallback_images(
+    attachments: &[AttachmentMetadata],
+    blocks: &[RichBlock],
+) -> Vec<RichImage> {
+    let mut resolved_ids = HashSet::new();
+    collect_resolved_image_ids(blocks, &mut resolved_ids);
+    let mut seen_ids = HashSet::new();
+    attachments
+        .iter()
+        .filter_map(|attachment| {
+            if resolved_ids.contains(&attachment.id) || !seen_ids.insert(attachment.id.clone()) {
+                return None;
+            }
+            let mime_type = normalized_image_mime(attachment.mime_type.as_deref())?;
+            Some(RichImage {
+                attachment_id: attachment.id.clone(),
+                filename: attachment.filename.clone(),
+                mime_type,
+                alt_text: None,
+                width: None,
+                height: None,
+            })
+        })
+        .take(RichTextDocument::MAX_FALLBACK_IMAGES)
+        .collect()
+}
+
+fn collect_resolved_image_ids(blocks: &[RichBlock], resolved_ids: &mut HashSet<String>) {
+    for block in blocks {
+        match block {
+            RichBlock::Image(image) => {
+                resolved_ids.insert(image.attachment_id.clone());
+            }
+            RichBlock::BlockQuote(children)
+            | RichBlock::Panel {
+                content: children, ..
+            } => collect_resolved_image_ids(children, resolved_ids),
+            RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
+                for item in items {
+                    collect_resolved_image_ids(&item.blocks, resolved_ids);
+                }
+            }
+            RichBlock::Paragraph(_)
+            | RichBlock::Heading { .. }
+            | RichBlock::CodeBlock { .. }
+            | RichBlock::Placeholder { .. } => {}
+        }
+    }
 }
 
 fn resolve_media_image(
@@ -1394,12 +1454,130 @@ mod tests {
     }
 
     #[test]
+    fn exposes_bounded_candidates_for_real_media_services_uuid_without_guessing() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.attachment.push(JiraAttachment {
+            id: "10002".to_owned(),
+            filename: "other.jpg".to_owned(),
+            size: 1024,
+            mime_type: Some("image/jpeg".to_owned()),
+        });
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "attrs": {"layout": "center"}, "content": [{
+                    "type": "media", "attrs": {
+                        "type": "file",
+                        "id": "4478e39c-cf9b-41d1-ba92-68589487cd75",
+                        "collection": "MediaServicesSample"
+                    }
+                }]
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.unwrap();
+
+        assert!(matches!(
+            document.blocks.first(),
+            Some(RichBlock::Placeholder { label }) if label == UNAVAILABLE_IMAGE
+        ));
+        assert_eq!(
+            document
+                .fallback_images
+                .iter()
+                .map(|image| image.attachment_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["10001", "10002"]
+        );
+    }
+
+    #[test]
+    fn excludes_exactly_resolved_images_from_unresolved_candidate_gallery() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.attachment.push(JiraAttachment {
+            id: "10002".to_owned(),
+            filename: "other.jpg".to_owned(),
+            size: 1024,
+            mime_type: Some("image/jpeg".to_owned()),
+        });
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [
+                {"type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {"type": "file", "id": "10001"}
+                }]},
+                {"type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {
+                        "type": "file",
+                        "id": "4478e39c-cf9b-41d1-ba92-68589487cd75",
+                        "collection": "MediaServicesSample"
+                    }
+                }]}
+            ]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.unwrap();
+
+        assert_eq!(document.fallback_images.len(), 1);
+        assert_eq!(document.fallback_images[0].attachment_id, "10002");
+    }
+
+    #[test]
+    fn caps_candidates_and_rejects_unsupported_image_mimes() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.attachment[0].mime_type = Some("image/svg+xml".to_owned());
+        for index in 0..20 {
+            issue.fields.attachment.push(JiraAttachment {
+                id: format!("{index}"),
+                filename: format!("image-{index}.png"),
+                size: 1024,
+                mime_type: Some("image/png".to_owned()),
+            });
+        }
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {
+                        "type": "file",
+                        "id": "4478e39c-cf9b-41d1-ba92-68589487cd75",
+                        "collection": "MediaServicesSample"
+                    }
+                }]
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        let document = detail.issue.rich_description.unwrap();
+
+        assert_eq!(
+            document.fallback_images.len(),
+            RichTextDocument::MAX_FALLBACK_IMAGES
+        );
+        assert!(
+            document
+                .fallback_images
+                .iter()
+                .all(|image| image.mime_type != "image/svg+xml")
+        );
+    }
+
+    #[test]
     fn old_serialized_rich_text_documents_still_deserialize() {
         let document: RichTextDocument = serde_json::from_value(serde_json::json!({
             "blocks": [{"Paragraph": [{"Text": {"text": "cached", "marks": []}}]}]
         }))
         .expect("old cached rich text should remain readable");
         assert_eq!(document.plain_text(), "cached");
+        assert!(document.fallback_images.is_empty());
     }
 
     #[test]
