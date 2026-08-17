@@ -6,7 +6,7 @@ use jira_application::{IssueCommentsPage, PageCursor};
 use jira_domain::{
     AccountId, AttachmentMetadata, Issue, IssueComment, IssueCommentAuthor, IssueDetailCore,
     IssueId, IssueKey, IssueType, JiraSiteId, PanelKind, ParentIssue, Priority, Project, RichBlock,
-    RichInline, RichListItem, RichMark, RichTextDocument, Status, Timestamp, User,
+    RichImage, RichInline, RichListItem, RichMark, RichTextDocument, Status, Timestamp, User,
 };
 use serde_json::Value;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -23,20 +23,20 @@ impl IssueMapper {
         site_id: JiraSiteId,
         issue: JiraIssue,
     ) -> Result<IssueDetailCore, MappingError> {
-        let (rich_description, description) = issue
-            .fields
-            .description
-            .as_ref()
-            .and_then(visible_adf)
-            .map_or((None, None), |(document, text)| {
-                (Some(document), Some(text))
-            });
         let attachments = issue
             .fields
             .attachment
             .iter()
             .map(map_attachment)
             .collect::<Result<Vec<_>, _>>()?;
+        let (rich_description, description) = issue
+            .fields
+            .description
+            .as_ref()
+            .and_then(|value| visible_adf_with_attachments(value, &attachments))
+            .map_or((None, None), |(document, text)| {
+                (Some(document), Some(text))
+            });
         let mut domain_issue = self.map_domain_issue(site_id, issue)?;
         domain_issue.description_text = description;
         domain_issue.rich_description = rich_description;
@@ -241,7 +241,10 @@ const MAX_ADF_DEPTH: usize = 64;
 const MAX_ADF_NODES: usize = 10_000;
 const MAX_LINK_HREF_BYTES: usize = 2_048;
 const MAX_LINK_TITLE_BYTES: usize = 512;
+const MAX_MEDIA_ALT_BYTES: usize = 512;
+const MAX_MEDIA_DIMENSION: u32 = 10_000;
 const UNSUPPORTED_CONTENT: &str = "[unsupported Jira content]";
+const UNAVAILABLE_IMAGE: &str = "[Jira image unavailable]";
 
 fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, MappingError> {
     AttachmentMetadata::new(
@@ -301,6 +304,20 @@ fn adf_comment_text(value: &Value) -> Option<String> {
 /// Invalid roots are rejected. Unsupported nodes become safe placeholders, and no raw attrs,
 /// URLs, or account IDs are ever copied into visible fallback text.
 pub fn parse_adf(value: &Value) -> Option<RichTextDocument> {
+    parse_adf_internal(value, None)
+}
+
+fn parse_adf_with_attachments(
+    value: &Value,
+    attachments: &[AttachmentMetadata],
+) -> Option<RichTextDocument> {
+    parse_adf_internal(value, Some(attachments))
+}
+
+fn parse_adf_internal(
+    value: &Value,
+    attachments: Option<&[AttachmentMetadata]>,
+) -> Option<RichTextDocument> {
     let object = value.as_object()?;
     if object.get("type").and_then(Value::as_str) != Some("doc")
         || object.get("version").and_then(Value::as_u64) != Some(1)
@@ -308,7 +325,13 @@ pub fn parse_adf(value: &Value) -> Option<RichTextDocument> {
         return None;
     }
     let content = object.get("content")?.as_array()?;
-    let mut state = AdfParserState::default();
+    let mut state = AdfParserState {
+        media: attachments.map(|attachments| AdfMediaContext {
+            attachments,
+            file_media_count: count_file_media_nodes(value),
+        }),
+        ..AdfParserState::default()
+    };
     let blocks = parse_blocks(content, 1, &mut state);
     Some(RichTextDocument::new(blocks, state.truncated))
 }
@@ -319,14 +342,29 @@ fn visible_adf(value: &Value) -> Option<(RichTextDocument, String)> {
     (!text.is_empty()).then_some((document, text))
 }
 
+fn visible_adf_with_attachments(
+    value: &Value,
+    attachments: &[AttachmentMetadata],
+) -> Option<(RichTextDocument, String)> {
+    let document = parse_adf_with_attachments(value, attachments)?;
+    let text = document.plain_text();
+    (!text.is_empty()).then_some((document, text))
+}
+
 #[derive(Default)]
-struct AdfParserState {
+struct AdfParserState<'a> {
     nodes: usize,
     text_bytes: usize,
     truncated: bool,
+    media: Option<AdfMediaContext<'a>>,
 }
 
-impl AdfParserState {
+struct AdfMediaContext<'a> {
+    attachments: &'a [AttachmentMetadata],
+    file_media_count: usize,
+}
+
+impl AdfParserState<'_> {
     fn visit(&mut self) -> bool {
         if self.nodes >= MAX_ADF_NODES {
             self.truncated = true;
@@ -356,14 +394,38 @@ impl AdfParserState {
     }
 }
 
-fn parse_blocks(values: &[Value], depth: usize, state: &mut AdfParserState) -> Vec<RichBlock> {
+fn parse_blocks(values: &[Value], depth: usize, state: &mut AdfParserState<'_>) -> Vec<RichBlock> {
     values
         .iter()
-        .filter_map(|value| parse_block(value, depth, state))
+        .flat_map(|value| {
+            let is_media_container = state.media.is_some()
+                && matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some("mediaSingle" | "mediaGroup")
+                );
+            if !is_media_container {
+                return parse_block(value, depth, state).into_iter().collect();
+            }
+            if depth > MAX_ADF_DEPTH || !state.visit() {
+                state.truncated = true;
+                return vec![RichBlock::Placeholder {
+                    label: UNAVAILABLE_IMAGE.to_owned(),
+                }];
+            }
+            match value.get("content").and_then(Value::as_array) {
+                Some(content) => parse_media_container(content, depth + 1, state),
+                None => {
+                    state.truncated = true;
+                    vec![RichBlock::Placeholder {
+                        label: UNAVAILABLE_IMAGE.to_owned(),
+                    }]
+                }
+            }
+        })
         .collect()
 }
 
-fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState) -> Option<RichBlock> {
+fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> Option<RichBlock> {
     if depth > MAX_ADF_DEPTH || !state.visit() {
         state.truncated = true;
         return None;
@@ -454,7 +516,20 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState) -> Optio
         "doc" => RichBlock::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         },
-        "media" | "mediaSingle" | "mediaGroup" | "mediaInline" => RichBlock::Placeholder {
+        "media" => parse_media_node(object, state),
+        "mediaSingle" | "mediaGroup" => match content {
+            Some(content) if state.media.is_some() => {
+                let blocks = parse_media_container(content, depth, state);
+                match blocks.as_slice() {
+                    [block] => block.clone(),
+                    _ => RichBlock::BlockQuote(blocks),
+                }
+            }
+            _ => RichBlock::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            },
+        },
+        "mediaInline" => RichBlock::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         },
         "rule" | "table" | "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date"
@@ -468,17 +543,237 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState) -> Optio
     Some(block)
 }
 
-fn malformed_block(state: &mut AdfParserState) -> RichBlock {
+fn malformed_block(state: &mut AdfParserState<'_>) -> RichBlock {
     state.truncated = true;
     RichBlock::Placeholder {
         label: UNSUPPORTED_CONTENT.to_owned(),
     }
 }
 
+fn parse_media_container(
+    values: &[Value],
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Vec<RichBlock> {
+    if values.is_empty() {
+        state.truncated = true;
+        return vec![RichBlock::Placeholder {
+            label: UNAVAILABLE_IMAGE.to_owned(),
+        }];
+    }
+    values
+        .iter()
+        .map(|value| {
+            if depth > MAX_ADF_DEPTH || !state.visit() {
+                state.truncated = true;
+                return RichBlock::Placeholder {
+                    label: UNAVAILABLE_IMAGE.to_owned(),
+                };
+            }
+            match value.as_object() {
+                Some(object) if object.get("type").and_then(Value::as_str) == Some("media") => {
+                    parse_media_node(object, state)
+                }
+                _ => {
+                    state.truncated = true;
+                    RichBlock::Placeholder {
+                        label: UNAVAILABLE_IMAGE.to_owned(),
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn parse_media_node(
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> RichBlock {
+    let Some(media) = state.media.as_ref() else {
+        return RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(attrs) = object.get("attrs").and_then(Value::as_object) else {
+        state.truncated = true;
+        return RichBlock::Placeholder {
+            label: UNAVAILABLE_IMAGE.to_owned(),
+        };
+    };
+    if attrs.get("type").and_then(Value::as_str) != Some("file") {
+        return RichBlock::Placeholder {
+            label: UNAVAILABLE_IMAGE.to_owned(),
+        };
+    }
+    resolve_media_image(attrs, media).map_or(
+        RichBlock::Placeholder {
+            label: UNAVAILABLE_IMAGE.to_owned(),
+        },
+        RichBlock::Image,
+    )
+}
+
+fn resolve_media_image(
+    attrs: &serde_json::Map<String, Value>,
+    media: &AdfMediaContext<'_>,
+) -> Option<RichImage> {
+    let id = attrs
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let alt = attrs
+        .get("alt")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+
+    let attachment = if let Some(id) = id {
+        match unique_attachment(
+            media
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.id == id),
+        ) {
+            Ok(Some(attachment)) => attachment,
+            Err(()) => return None,
+            Ok(None) => alt_or_fallback(alt, media)?,
+        }
+    } else {
+        alt_or_fallback(alt, media)?
+    };
+
+    let mime_type = normalized_image_mime(attachment.mime_type.as_deref())?;
+    let alt_text = alt
+        .map(|value| bounded_media_text(value, MAX_MEDIA_ALT_BYTES))
+        .filter(|value| !value.is_empty());
+    Some(RichImage {
+        attachment_id: attachment.id.clone(),
+        filename: attachment.filename.clone(),
+        mime_type,
+        alt_text,
+        width: bounded_dimension(attrs.get("width")),
+        height: bounded_dimension(attrs.get("height")),
+    })
+}
+
+fn alt_or_fallback<'a>(
+    alt: Option<&str>,
+    media: &'a AdfMediaContext<'_>,
+) -> Option<&'a AttachmentMetadata> {
+    if let Some(alt) = alt {
+        match unique_attachment(
+            media
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.filename == alt),
+        ) {
+            Ok(Some(attachment)) => return Some(attachment),
+            Err(()) => return None,
+            Ok(None) => {}
+        }
+    }
+    let mut allowed = media
+        .attachments
+        .iter()
+        .filter(|attachment| allowed_image_mime(attachment.mime_type.as_deref()));
+    if media.file_media_count == 1 {
+        let attachment = allowed.next()?;
+        if allowed.next().is_none() {
+            return Some(attachment);
+        }
+    }
+    None
+}
+
+fn unique_attachment<'a, I>(mut matches: I) -> Result<Option<&'a AttachmentMetadata>, ()>
+where
+    I: Iterator<Item = &'a AttachmentMetadata>,
+{
+    let Some(attachment) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        Err(())
+    } else {
+        Ok(Some(attachment))
+    }
+}
+
+fn allowed_image_mime(mime_type: Option<&str>) -> bool {
+    normalized_image_mime(mime_type).is_some()
+}
+
+fn normalized_image_mime(mime_type: Option<&str>) -> Option<String> {
+    let mime_type = mime_type?.trim();
+    if mime_type.eq_ignore_ascii_case("image/png")
+        || mime_type.eq_ignore_ascii_case("image/jpeg")
+        || mime_type.eq_ignore_ascii_case("image/gif")
+        || mime_type.eq_ignore_ascii_case("image/webp")
+    {
+        Some(mime_type.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn bounded_media_text(value: &str, maximum: usize) -> String {
+    let end = value
+        .char_indices()
+        .take_while(|(index, character)| index + character.len_utf8() <= maximum)
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    value[..end].to_owned()
+}
+
+fn bounded_dimension(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (1..=MAX_MEDIA_DIMENSION).contains(value))
+}
+
+fn count_file_media_nodes(value: &Value) -> usize {
+    let mut count = 0;
+    let mut visited = 0;
+    count_file_media_nodes_inner(value, 0, &mut count, &mut visited);
+    count
+}
+
+fn count_file_media_nodes_inner(
+    value: &Value,
+    depth: usize,
+    count: &mut usize,
+    visited: &mut usize,
+) {
+    if depth > MAX_ADF_DEPTH || *count >= 2 || *visited >= MAX_ADF_NODES {
+        return;
+    }
+    *visited += 1;
+    if let Some(object) = value.as_object() {
+        if object.get("type").and_then(Value::as_str) == Some("media")
+            && object
+                .get("attrs")
+                .and_then(Value::as_object)
+                .and_then(|attrs| attrs.get("type"))
+                .and_then(Value::as_str)
+                == Some("file")
+        {
+            *count = count.saturating_add(1);
+        }
+        for child in object.values() {
+            count_file_media_nodes_inner(child, depth + 1, count, visited);
+        }
+    } else if let Some(values) = value.as_array() {
+        for child in values {
+            count_file_media_nodes_inner(child, depth + 1, count, visited);
+        }
+    }
+}
+
 fn parse_list_items(
     values: &[Value],
     depth: usize,
-    state: &mut AdfParserState,
+    state: &mut AdfParserState<'_>,
 ) -> Vec<RichListItem> {
     values
         .iter()
@@ -518,7 +813,7 @@ fn parse_list_items(
         .collect()
 }
 
-fn parse_code_text(values: &[Value], depth: usize, state: &mut AdfParserState) -> String {
+fn parse_code_text(values: &[Value], depth: usize, state: &mut AdfParserState<'_>) -> String {
     let mut text = String::new();
     for value in values {
         if depth > MAX_ADF_DEPTH || !state.visit() {
@@ -536,14 +831,18 @@ fn parse_code_text(values: &[Value], depth: usize, state: &mut AdfParserState) -
     text
 }
 
-fn parse_inlines(values: &[Value], depth: usize, state: &mut AdfParserState) -> Vec<RichInline> {
+fn parse_inlines(
+    values: &[Value],
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Vec<RichInline> {
     values
         .iter()
         .filter_map(|value| parse_inline(value, depth, state))
         .collect()
 }
 
-fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState) -> Option<RichInline> {
+fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> Option<RichInline> {
     if depth > MAX_ADF_DEPTH || !state.visit() {
         state.truncated = true;
         return None;
@@ -943,6 +1242,181 @@ mod tests {
         assert_eq!(detail.attachments.len(), 1);
         assert_eq!(detail.attachments[0].id, "10001");
         assert_eq!(detail.attachments[0].size_bytes, 2048);
+    }
+
+    #[test]
+    fn maps_media_only_description_by_unique_attachment_filename() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {
+                        "type": "file", "alt": "design.png", "width": 640, "height": 480
+                    }
+                }]
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        let RichBlock::Image(image) = &detail.issue.rich_description.unwrap().blocks[0] else {
+            panic!("expected an image block")
+        };
+        assert_eq!(image.attachment_id, "10001");
+        assert_eq!(image.filename, "design.png");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.alt_text.as_deref(), Some("design.png"));
+        assert_eq!(image.width, Some(640));
+        assert_eq!(image.height, Some(480));
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("[image: design.png]")
+        );
+    }
+
+    #[test]
+    fn normalizes_allowlisted_attachment_mime_before_projecting_image() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.attachment[0].mime_type = Some("  IMAGE/PNG  ".to_owned());
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {"type": "file", "id": "10001"}
+                }]
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        let RichBlock::Image(image) = &detail.issue.rich_description.unwrap().blocks[0] else {
+            panic!("expected an image block")
+        };
+        assert_eq!(image.mime_type, "image/png");
+    }
+
+    #[test]
+    fn maps_one_file_media_to_the_only_allowed_image_attachment_without_alt_or_id() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaGroup", "content": [{
+                    "type": "media", "attrs": {"type": "file"}
+                }]
+            }]
+        }));
+
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("[image: design.png]")
+        );
+        assert!(matches!(
+            detail.issue.rich_description.unwrap().blocks[0],
+            RichBlock::Image(_)
+        ));
+    }
+
+    #[test]
+    fn keeps_ambiguous_or_unsupported_media_visible_without_guessing() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.attachment.push(JiraAttachment {
+            id: "10002".to_owned(),
+            filename: "design.png".to_owned(),
+            size: 1024,
+            mime_type: Some("image/jpeg".to_owned()),
+        });
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {"type": "file", "alt": "design.png"}
+                }]
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("[Jira image unavailable]")
+        );
+
+        let mut svg: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        svg.fields.attachment[0].mime_type = Some("image/svg+xml".to_owned());
+        svg.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {"type": "file", "id": "10001"}
+                }]
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), svg)
+            .unwrap();
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("[Jira image unavailable]")
+        );
+    }
+
+    #[test]
+    fn leaves_multiple_unidentified_image_attachments_unavailable() {
+        let mut issue: JiraIssue =
+            serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+        issue.fields.attachment.push(JiraAttachment {
+            id: "10002".to_owned(),
+            filename: "other.jpg".to_owned(),
+            size: 1024,
+            mime_type: Some("image/jpeg".to_owned()),
+        });
+        issue.fields.description = Some(serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "mediaSingle", "content": [{
+                    "type": "media", "attrs": {"type": "file"}
+                }]
+            }]
+        }));
+        let detail = IssueMapper
+            .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), issue)
+            .unwrap();
+        assert_eq!(
+            detail.issue.description_text.as_deref(),
+            Some("[Jira image unavailable]")
+        );
+    }
+
+    #[test]
+    fn old_serialized_rich_text_documents_still_deserialize() {
+        let document: RichTextDocument = serde_json::from_value(serde_json::json!({
+            "blocks": [{"Paragraph": [{"Text": {"text": "cached", "marks": []}}]}]
+        }))
+        .expect("old cached rich text should remain readable");
+        assert_eq!(document.plain_text(), "cached");
+    }
+
+    #[test]
+    fn bounds_wide_media_count_prepass_by_visited_adf_nodes() {
+        let mut content = Vec::with_capacity(MAX_ADF_NODES * 2);
+        for _ in 0..(MAX_ADF_NODES * 2) {
+            content.push(serde_json::json!({"type": "paragraph", "content": []}));
+        }
+        let document = serde_json::json!({
+            "type": "doc", "version": 1, "content": content
+        });
+        let mut count = 0;
+        let mut visited = 0;
+        count_file_media_nodes_inner(&document, 0, &mut count, &mut visited);
+
+        assert_eq!(count, 0);
+        assert_eq!(visited, MAX_ADF_NODES);
     }
 
     #[test]

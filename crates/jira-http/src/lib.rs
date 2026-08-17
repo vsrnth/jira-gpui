@@ -12,9 +12,12 @@ use std::{
 
 use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraCommentPage, JiraIssue, JiraUser};
 use jira_application::{
-    AddCommentRequest, ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
-    IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage,
-    JiraCommentWritePort, JiraReadPort, PageCursor, PortFuture, UserSearchRequest,
+    AddCommentRequest, ApplicationError, AttachmentContent, AttachmentDownloadRequest,
+    AttachmentImage, AttachmentImageRequest, CancellationToken, DEFAULT_ATTACHMENT_IMAGE_HEIGHT,
+    DEFAULT_ATTACHMENT_IMAGE_WIDTH, DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
+    DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind, IssueCommentsPage, IssueCommentsPageRequest,
+    IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, JiraCommentWritePort,
+    JiraReadPort, PageCursor, PortFuture, UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, User};
 use reqwest::{Client, Response, StatusCode, header};
@@ -27,6 +30,15 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
+
+struct AttachmentReadOptions {
+    attachment_id: String,
+    cancellation: CancellationToken,
+    max_bytes: usize,
+    width: usize,
+    height: usize,
+    thumbnail: bool,
+}
 
 #[derive(Debug, Serialize)]
 struct JiraCommentCreateRequest {
@@ -137,6 +149,10 @@ pub struct JiraHttpConfig {
     pub request_timeout: Duration,
     pub connect_timeout: Duration,
     pub max_response_bytes: usize,
+    /// Independent hard cap for Jira image thumbnails.
+    pub attachment_image_max_bytes: usize,
+    /// Independent hard cap for explicit original attachment downloads.
+    pub attachment_download_max_bytes: usize,
     pub user_agent: String,
 }
 
@@ -146,6 +162,8 @@ impl Default for JiraHttpConfig {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            attachment_image_max_bytes: DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES,
+            attachment_download_max_bytes: DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
             user_agent: DEFAULT_USER_AGENT.to_owned(),
         }
     }
@@ -158,6 +176,13 @@ impl JiraHttpConfig {
         }
         if self.max_response_bytes == 0 {
             return Err(ConfigError::InvalidResponseLimit);
+        }
+        if self.attachment_image_max_bytes == 0
+            || self.attachment_image_max_bytes > DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES
+            || self.attachment_download_max_bytes == 0
+            || self.attachment_download_max_bytes > DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES
+        {
+            return Err(ConfigError::InvalidAttachmentLimit);
         }
         if self.user_agent.trim().is_empty() {
             return Err(ConfigError::EmptyUserAgent);
@@ -256,6 +281,21 @@ impl JiraHttpClient {
             if let Some(suffix) = suffix {
                 segments.push(suffix);
             }
+        }
+        Ok(url)
+    }
+
+    fn attachment_endpoint(
+        &self,
+        path: &str,
+        attachment_id: &str,
+    ) -> Result<Url, ApplicationError> {
+        let mut url = self.endpoint(path)?;
+        {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                ApplicationError::new(ErrorKind::Internal, "invalid Jira attachment endpoint")
+            })?;
+            segments.push(attachment_id);
         }
         Ok(url)
     }
@@ -508,6 +548,89 @@ impl JiraHttpClient {
         })
     }
 
+    fn attachment_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+    ) -> reqwest::RequestBuilder {
+        client
+            .get(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "*/*")
+    }
+
+    async fn attachment_image_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        options: AttachmentReadOptions,
+    ) -> Result<AttachmentContent, ApplicationError> {
+        if options.max_bytes == 0 {
+            return Err(ApplicationError::invalid_input(
+                "attachment response limit must be positive",
+            ));
+        }
+        let url = attachment_url_with_query(url, options.width, options.height, options.thumbnail);
+
+        options.cancellation.check()?;
+        let response = Self::attachment_request_builder(&client, url, &credentials)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(status, response.headers()));
+        }
+        let mime_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(media_type)
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ErrorKind::Upstream,
+                    "Jira attachment response had an invalid media type",
+                )
+            })?;
+        if options.thumbnail && !is_allowed_image_mime(&mime_type) {
+            return Err(ApplicationError::new(
+                ErrorKind::Upstream,
+                "Jira attachment response was not an image",
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > options.max_bytes as u64)
+        {
+            return Err(ApplicationError::new(
+                ErrorKind::Upstream,
+                "Jira attachment exceeded the size limit",
+            ));
+        }
+
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            ApplicationError::new(ErrorKind::Offline, "could not read Jira attachment")
+        })? {
+            options.cancellation.check()?;
+            if body.len().saturating_add(chunk.len()) > options.max_bytes {
+                return Err(ApplicationError::new(
+                    ErrorKind::Upstream,
+                    "Jira attachment exceeded the size limit",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        options.cancellation.check()?;
+        let body = finish_attachment_body(body, options.max_bytes, &options.cancellation)?;
+        Ok(AttachmentContent {
+            attachment_id: options.attachment_id,
+            mime_type,
+            bytes: body,
+        })
+    }
+
     fn create_comment_request_builder(
         client: &Client,
         url: Url,
@@ -544,6 +667,125 @@ impl JiraHttpClient {
 }
 
 impl JiraReadPort for JiraHttpClient {
+    fn fetch_attachment_image<'a>(
+        &'a self,
+        request: &'a AttachmentImageRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, AttachmentImage> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if request.attachment_id.trim().is_empty() || request.attachment_id.len() > 255 {
+            return Box::pin(std::future::ready(Err(ApplicationError::invalid_input(
+                "attachment ID is invalid",
+            ))));
+        }
+        if request.max_bytes == 0
+            || request.max_bytes > DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES
+            || request.width == 0
+            || request.width > DEFAULT_ATTACHMENT_IMAGE_WIDTH
+            || request.height == 0
+            || request.height > DEFAULT_ATTACHMENT_IMAGE_HEIGHT
+        {
+            return Box::pin(std::future::ready(Err(ApplicationError::invalid_input(
+                "attachment thumbnail bounds are invalid",
+            ))));
+        }
+        let url = match self
+            .attachment_endpoint("rest/api/3/attachment/thumbnail", &request.attachment_id)
+        {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let attachment_id = request.attachment_id.clone();
+        let cancellation_for_request = cancellation.clone();
+        let max = self
+            .config
+            .attachment_image_max_bytes
+            .min(request.max_bytes);
+        let width = request.width;
+        let height = request.height;
+        self.submit(cancellation, async move {
+            let content = Self::attachment_image_request(
+                client,
+                url,
+                credentials,
+                AttachmentReadOptions {
+                    attachment_id,
+                    cancellation: cancellation_for_request,
+                    max_bytes: max,
+                    width,
+                    height,
+                    thumbnail: true,
+                },
+            )
+            .await?;
+            Ok(AttachmentImage {
+                attachment_id: content.attachment_id,
+                mime_type: content.mime_type,
+                bytes: content.bytes,
+            })
+        })
+    }
+
+    fn fetch_attachment_content<'a>(
+        &'a self,
+        request: &'a AttachmentDownloadRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, AttachmentContent> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if request.attachment_id.trim().is_empty() || request.attachment_id.len() > 255 {
+            return Box::pin(std::future::ready(Err(ApplicationError::invalid_input(
+                "attachment ID is invalid",
+            ))));
+        }
+        if request.max_bytes == 0 || request.max_bytes > DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES {
+            return Box::pin(std::future::ready(Err(ApplicationError::invalid_input(
+                "attachment download limit is invalid",
+            ))));
+        }
+        let url = match self
+            .attachment_endpoint("rest/api/3/attachment/content", &request.attachment_id)
+        {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let attachment_id = request.attachment_id.clone();
+        let cancellation_for_request = cancellation.clone();
+        let max = self
+            .config
+            .attachment_download_max_bytes
+            .min(request.max_bytes);
+        self.submit(cancellation, async move {
+            Self::attachment_image_request(
+                client,
+                url,
+                credentials,
+                AttachmentReadOptions {
+                    attachment_id,
+                    cancellation: cancellation_for_request,
+                    max_bytes: max,
+                    width: 0,
+                    height: 0,
+                    thumbnail: false,
+                },
+            )
+            .await
+        })
+    }
+
     fn fetch_issue_detail<'a>(
         &'a self,
         request: &'a IssueDetailRequest,
@@ -746,6 +988,8 @@ pub enum ConfigError {
     InvalidTimeout,
     #[error("Jira response limit must be positive")]
     InvalidResponseLimit,
+    #[error("Jira attachment limits are invalid")]
+    InvalidAttachmentLimit,
     #[error("Jira user agent cannot be empty")]
     EmptyUserAgent,
     #[error("could not initialize the Jira HTTP client")]
@@ -783,6 +1027,56 @@ fn transport_error(error: reqwest::Error) -> ApplicationError {
     } else {
         ApplicationError::new(ErrorKind::Upstream, "Jira request failed")
     }
+}
+
+fn media_type(value: &str) -> Option<String> {
+    let media_type = value.split(';').next()?.trim().to_ascii_lowercase();
+    if media_type.is_empty() || !media_type.contains('/') {
+        None
+    } else {
+        Some(media_type)
+    }
+}
+
+fn attachment_url_with_query(mut url: Url, width: usize, height: usize, thumbnail: bool) -> Url {
+    if thumbnail {
+        url.query_pairs_mut()
+            .append_pair("redirect", "false")
+            .append_pair("width", &width.to_string())
+            .append_pair("height", &height.to_string())
+            .append_pair("fallbackToDefault", "false");
+    } else {
+        url.query_pairs_mut().append_pair("redirect", "false");
+    }
+    url
+}
+
+fn is_allowed_image_mime(value: &str) -> bool {
+    matches!(
+        value,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
+
+fn finish_attachment_body(
+    body: Vec<u8>,
+    max_bytes: usize,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, ApplicationError> {
+    cancellation.check()?;
+    if body.is_empty() {
+        return Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira returned an empty attachment",
+        ));
+    }
+    if body.len() > max_bytes {
+        return Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira attachment exceeded the size limit",
+        ));
+    }
+    Ok(body)
 }
 
 fn comment_transport_error(error: reqwest::Error) -> ApplicationError {
@@ -1166,6 +1460,153 @@ mod tests {
 
         assert_eq!(url.path(), "/rest/api/3/issue/ENG-42");
         assert_eq!(url.query(), None);
+    }
+
+    #[test]
+    fn attachment_thumbnail_and_content_requests_are_authenticated_and_pinned_to_jira_api() {
+        let configured = JiraSiteId::new("configured-site").unwrap();
+        let client = JiraHttpClient {
+            site_id: configured,
+            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            credentials: ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
+            client: Client::new(),
+            runtime: Arc::new(RuntimeBridge::new().unwrap()),
+            config: JiraHttpConfig::default(),
+        };
+        let mut thumbnail = client
+            .attachment_endpoint("rest/api/3/attachment/thumbnail", "att/42?url=evil")
+            .unwrap();
+        thumbnail = attachment_url_with_query(thumbnail, 640, 480, true);
+        let request = JiraHttpClient::attachment_request_builder(
+            &client.client,
+            thumbnail,
+            &client.credentials,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(
+            request.url().path(),
+            "/rest/api/3/attachment/thumbnail/att%2F42%3Furl=evil"
+        );
+        assert_eq!(
+            request.url().query(),
+            Some("redirect=false&width=640&height=480&fallbackToDefault=false")
+        );
+        assert_eq!(
+            request.headers().get(header::AUTHORIZATION).unwrap(),
+            "Basic cGVyc29uQGV4YW1wbGUuY29tOnNlY3JldC10b2tlbg=="
+        );
+
+        let content = client
+            .attachment_endpoint("rest/api/3/attachment/content", "42")
+            .unwrap();
+        let mut content_request = JiraHttpClient::attachment_request_builder(
+            &client.client,
+            content,
+            &client.credentials,
+        )
+        .build()
+        .unwrap();
+        content_request
+            .url_mut()
+            .query_pairs_mut()
+            .append_pair("redirect", "false");
+        assert_eq!(
+            content_request.url().path(),
+            "/rest/api/3/attachment/content/42"
+        );
+        assert_eq!(content_request.url().query(), Some("redirect=false"));
+    }
+
+    #[test]
+    fn attachment_content_type_is_normalized_and_images_are_allowlisted() {
+        assert_eq!(
+            media_type(" IMAGE/PNG; charset=binary "),
+            Some("image/png".to_owned())
+        );
+        assert_eq!(
+            media_type("application/pdf"),
+            Some("application/pdf".to_owned())
+        );
+        assert_eq!(media_type("missing"), None);
+        assert!(is_allowed_image_mime("image/webp"));
+        assert!(!is_allowed_image_mime("application/octet-stream"));
+        assert_eq!(
+            status_error(StatusCode::FOUND, &header::HeaderMap::new()).kind(),
+            ErrorKind::Upstream
+        );
+    }
+
+    #[test]
+    fn attachment_body_limits_reject_empty_and_oversized_responses_without_details() {
+        let empty = finish_attachment_body(Vec::new(), 4, &CancellationToken::new()).unwrap_err();
+        assert_eq!(empty.kind(), ErrorKind::Upstream);
+        let oversized =
+            finish_attachment_body(b"12345".to_vec(), 4, &CancellationToken::new()).unwrap_err();
+        assert_eq!(oversized.kind(), ErrorKind::Upstream);
+        assert!(!oversized.message().contains("12345"));
+    }
+
+    #[test]
+    fn attachment_limits_are_independent_from_json_response_limit() {
+        let body = vec![0_u8; 32 * 1024 * 1024];
+        assert!(
+            finish_attachment_body(
+                body.clone(),
+                DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
+                &CancellationToken::new()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            finish_attachment_body(
+                body,
+                DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES,
+                &CancellationToken::new()
+            )
+            .expect_err("32 MiB image should exceed the 8 MiB cap")
+            .kind(),
+            ErrorKind::Upstream
+        );
+        let config = JiraHttpConfig::default();
+        assert_eq!(config.max_response_bytes, 16 * 1024 * 1024);
+        assert_eq!(
+            config.attachment_download_max_bytes,
+            DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES
+        );
+        assert_eq!(
+            config.attachment_image_max_bytes,
+            DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn attachment_read_checks_cancellation_before_network_dispatch() {
+        let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(JiraHttpClient::attachment_image_request(
+                Client::new(),
+                Url::parse("https://example.atlassian.net/rest/api/3/attachment/content/42")
+                    .unwrap(),
+                credentials,
+                AttachmentReadOptions {
+                    attachment_id: "42".to_owned(),
+                    cancellation,
+                    max_bytes: 4,
+                    width: 0,
+                    height: 0,
+                    thumbnail: false,
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Cancelled);
     }
 
     #[test]

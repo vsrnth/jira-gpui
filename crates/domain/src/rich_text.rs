@@ -67,9 +67,27 @@ pub enum RichBlock {
         kind: PanelKind,
         content: Vec<RichBlock>,
     },
+    Image(RichImage),
     Placeholder {
         label: String,
     },
+}
+
+/// Bounded, transport-neutral metadata for an image attached to a Jira issue.
+///
+/// The attachment ID is intentionally the only fetch handle retained here. Content and
+/// thumbnail URLs, bytes, and HTTP/UI types do not belong in the domain model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichImage {
+    pub attachment_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    #[serde(default)]
+    pub alt_text: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +235,17 @@ fn append_block_text(block: &RichBlock, output: &mut PlainTextBuilder, depth: us
                 append_block_text(child, output, depth + 1);
             }
         }
+        RichBlock::Image(image) => {
+            output.push_str("[image: ");
+            output.push_str(
+                image
+                    .alt_text
+                    .as_deref()
+                    .filter(|alt| !alt.is_empty())
+                    .unwrap_or(&image.filename),
+            );
+            output.push_str("]\n");
+        }
         RichBlock::Placeholder { label } => {
             output.push_str(label);
             output.push_str("\n");
@@ -264,7 +293,7 @@ fn normalize_plain_text(value: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RichBlock, RichInline, RichTextDocument};
+    use super::{RichBlock, RichImage, RichInline, RichTextDocument};
 
     #[test]
     fn plain_text_is_bounded_for_deserialized_models() {
@@ -336,5 +365,34 @@ mod tests {
         let projected = many.plain_text();
         assert!(projected.len() <= RichTextDocument::MAX_PLAIN_TEXT_BYTES);
         assert!(projected.ends_with("[content truncated]"));
+    }
+
+    #[test]
+    fn image_plain_text_uses_alt_text_or_filename() {
+        let document = RichTextDocument::new(
+            vec![
+                RichBlock::Image(RichImage {
+                    attachment_id: "10001".to_owned(),
+                    filename: "diagram.png".to_owned(),
+                    mime_type: "image/png".to_owned(),
+                    alt_text: Some("Architecture diagram".to_owned()),
+                    width: Some(100),
+                    height: Some(80),
+                }),
+                RichBlock::Image(RichImage {
+                    attachment_id: "10002".to_owned(),
+                    filename: "screenshot.webp".to_owned(),
+                    mime_type: "image/webp".to_owned(),
+                    alt_text: None,
+                    width: None,
+                    height: None,
+                }),
+            ],
+            false,
+        );
+        assert_eq!(
+            document.plain_text(),
+            "[image: Architecture diagram]\n[image: screenshot.webp]"
+        );
     }
 }

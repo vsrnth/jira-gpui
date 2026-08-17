@@ -6,8 +6,9 @@ use jira_domain::{
 };
 
 use crate::{
-    AddCommentRequest, ApplicationError, ApplicationEvent, CancellationToken, ChangeSet,
-    CommitOutcome, IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest,
+    AddCommentRequest, ApplicationError, ApplicationEvent, AttachmentContent,
+    AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest, CancellationToken,
+    ChangeSet, CommitOutcome, IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest,
     IssueFetchRequest, IssueListQuery, IssuePage, NotificationRequest, SyncCommit, SyncState,
     UpdateFeedQuery, UserSearchRequest, UserSetDraft,
 };
@@ -16,6 +17,32 @@ pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationEr
 
 /// Read-only Jira gateway. Its implementation may own any async runtime it needs.
 pub trait JiraReadPort: Send + Sync {
+    /// Fetches the original bytes of one authenticated attachment. The default preserves
+    /// compatibility with gateways that do not implement attachment downloads.
+    fn fetch_attachment_content<'a>(
+        &'a self,
+        _request: &'a AttachmentDownloadRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, AttachmentContent> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "attachment downloads are not supported by this Jira gateway",
+        ))))
+    }
+
+    /// Fetches one authenticated image attachment thumbnail. The default preserves compatibility
+    /// with gateways that do not implement issue media reads.
+    fn fetch_attachment_image<'a>(
+        &'a self,
+        _request: &'a AttachmentImageRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, AttachmentImage> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "attachment images are not supported by this Jira gateway",
+        ))))
+    }
+
     /// Fetches the typed core payload for one issue. Adapters may override this when issue-detail
     /// support is available; the default preserves compatibility with existing gateways.
     fn fetch_issue_detail<'a>(

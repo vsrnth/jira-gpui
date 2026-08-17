@@ -10,6 +10,7 @@ mod error;
 mod feed;
 mod issue_detail;
 mod issue_diff;
+mod issue_media;
 mod issue_pull;
 mod issues;
 mod model;
@@ -25,6 +26,11 @@ pub use error::{ApplicationError, ErrorKind};
 pub use feed::UpdateFeedService;
 pub use issue_detail::{IssueDetailConfig, IssueDetailService};
 pub use issue_diff::DefaultIssueDiffer;
+pub use issue_media::{
+    DEFAULT_ATTACHMENT_IMAGE_HEIGHT, DEFAULT_ATTACHMENT_IMAGE_WIDTH,
+    DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, IssueMediaConfig,
+    IssueMediaService,
+};
 pub use issue_pull::{IssuePullConfig, IssuePullOutcome, IssuePullRequest, IssuePullService};
 pub use issues::IssueCatalogService;
 pub use model::*;
