@@ -8,15 +8,20 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    AnyElement, Hsla, Image, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img,
-    px,
+    AnyElement, Hsla, Image, ImageSource as GpuiImageSource, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    div, img, px,
 };
 use gpui_component::{
     StyledExt as _, h_flex, scroll::ScrollableElement as _, spinner::Spinner, v_flex,
 };
 use jira_domain::{
     PanelKind, RichBlock, RichImage, RichInline, RichListItem, RichMark, RichTextDocument,
+};
+
+use crate::diagnostics::{
+    DecodeFallbackReason, DiagnosticEvent, DiagnosticFlow, DiagnosticsSink,
+    ImageSource as DiagnosticImageSource, ImageStateReason,
 };
 
 // Cached models can be deserialized without passing through the Jira ADF
@@ -43,7 +48,114 @@ pub(crate) enum RichImageRenderState {
     Failed,
 }
 
-pub(crate) type RichImageRenderStates = HashMap<String, RichImageRenderState>;
+#[derive(Clone)]
+pub(crate) struct RichImageDiagnosticContext {
+    pub(crate) sink: DiagnosticsSink,
+    pub(crate) flow: DiagnosticFlow,
+    pub(crate) load_token: u64,
+    pub(crate) candidate_ordinal: usize,
+    pub(crate) surface_ordinal: usize,
+    pub(crate) source: DiagnosticImageSource,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RichImageRenderStates {
+    states: HashMap<String, RichImageRenderState>,
+    contexts: HashMap<String, RichImageDiagnosticContext>,
+    default_context: Option<(DiagnosticsSink, DiagnosticFlow, u64)>,
+}
+
+impl RichImageRenderStates {
+    pub(crate) fn with_context(
+        sink: DiagnosticsSink,
+        flow: DiagnosticFlow,
+        load_token: u64,
+    ) -> Self {
+        Self {
+            default_context: Some((sink, flow, load_token)),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn set_context(
+        &mut self,
+        sink: DiagnosticsSink,
+        flow: DiagnosticFlow,
+        load_token: u64,
+    ) {
+        self.states.clear();
+        self.contexts.clear();
+        self.default_context = Some((sink, flow, load_token));
+    }
+
+    pub(crate) fn insert(&mut self, key: String, state: RichImageRenderState) {
+        self.states.insert(key, state);
+    }
+
+    pub(crate) fn insert_with_context(
+        &mut self,
+        key: String,
+        state: RichImageRenderState,
+        candidate_ordinal: usize,
+        surface_ordinal: usize,
+        source: DiagnosticImageSource,
+    ) {
+        if let Some((sink, flow, load_token)) = &self.default_context {
+            self.contexts.insert(
+                key.clone(),
+                RichImageDiagnosticContext {
+                    sink: sink.clone(),
+                    flow: *flow,
+                    load_token: *load_token,
+                    candidate_ordinal,
+                    surface_ordinal,
+                    source,
+                },
+            );
+        }
+        self.states.insert(key, state);
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&RichImageRenderState> {
+        self.states.get(key)
+    }
+
+    pub(crate) fn context_for(
+        &self,
+        key: &str,
+        fallback_ordinal: usize,
+        fallback_surface_ordinal: usize,
+        fallback_source: DiagnosticImageSource,
+    ) -> Option<RichImageDiagnosticContext> {
+        self.contexts.get(key).cloned().or_else(|| {
+            self.default_context
+                .as_ref()
+                .map(|(sink, flow, load_token)| RichImageDiagnosticContext {
+                    sink: sink.clone(),
+                    flow: *flow,
+                    load_token: *load_token,
+                    candidate_ordinal: fallback_ordinal,
+                    surface_ordinal: fallback_surface_ordinal,
+                    source: fallback_source,
+                })
+        })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.states.clear();
+        self.contexts.clear();
+    }
+}
+
+impl<const N: usize> From<[(String, RichImageRenderState); N]> for RichImageRenderStates {
+    fn from(entries: [(String, RichImageRenderState); N]) -> Self {
+        let mut states = Self::default();
+        for (key, state) in entries {
+            states.insert(key, state);
+        }
+        states
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RichTextPalette {
@@ -62,11 +174,21 @@ pub(crate) fn render_rich_text(
     document: &RichTextDocument,
     palette: RichTextPalette,
     image_states: &RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
 ) -> AnyElement {
     let mut budget = RenderBudget::default();
     let mut blocks = Vec::new();
     for block in document.blocks.iter().take(MAX_RENDER_CHILDREN) {
-        blocks.push(render_block(block, palette, image_states, 0, &mut budget));
+        blocks.push(render_block(
+            block,
+            palette,
+            image_states,
+            surface_ordinal,
+            source,
+            0,
+            &mut budget,
+        ));
         if budget.omitted {
             break;
         }
@@ -95,7 +217,14 @@ pub(crate) fn render_rich_text(
             if !budget.enter(0) {
                 break;
             }
-            gallery.push(render_image(image, palette, image_states, &mut budget));
+            gallery.push(render_image(
+                image,
+                palette,
+                image_states,
+                surface_ordinal,
+                DiagnosticImageSource::FallbackCandidate,
+                &mut budget,
+            ));
         }
         if !gallery.is_empty() {
             content = content.child(
@@ -126,6 +255,8 @@ fn render_block(
     block: &RichBlock,
     palette: RichTextPalette,
     image_states: &RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
@@ -149,12 +280,26 @@ fn render_block(
                 HeadingSize::Sm => element.text_sm().into_any_element(),
             }
         }
-        RichBlock::BulletList(items) => {
-            render_list(items, None, palette, image_states, depth, budget)
-        }
-        RichBlock::OrderedList { order, items } => {
-            render_list(items, Some(*order), palette, image_states, depth, budget)
-        }
+        RichBlock::BulletList(items) => render_list(
+            items,
+            None,
+            palette,
+            image_states,
+            surface_ordinal,
+            source,
+            depth,
+            budget,
+        ),
+        RichBlock::OrderedList { order, items } => render_list(
+            items,
+            Some(*order),
+            palette,
+            image_states,
+            surface_ordinal,
+            source,
+            depth,
+            budget,
+        ),
         RichBlock::CodeBlock { language, text } => {
             let mut code = v_flex()
                 .min_w_0()
@@ -185,7 +330,15 @@ fn render_block(
             .pl_3()
             .border_l_2()
             .border_color(palette.muted)
-            .children(render_blocks(content, palette, image_states, depth, budget))
+            .children(render_blocks(
+                content,
+                palette,
+                image_states,
+                surface_ordinal,
+                source,
+                depth,
+                budget,
+            ))
             .into_any_element(),
         RichBlock::Panel { kind, content } => {
             let accent = panel_accent(*kind, palette);
@@ -197,10 +350,25 @@ fn render_block(
                 .border_1()
                 .border_color(accent)
                 .bg(accent.opacity(0.08))
-                .children(render_blocks(content, palette, image_states, depth, budget))
+                .children(render_blocks(
+                    content,
+                    palette,
+                    image_states,
+                    surface_ordinal,
+                    source,
+                    depth,
+                    budget,
+                ))
                 .into_any_element()
         }
-        RichBlock::Image(image) => render_image(image, palette, image_states, budget),
+        RichBlock::Image(image) => render_image(
+            image,
+            palette,
+            image_states,
+            surface_ordinal,
+            source,
+            budget,
+        ),
         RichBlock::Placeholder { label } => div()
             .min_w_0()
             .text_sm()
@@ -215,8 +383,12 @@ fn render_image(
     image: &RichImage,
     palette: RichTextPalette,
     image_states: &RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
     budget: &mut RenderBudget,
 ) -> AnyElement {
+    let image_ordinal = budget.image_ordinal;
+    budget.image_ordinal = budget.image_ordinal.saturating_add(1);
     let name = bounded_image_name(rich_image_name(image));
     let accessible_label = budget.text(&format!("Image: {name}"));
     let mut frame = v_flex()
@@ -235,13 +407,15 @@ fn render_image(
         ))
         .aria_label(accessible_label);
 
+    let diagnostic_context =
+        image_states.context_for(&image.attachment_id, image_ordinal, surface_ordinal, source);
     match image_render_state(image_states, image) {
         Some(RichImageRenderState::Ready(image)) => {
             let unavailable = format!("Image unavailable · {name}");
             let loading_color = palette.muted;
             let fallback_color = palette.muted;
             frame = frame.child(
-                img(ImageSource::Image(image.clone()))
+                img(GpuiImageSource::Image(image.clone()))
                     .max_w_full()
                     .max_h(px(MAX_IMAGE_HEIGHT))
                     .object_fit(ObjectFit::Contain)
@@ -257,6 +431,18 @@ fn render_image(
                             .into_any_element()
                     })
                     .with_fallback(move || {
+                        if let Some(context) = diagnostic_context.as_ref() {
+                            context
+                                .sink
+                                .record_once(DiagnosticEvent::gpui_decode_fallback(
+                                    context.flow,
+                                    context.load_token,
+                                    context.candidate_ordinal,
+                                    context.surface_ordinal,
+                                    context.source,
+                                    DecodeFallbackReason::DecodeFailed,
+                                ));
+                        }
                         div()
                             .text_xs()
                             .text_color(fallback_color)
@@ -276,7 +462,30 @@ fn render_image(
                     .child("Loading image…"),
             );
         }
-        Some(RichImageRenderState::Failed) | None => {
+        Some(RichImageRenderState::Failed) => {
+            let unavailable = format!("Image unavailable · {name}");
+            frame = frame.child(
+                div()
+                    .min_h(px(72.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(palette.muted)
+                    .child(budget.text(&unavailable)),
+            );
+        }
+        None => {
+            if let Some(context) = diagnostic_context.as_ref() {
+                context.sink.record_once(DiagnosticEvent::image_state(
+                    context.flow,
+                    context.load_token,
+                    context.candidate_ordinal,
+                    context.surface_ordinal,
+                    context.source,
+                    ImageStateReason::Missing,
+                ));
+            }
             let unavailable = format!("Image unavailable · {name}");
             frame = frame.child(
                 div()
@@ -328,6 +537,8 @@ fn render_blocks(
     blocks: &[RichBlock],
     palette: RichTextPalette,
     image_states: &RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> Vec<AnyElement> {
@@ -337,6 +548,8 @@ fn render_blocks(
             block,
             palette,
             image_states,
+            surface_ordinal,
+            source,
             depth.saturating_add(1),
             budget,
         ));
@@ -350,11 +563,14 @@ fn render_blocks(
     rendered
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_list(
     items: &[RichListItem],
     order: Option<u32>,
     palette: RichTextPalette,
     image_states: &RichImageRenderStates,
+    surface_ordinal: usize,
+    source: DiagnosticImageSource,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
@@ -385,6 +601,8 @@ fn render_list(
                     &item.blocks,
                     palette,
                     image_states,
+                    surface_ordinal,
+                    source,
                     depth,
                     budget,
                 )))
@@ -515,6 +733,7 @@ fn omitted_element(palette: RichTextPalette) -> AnyElement {
 #[derive(Default)]
 struct RenderBudget {
     nodes: usize,
+    image_ordinal: usize,
     text_bytes: usize,
     omitted: bool,
 }
@@ -604,7 +823,11 @@ fn panel_accent(kind: PanelKind, palette: RichTextPalette) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        fs,
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use jira_domain::{RichImage, RichInline};
 
@@ -612,6 +835,10 @@ mod tests {
         HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_TEXT_BYTES, RenderBudget, RichImageRenderState,
         RichImageRenderStates, heading_size, image_render_state, inline_line_count,
         rich_image_name,
+    };
+    use crate::diagnostics::{
+        DecodeFallbackReason, DiagnosticEvent, DiagnosticFlow, DiagnosticsSink, ImageSource,
+        ImageStateReason,
     };
 
     #[test]
@@ -713,6 +940,137 @@ mod tests {
         let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new()));
         let state = RichImageRenderState::Ready(image);
         assert!(matches!(state, RichImageRenderState::Ready(_)));
+    }
+
+    #[test]
+    fn clearing_image_states_preserves_missing_diagnostic_context() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("jira-rich-image-context-{nonce}"));
+        let sink = DiagnosticsSink::for_directory(&root);
+        let load_token = sink.begin_image_load();
+        let mut states = RichImageRenderStates::with_context(
+            sink.clone(),
+            DiagnosticFlow::SelectedDetail,
+            load_token,
+        );
+        states.clear();
+        let context = states
+            .context_for("missing", 0, 0, ImageSource::ResolvedAdf)
+            .expect("default context");
+        context.sink.record_once(DiagnosticEvent::image_state(
+            context.flow,
+            context.load_token,
+            context.candidate_ordinal,
+            context.surface_ordinal,
+            context.source,
+            ImageStateReason::Missing,
+        ));
+        let second_surface = states
+            .context_for("missing", 0, 1, ImageSource::ResolvedAdf)
+            .expect("second surface context");
+        second_surface
+            .sink
+            .record_once(DiagnosticEvent::image_state(
+                second_surface.flow,
+                second_surface.load_token,
+                second_surface.candidate_ordinal,
+                second_surface.surface_ordinal,
+                second_surface.source,
+                ImageStateReason::Missing,
+            ));
+        second_surface
+            .sink
+            .record_once(DiagnosticEvent::image_state(
+                second_surface.flow,
+                second_surface.load_token,
+                second_surface.candidate_ordinal,
+                second_surface.surface_ordinal,
+                second_surface.source,
+                ImageStateReason::Missing,
+            ));
+        context.sink.record_once(DiagnosticEvent::image_state(
+            context.flow,
+            context.load_token,
+            context.candidate_ordinal,
+            context.surface_ordinal,
+            context.source,
+            ImageStateReason::Missing,
+        ));
+        context
+            .sink
+            .record_once(DiagnosticEvent::gpui_decode_fallback(
+                context.flow,
+                context.load_token,
+                context.candidate_ordinal,
+                context.surface_ordinal,
+                context.source,
+                DecodeFallbackReason::DecodeFailed,
+            ));
+        context
+            .sink
+            .record_once(DiagnosticEvent::gpui_decode_fallback(
+                context.flow,
+                context.load_token,
+                context.candidate_ordinal,
+                context.surface_ordinal,
+                context.source,
+                DecodeFallbackReason::DecodeFailed,
+            ));
+        let next_load_token = sink.begin_image_load();
+        states.set_context(
+            sink.clone(),
+            DiagnosticFlow::SelectedDetail,
+            next_load_token,
+        );
+        states.clear();
+        let next_context = states
+            .context_for("missing", 0, 0, ImageSource::ResolvedAdf)
+            .expect("next default context");
+        next_context.sink.record_once(DiagnosticEvent::image_state(
+            next_context.flow,
+            next_context.load_token,
+            next_context.candidate_ordinal,
+            next_context.surface_ordinal,
+            next_context.source,
+            ImageStateReason::Missing,
+        ));
+        next_context.sink.record_once(DiagnosticEvent::image_state(
+            next_context.flow,
+            next_context.load_token,
+            next_context.candidate_ordinal,
+            next_context.surface_ordinal,
+            next_context.source,
+            ImageStateReason::Missing,
+        ));
+        next_context
+            .sink
+            .record_once(DiagnosticEvent::gpui_decode_fallback(
+                next_context.flow,
+                next_context.load_token,
+                next_context.candidate_ordinal,
+                next_context.surface_ordinal,
+                next_context.source,
+                DecodeFallbackReason::DecodeFailed,
+            ));
+        next_context
+            .sink
+            .record_once(DiagnosticEvent::gpui_decode_fallback(
+                next_context.flow,
+                next_context.load_token,
+                next_context.candidate_ordinal,
+                next_context.surface_ordinal,
+                next_context.source,
+                DecodeFallbackReason::DecodeFailed,
+            ));
+        let log = fs::read_to_string(root.join("diagnostics.jsonl")).expect("diagnostics");
+        assert_eq!(log.lines().count(), 5);
+        assert!(log.contains("\"reason\":\"missing\""));
+        assert!(log.contains(&format!("\"load_token\":{}", load_token)));
+        assert!(log.contains(&format!("\"load_token\":{}", next_load_token)));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

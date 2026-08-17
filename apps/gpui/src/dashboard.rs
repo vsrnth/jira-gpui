@@ -37,6 +37,10 @@ use jira_domain::{
 
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
+    diagnostics::{
+        DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageFetchResult, ImagePreflight,
+        ImageSignature, ImageSource, ImageStateReason, ResponseMime,
+    },
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     presentation::{
         IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
@@ -125,6 +129,13 @@ const MAX_RICH_IMAGES: usize = RichTextDocument::MAX_FALLBACK_IMAGES;
 const MAX_RICH_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Clone)]
+struct CollectedRichImage {
+    image: RichImage,
+    surface_ordinal: usize,
+    source: ImageSource,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AttachmentDownloadState {
     Idle,
@@ -172,6 +183,27 @@ fn fetched_image_format(
         image_format_for_mime(response_mime_type)?;
     }
     image_format_from_bytes(bytes)
+}
+
+fn image_response_preflight(
+    cached_mime_type: &str,
+    response_mime_type: &str,
+    bytes: &[u8],
+    resident_bytes: usize,
+) -> ImagePreflight {
+    if image_format_for_mime(cached_mime_type).is_none() {
+        ImagePreflight::UnsupportedCachedMime
+    } else if bytes.is_empty() {
+        ImagePreflight::Empty
+    } else if !image_bytes_fit_aggregate(resident_bytes, bytes.len()) {
+        ImagePreflight::AggregateRejected
+    } else if ResponseMime::classify(response_mime_type) == ResponseMime::Unsupported {
+        ImagePreflight::ResponseMimeRejected
+    } else if fetched_image_format(cached_mime_type, response_mime_type, bytes).is_none() {
+        ImagePreflight::SignatureRejected
+    } else {
+        ImagePreflight::Accepted
+    }
 }
 
 /// Keep only a leaf filename suitable for a portal suggestion. The selected
@@ -311,6 +343,7 @@ fn attachment_issue_id(
     remote_issue.cloned().or_else(|| selected_issue.cloned())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn collect_rich_images(document: &RichTextDocument) -> Vec<RichImage> {
     let mut images = Vec::new();
     let mut seen = HashSet::new();
@@ -331,6 +364,7 @@ fn collect_rich_images(document: &RichTextDocument) -> Vec<RichImage> {
     images
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn collect_rich_images_from_block(
     block: &RichBlock,
     seen: &mut HashSet<String>,
@@ -373,20 +407,28 @@ fn collect_rich_images_from_block(
     }
 }
 
+#[allow(dead_code)]
 fn collect_detail_images(detail: &IssueDetailViewModel) -> Vec<RichImage> {
+    collect_detail_images_with_context(detail)
+        .into_iter()
+        .map(|image| image.image)
+        .collect()
+}
+
+fn collect_detail_images_with_context(detail: &IssueDetailViewModel) -> Vec<CollectedRichImage> {
     let mut images = Vec::new();
     let mut seen = HashSet::new();
     if let Some(document) = detail.rich_description.as_ref() {
-        for image in collect_rich_images(document) {
-            if seen.insert(image.attachment_id.clone()) {
+        for image in collect_rich_images_with_context(document, 0) {
+            if seen.insert(image.image.attachment_id.clone()) {
                 images.push(image);
             }
         }
     }
-    for comment in &detail.comments {
+    for (comment_index, comment) in detail.comments.iter().enumerate() {
         if let Some(document) = comment.rich_body.as_ref() {
-            for image in collect_rich_images(document) {
-                if seen.insert(image.attachment_id.clone()) {
+            for image in collect_rich_images_with_context(document, comment_index + 1) {
+                if seen.insert(image.image.attachment_id.clone()) {
                     images.push(image);
                     if images.len() == MAX_RICH_IMAGES {
                         return images;
@@ -399,26 +441,204 @@ fn collect_detail_images(detail: &IssueDetailViewModel) -> Vec<RichImage> {
     images
 }
 
-fn loading_image_states(images: &[RichImage]) -> RichImageRenderStates {
+fn collect_rich_images_with_context(
+    document: &RichTextDocument,
+    surface_ordinal: usize,
+) -> Vec<CollectedRichImage> {
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
+    for block in &document.blocks {
+        collect_rich_images_from_block_with_context(
+            block,
+            &mut seen,
+            &mut images,
+            surface_ordinal,
+            ImageSource::ResolvedAdf,
+        );
+        if images.len() == MAX_RICH_IMAGES {
+            break;
+        }
+    }
+    for image in &document.fallback_images {
+        if seen.insert(image.attachment_id.clone()) {
+            images.push(CollectedRichImage {
+                image: image.clone(),
+                surface_ordinal,
+                source: ImageSource::FallbackCandidate,
+            });
+        }
+        if images.len() == MAX_RICH_IMAGES {
+            break;
+        }
+    }
     images
-        .iter()
-        .map(|image| (image.attachment_id.clone(), RichImageRenderState::Loading))
-        .collect()
 }
 
+fn collect_rich_images_from_block_with_context(
+    block: &RichBlock,
+    seen: &mut HashSet<String>,
+    images: &mut Vec<CollectedRichImage>,
+    surface_ordinal: usize,
+    source: ImageSource,
+) {
+    if images.len() == MAX_RICH_IMAGES {
+        return;
+    }
+    match block {
+        RichBlock::Image(image) => {
+            if seen.insert(image.attachment_id.clone()) {
+                images.push(CollectedRichImage {
+                    image: image.clone(),
+                    surface_ordinal,
+                    source,
+                });
+            }
+        }
+        RichBlock::BlockQuote(children)
+        | RichBlock::Panel {
+            content: children, ..
+        } => {
+            for child in children {
+                collect_rich_images_from_block_with_context(
+                    child,
+                    seen,
+                    images,
+                    surface_ordinal,
+                    source,
+                );
+                if images.len() == MAX_RICH_IMAGES {
+                    break;
+                }
+            }
+        }
+        RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
+            for item in items {
+                for child in &item.blocks {
+                    collect_rich_images_from_block_with_context(
+                        child,
+                        seen,
+                        images,
+                        surface_ordinal,
+                        source,
+                    );
+                    if images.len() == MAX_RICH_IMAGES {
+                        return;
+                    }
+                }
+            }
+        }
+        RichBlock::Paragraph(_)
+        | RichBlock::Heading { .. }
+        | RichBlock::CodeBlock { .. }
+        | RichBlock::Placeholder { .. } => {}
+    }
+}
+
+fn loading_image_states(
+    images: &[CollectedRichImage],
+    diagnostics: &DiagnosticsSink,
+    flow: DiagnosticFlow,
+    load_token: u64,
+) -> RichImageRenderStates {
+    let mut states = RichImageRenderStates::with_context(diagnostics.clone(), flow, load_token);
+    for (candidate_ordinal, image) in images.iter().enumerate() {
+        diagnostics.image_state(
+            flow,
+            load_token,
+            candidate_ordinal,
+            image.surface_ordinal,
+            image.source,
+            ImageStateReason::Loading,
+        );
+        states.insert_with_context(
+            image.image.attachment_id.clone(),
+            RichImageRenderState::Loading,
+            candidate_ordinal,
+            image.surface_ordinal,
+            image.source,
+        );
+    }
+    states
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn fetch_rich_image_states(
     workspace: Arc<LiveWorkspace>,
     site_id: JiraSiteId,
     issue_id: IssueId,
-    images: Vec<RichImage>,
+    images: Vec<CollectedRichImage>,
     cancellation: CancellationToken,
+    diagnostics: DiagnosticsSink,
+    flow: DiagnosticFlow,
+    load_token: u64,
 ) -> Result<RichImageRenderStates, ()> {
-    let mut states = RichImageRenderStates::default();
+    let mut states = RichImageRenderStates::with_context(diagnostics.clone(), flow, load_token);
     let mut resident_bytes = 0usize;
-    for image in images {
-        cancellation.check().map_err(|_| ())?;
+    for (candidate_ordinal, collected) in images.into_iter().enumerate() {
+        let image = collected.image;
+        let surface_ordinal = collected.surface_ordinal;
+        let source = collected.source;
+        if cancellation.is_cancelled() {
+            diagnostics.image_fetch_result(
+                flow,
+                load_token,
+                candidate_ordinal,
+                surface_ordinal,
+                source,
+                ImageFetchResult::Failed(DiagnosticErrorKind::Cancelled),
+            );
+            diagnostics.image_state(
+                flow,
+                load_token,
+                candidate_ordinal,
+                surface_ordinal,
+                source,
+                ImageStateReason::Cancelled,
+            );
+            return Err(());
+        }
+        diagnostics.image_fetch_started(
+            flow,
+            load_token,
+            candidate_ordinal,
+            surface_ordinal,
+            source,
+        );
         if image_format_for_mime(&image.mime_type).is_none() {
-            states.insert(image.attachment_id, RichImageRenderState::Failed);
+            diagnostics.image_response(
+                flow,
+                load_token,
+                candidate_ordinal,
+                surface_ordinal,
+                source,
+                ResponseMime::classify(&image.mime_type),
+                ImageSignature::Unknown,
+                0,
+                ImagePreflight::UnsupportedCachedMime,
+            );
+            diagnostics.image_fetch_result(
+                flow,
+                load_token,
+                candidate_ordinal,
+                surface_ordinal,
+                source,
+                ImageFetchResult::Failed(DiagnosticErrorKind::InvalidInput),
+            );
+            diagnostics.image_state(
+                flow,
+                load_token,
+                candidate_ordinal,
+                surface_ordinal,
+                source,
+                ImageStateReason::Unsupported,
+            );
+            states.insert_with_context(
+                image.attachment_id,
+                RichImageRenderState::Failed,
+                candidate_ordinal,
+                surface_ordinal,
+                source,
+            );
             continue;
         }
         let result = workspace
@@ -435,28 +655,115 @@ async fn fetch_rich_image_states(
             )
             .await;
         match result {
-            Ok(image_bytes)
-                if image_bytes_fit_aggregate(resident_bytes, image_bytes.bytes.len()) =>
-            {
-                let Some(format) = fetched_image_format(
+            Ok(image_bytes) => {
+                let response_mime = ResponseMime::classify(&image_bytes.mime_type);
+                let signature = ImageSignature::classify(&image_bytes.bytes);
+                let preflight = image_response_preflight(
                     &image.mime_type,
                     &image_bytes.mime_type,
                     &image_bytes.bytes,
-                ) else {
-                    states.insert(image.attachment_id, RichImageRenderState::Failed);
-                    continue;
-                };
-                resident_bytes = resident_bytes.saturating_add(image_bytes.bytes.len());
-                states.insert(
-                    image.attachment_id,
-                    RichImageRenderState::Ready(Arc::new(Image::from_bytes(
-                        format,
-                        image_bytes.bytes,
-                    ))),
+                    resident_bytes,
                 );
+                diagnostics.image_response(
+                    flow,
+                    load_token,
+                    candidate_ordinal,
+                    surface_ordinal,
+                    source,
+                    response_mime,
+                    signature,
+                    image_bytes.bytes.len(),
+                    preflight,
+                );
+                if preflight == ImagePreflight::Accepted {
+                    let format = fetched_image_format(
+                        &image.mime_type,
+                        &image_bytes.mime_type,
+                        &image_bytes.bytes,
+                    )
+                    .expect("accepted image preflight has a format");
+                    resident_bytes = resident_bytes.saturating_add(image_bytes.bytes.len());
+                    diagnostics.image_fetch_result(
+                        flow,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageFetchResult::Succeeded,
+                    );
+                    diagnostics.image_state(
+                        flow,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageStateReason::Ready,
+                    );
+                    states.insert_with_context(
+                        image.attachment_id,
+                        RichImageRenderState::Ready(Arc::new(Image::from_bytes(
+                            format,
+                            image_bytes.bytes,
+                        ))),
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                    );
+                } else {
+                    diagnostics.image_fetch_result(
+                        flow,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageFetchResult::Failed(DiagnosticErrorKind::InvalidInput),
+                    );
+                    diagnostics.image_state(
+                        flow,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageStateReason::Failed,
+                    );
+                    states.insert_with_context(
+                        image.attachment_id,
+                        RichImageRenderState::Failed,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                    );
+                }
             }
-            Ok(_) | Err(_) => {
-                states.insert(image.attachment_id, RichImageRenderState::Failed);
+            Err(error) => {
+                let error_kind = DiagnosticErrorKind::from(error.kind());
+                diagnostics.image_fetch_result(
+                    flow,
+                    load_token,
+                    candidate_ordinal,
+                    surface_ordinal,
+                    source,
+                    ImageFetchResult::Failed(error_kind),
+                );
+                diagnostics.image_state(
+                    flow,
+                    load_token,
+                    candidate_ordinal,
+                    surface_ordinal,
+                    source,
+                    if error.kind() == jira_application::ErrorKind::Cancelled {
+                        ImageStateReason::Cancelled
+                    } else {
+                        ImageStateReason::Failed
+                    },
+                );
+                states.insert_with_context(
+                    image.attachment_id,
+                    RichImageRenderState::Failed,
+                    candidate_ordinal,
+                    surface_ordinal,
+                    source,
+                );
             }
         }
     }
@@ -664,6 +971,7 @@ fn local_issue_id_for_key(issues: &[Issue], key: &IssueKey) -> Option<IssueId> {
 }
 
 pub struct Dashboard {
+    diagnostics: DiagnosticsSink,
     section: Section,
     domain_issues: Vec<Issue>,
     issues: Vec<IssueViewModel>,
@@ -711,6 +1019,10 @@ pub struct Dashboard {
 
 impl Dashboard {
     pub fn from_sample_data() -> Self {
+        Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled())
+    }
+
+    fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink) -> Self {
         let domain_issues = sample_issues();
         let users = sample_users();
         let updates = sample_updates()
@@ -726,6 +1038,7 @@ impl Dashboard {
         let selected_issue = issues.first().map(|issue| issue.id.clone());
 
         Self {
+            diagnostics: diagnostics.clone(),
             section: Section::Issues,
             domain_issues,
             issues,
@@ -753,8 +1066,16 @@ impl Dashboard {
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
-            selected_image_states: RichImageRenderStates::default(),
-            remote_image_states: RichImageRenderStates::default(),
+            selected_image_states: RichImageRenderStates::with_context(
+                diagnostics.clone(),
+                DiagnosticFlow::SelectedDetail,
+                0,
+            ),
+            remote_image_states: RichImageRenderStates::with_context(
+                diagnostics.clone(),
+                DiagnosticFlow::RemoteLookup,
+                0,
+            ),
             remote_lookup: RemoteLookupState::Idle,
             remote_lookup_generation: 0,
             remote_lookup_cancellation: None,
@@ -772,10 +1093,15 @@ impl Dashboard {
         }
     }
 
-    pub fn from_live(session: LiveSession, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn from_live(
+        session: LiveSession,
+        diagnostics: DiagnosticsSink,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (users, initial_authenticated_account) =
             authenticated_identity(session.authenticated_user.clone());
         let dashboard = Self {
+            diagnostics: diagnostics.clone(),
             section: Section::Issues,
             domain_issues: Vec::new(),
             issues: Vec::new(),
@@ -809,8 +1135,16 @@ impl Dashboard {
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
-            selected_image_states: RichImageRenderStates::default(),
-            remote_image_states: RichImageRenderStates::default(),
+            selected_image_states: RichImageRenderStates::with_context(
+                diagnostics.clone(),
+                DiagnosticFlow::SelectedDetail,
+                0,
+            ),
+            remote_image_states: RichImageRenderStates::with_context(
+                diagnostics.clone(),
+                DiagnosticFlow::RemoteLookup,
+                0,
+            ),
             remote_lookup: RemoteLookupState::Idle,
             remote_lookup_generation: 0,
             remote_lookup_cancellation: None,
@@ -1063,6 +1397,7 @@ impl Dashboard {
             return;
         }
 
+        let load_token = self.diagnostics.begin_image_load();
         self.invalidate_comment_selection();
         let Some(workspace) = self.workspace.clone() else {
             self.remote_lookup = RemoteLookupState::Error {
@@ -1081,11 +1416,17 @@ impl Dashboard {
         let generation = self.remote_lookup_generation;
         let cancellation = CancellationToken::new();
         self.remote_lookup_cancellation = Some(cancellation.clone());
+        self.remote_image_states.set_context(
+            self.diagnostics.clone(),
+            DiagnosticFlow::RemoteLookup,
+            load_token,
+        );
         self.remote_lookup = RemoteLookupState::Loading {
             query: query.clone(),
         };
         let expected_query = query.clone();
         let users = self.users.clone();
+        let diagnostics = self.diagnostics.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = workspace.lookup_issue(key, &cancellation).await;
             let detail = match result {
@@ -1114,45 +1455,97 @@ impl Dashboard {
             };
             let issue = detail.core.issue.clone();
             let view = IssueDetailViewModel::from_domain(&detail, &users);
-            let images = collect_detail_images(&view);
-            let loading = loading_image_states(&images);
+            let images = collect_detail_images_with_context(&view);
+            let image_contexts = images
+                .iter()
+                .map(|image| (image.surface_ordinal, image.source))
+                .collect::<Vec<_>>();
+            let loading = loading_image_states(
+                &images,
+                &diagnostics,
+                DiagnosticFlow::RemoteLookup,
+                load_token,
+            );
             let site_id = workspace.site_id().clone();
-            let _ = this.update(cx, |this, cx| {
-                if !remote_lookup_result_is_current(
-                    &this.search_query,
-                    &expected_query,
-                    this.remote_lookup_generation,
-                    generation,
-                ) {
-                    return;
+            let applied = this
+                .update(cx, |this, cx| {
+                    if !remote_lookup_result_is_current(
+                        &this.search_query,
+                        &expected_query,
+                        this.remote_lookup_generation,
+                        generation,
+                    ) {
+                        return false;
+                    }
+                    this.remote_lookup = RemoteLookupState::Loaded {
+                        query: expected_query.clone(),
+                        issue: issue.clone(),
+                        detail: view.clone(),
+                    };
+                    this.remote_image_states = loading;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !applied {
+                for (candidate_ordinal, (surface_ordinal, source)) in
+                    image_contexts.iter().copied().enumerate()
+                {
+                    diagnostics.image_state(
+                        DiagnosticFlow::RemoteLookup,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageStateReason::Stale,
+                    );
                 }
-                this.remote_lookup = RemoteLookupState::Loaded {
-                    query: expected_query.clone(),
-                    issue: issue.clone(),
-                    detail: view.clone(),
-                };
-                this.remote_image_states = loading;
-                cx.notify();
-            });
-            let states =
-                fetch_rich_image_states(workspace, site_id, issue.id.clone(), images, cancellation)
-                    .await;
-            let _ = this.update(cx, |this, cx| {
-                if !remote_lookup_result_is_current(
-                    &this.search_query,
-                    &expected_query,
-                    this.remote_lookup_generation,
-                    generation,
-                ) {
-                    return;
+                return;
+            }
+            let states = fetch_rich_image_states(
+                workspace,
+                site_id,
+                issue.id.clone(),
+                images,
+                cancellation,
+                diagnostics.clone(),
+                DiagnosticFlow::RemoteLookup,
+                load_token,
+            )
+            .await;
+            let applied = this
+                .update(cx, |this, cx| {
+                    if !remote_lookup_result_is_current(
+                        &this.search_query,
+                        &expected_query,
+                        this.remote_lookup_generation,
+                        generation,
+                    ) {
+                        return false;
+                    }
+                    this.remote_lookup_cancellation = None;
+                    this.remote_lookup_task = None;
+                    if let Ok(states) = states {
+                        this.remote_image_states = states;
+                    }
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !applied {
+                for (candidate_ordinal, (surface_ordinal, source)) in
+                    image_contexts.iter().copied().enumerate()
+                {
+                    diagnostics.image_state(
+                        DiagnosticFlow::RemoteLookup,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageStateReason::Stale,
+                    );
                 }
-                this.remote_lookup_cancellation = None;
-                this.remote_lookup_task = None;
-                if let Ok(states) = states {
-                    this.remote_image_states = states;
-                }
-                cx.notify();
-            });
+            }
         });
         self.remote_lookup_task = Some(task);
         cx.notify();
@@ -1197,11 +1590,16 @@ impl Dashboard {
         {
             return;
         }
+        let load_token = self.diagnostics.begin_image_load();
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel();
         }
         self.invalidate_attachment_download();
-        self.selected_image_states.clear();
+        self.selected_image_states.set_context(
+            self.diagnostics.clone(),
+            DiagnosticFlow::SelectedDetail,
+            load_token,
+        );
         self.invalidate_comment_selection();
         self.detail_task.take();
         self.detail_generation = self.detail_generation.wrapping_add(1);
@@ -1220,6 +1618,7 @@ impl Dashboard {
             issue_id: issue_id.clone(),
         };
         let users = self.users.clone();
+        let diagnostics = self.diagnostics.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = workspace
                 .fetch_issue_detail(IssueLocator::Id(issue_id.clone()), &cancellation)
@@ -1249,41 +1648,93 @@ impl Dashboard {
                 }
             };
             let view = IssueDetailViewModel::from_domain(&detail, &users);
-            let images = collect_detail_images(&view);
-            let loading = loading_image_states(&images);
+            let images = collect_detail_images_with_context(&view);
+            let image_contexts = images
+                .iter()
+                .map(|image| (image.surface_ordinal, image.source))
+                .collect::<Vec<_>>();
+            let loading = loading_image_states(
+                &images,
+                &diagnostics,
+                DiagnosticFlow::SelectedDetail,
+                load_token,
+            );
             let site_id = workspace.site_id().clone();
-            let _ = this.update(cx, |this, cx| {
-                if !image_result_is_current(
-                    this.selected_issue.as_ref(),
-                    &issue_id,
-                    this.detail_generation,
-                    generation,
-                ) {
-                    return;
+            let applied = this
+                .update(cx, |this, cx| {
+                    if !image_result_is_current(
+                        this.selected_issue.as_ref(),
+                        &issue_id,
+                        this.detail_generation,
+                        generation,
+                    ) {
+                        return false;
+                    }
+                    this.detail_state = DetailState::Loaded(view.clone());
+                    this.selected_image_states = loading;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !applied {
+                for (candidate_ordinal, (surface_ordinal, source)) in
+                    image_contexts.iter().copied().enumerate()
+                {
+                    diagnostics.image_state(
+                        DiagnosticFlow::SelectedDetail,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageStateReason::Stale,
+                    );
                 }
-                this.detail_state = DetailState::Loaded(view.clone());
-                this.selected_image_states = loading;
-                cx.notify();
-            });
-            let states =
-                fetch_rich_image_states(workspace, site_id, issue_id.clone(), images, cancellation)
-                    .await;
-            let _ = this.update(cx, |this, cx| {
-                if !image_result_is_current(
-                    this.selected_issue.as_ref(),
-                    &issue_id,
-                    this.detail_generation,
-                    generation,
-                ) {
-                    return;
+                return;
+            }
+            let states = fetch_rich_image_states(
+                workspace,
+                site_id,
+                issue_id.clone(),
+                images,
+                cancellation,
+                diagnostics.clone(),
+                DiagnosticFlow::SelectedDetail,
+                load_token,
+            )
+            .await;
+            let applied = this
+                .update(cx, |this, cx| {
+                    if !image_result_is_current(
+                        this.selected_issue.as_ref(),
+                        &issue_id,
+                        this.detail_generation,
+                        generation,
+                    ) {
+                        return false;
+                    }
+                    this.detail_cancellation = None;
+                    this.detail_task = None;
+                    if let Ok(states) = states {
+                        this.selected_image_states = states;
+                    }
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !applied {
+                for (candidate_ordinal, (surface_ordinal, source)) in
+                    image_contexts.iter().copied().enumerate()
+                {
+                    diagnostics.image_state(
+                        DiagnosticFlow::SelectedDetail,
+                        load_token,
+                        candidate_ordinal,
+                        surface_ordinal,
+                        source,
+                        ImageStateReason::Stale,
+                    );
                 }
-                this.detail_cancellation = None;
-                this.detail_task = None;
-                if let Ok(states) = states {
-                    this.selected_image_states = states;
-                }
-                cx.notify();
-            });
+            }
         });
         self.detail_task = Some(task);
         cx.notify();
@@ -2454,6 +2905,8 @@ impl Dashboard {
                     document,
                     self.rich_text_palette(cx),
                     self.active_image_states(),
+                    0,
+                    ImageSource::ResolvedAdf,
                 )
             })
             .unwrap_or_else(|| div().text_sm().child(description).into_any_element());
@@ -2683,56 +3136,64 @@ impl Dashboard {
                     v_flex()
                         .min_w_0()
                         .gap_3()
-                        .children(detail.comments.iter().map(|comment| {
-                            let body = comment
-                                .rich_body
-                                .as_ref()
-                                .map(|document| {
-                                    render_rich_text(document, palette, self.active_image_states())
-                                })
-                                .unwrap_or_else(|| {
-                                    div()
-                                        .text_sm()
-                                        .child(comment.body.clone())
-                                        .into_any_element()
-                                });
-                            v_flex()
-                                .gap_1()
-                                .p_3()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .flex_wrap()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_sm()
-                                                .font_semibold()
-                                                .child(comment.author.clone()),
+                        .children(detail.comments.iter().enumerate().map(
+                            |(comment_index, comment)| {
+                                let body = comment
+                                    .rich_body
+                                    .as_ref()
+                                    .map(|document| {
+                                        render_rich_text(
+                                            document,
+                                            palette,
+                                            self.active_image_states(),
+                                            comment_index.saturating_add(1),
+                                            ImageSource::ResolvedAdf,
                                         )
-                                        .child(
+                                    })
+                                    .unwrap_or_else(|| {
+                                        div()
+                                            .text_sm()
+                                            .child(comment.body.clone())
+                                            .into_any_element()
+                                    });
+                                v_flex()
+                                    .gap_1()
+                                    .p_3()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        h_flex()
+                                            .min_w_0()
+                                            .flex_wrap()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_sm()
+                                                    .font_semibold()
+                                                    .child(comment.author.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(comment.created.clone()),
+                                            ),
+                                    )
+                                    .child(div().min_w_0().child(body))
+                                    .when_some(comment.updated.clone(), |this, updated| {
+                                        this.child(
                                             div()
-                                                .flex_shrink_0()
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child(comment.created.clone()),
-                                        ),
-                                )
-                                .child(div().min_w_0().child(body))
-                                .when_some(comment.updated.clone(), |this, updated| {
-                                    this.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!("Updated {updated}")),
-                                    )
-                                })
-                        }))
+                                                .child(format!("Updated {updated}")),
+                                        )
+                                    })
+                            },
+                        ))
                         .into_any_element()
                 };
                 let attachments = if detail.attachments.is_empty() {
@@ -3560,6 +4021,18 @@ mod tests {
     }
 
     #[test]
+    fn rich_image_context_preserves_surface_and_source_markers() {
+        let document = RichTextDocument::new(vec![RichBlock::Image(test_image("resolved"))], false)
+            .with_fallback_images(vec![test_image("candidate")]);
+        let images = collect_rich_images_with_context(&document, 3);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].surface_ordinal, 3);
+        assert_eq!(images[0].source, ImageSource::ResolvedAdf);
+        assert_eq!(images[1].surface_ordinal, 3);
+        assert_eq!(images[1].source, ImageSource::FallbackCandidate);
+    }
+
+    #[test]
     fn fallback_image_candidates_obey_the_global_image_cap() {
         let candidates = (0..(MAX_RICH_IMAGES + 4))
             .map(|index| test_image(&format!("candidate-{index}")))
@@ -3580,6 +4053,31 @@ mod tests {
         assert!(image_bytes_fit_aggregate(0, MAX_RICH_IMAGE_BYTES));
         assert!(!image_bytes_fit_aggregate(1, MAX_RICH_IMAGE_BYTES));
         assert!(!image_bytes_fit_aggregate(MAX_RICH_IMAGE_BYTES, 1));
+    }
+
+    #[test]
+    fn image_response_preflight_distinguishes_rejection_causes() {
+        assert_eq!(
+            image_response_preflight("application/pdf", "image/png", b"", 0),
+            ImagePreflight::UnsupportedCachedMime
+        );
+        assert_eq!(
+            image_response_preflight("image/png", "text/html", b"not image", 0),
+            ImagePreflight::ResponseMimeRejected
+        );
+        assert_eq!(
+            image_response_preflight("image/png", "image/png", b"not image", 0),
+            ImagePreflight::SignatureRejected
+        );
+        assert_eq!(
+            image_response_preflight(
+                "image/png",
+                "image/png",
+                b"\x89PNG\r\n\x1a\n",
+                MAX_RICH_IMAGE_BYTES,
+            ),
+            ImagePreflight::AggregateRejected
+        );
     }
 
     #[test]

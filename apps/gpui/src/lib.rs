@@ -8,6 +8,7 @@
 mod app_shell;
 mod config;
 mod dashboard;
+mod diagnostics;
 mod live_workspace;
 mod local_data;
 mod presentation;

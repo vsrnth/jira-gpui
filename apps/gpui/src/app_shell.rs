@@ -13,6 +13,7 @@ use gpui_component::{
 
 use crate::Dashboard;
 use crate::config::{LiveSession, StartupSelection, live_session_from_manual_configuration};
+use crate::diagnostics::DiagnosticsSink;
 use crate::responsive::layout_for_width;
 
 const NOTIFICATION_SIDE_MARGIN: f32 = 16.0;
@@ -25,6 +26,7 @@ fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) ->
 /// The top-level view: either the configured dashboard or the first-run form.
 pub struct AppShell {
     dashboard: Option<Entity<Dashboard>>,
+    diagnostics: DiagnosticsSink,
     base_url: Entity<InputState>,
     email: Entity<InputState>,
     api_token: Entity<InputState>,
@@ -36,21 +38,26 @@ pub struct AppShell {
 
 impl AppShell {
     pub fn new(startup: StartupSelection, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let diagnostics = DiagnosticsSink::from_environment();
+        diagnostics.session_started();
         let base_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://your-team.atlassian.net"));
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
         let api_token = Self::new_api_token(window, cx);
 
         let (dashboard, connection_error, connection_status) = match startup {
-            StartupSelection::Live(session) => {
-                (Some(Self::dashboard_from_live(session, cx)), None, None)
-            }
+            StartupSelection::Live(session) => (
+                Some(Self::dashboard_from_live(session, diagnostics.clone(), cx)),
+                None,
+                None,
+            ),
             StartupSelection::Preview => (None, None, None),
             StartupSelection::ConfigurationError(error) => (None, Some(error.to_string()), None),
         };
 
         Self {
             dashboard,
+            diagnostics,
             base_url,
             email,
             api_token,
@@ -61,8 +68,12 @@ impl AppShell {
         }
     }
 
-    fn dashboard_from_live(session: LiveSession, cx: &mut Context<Self>) -> Entity<Dashboard> {
-        cx.new(|cx| Dashboard::from_live(session, cx))
+    fn dashboard_from_live(
+        session: LiveSession,
+        diagnostics: DiagnosticsSink,
+        cx: &mut Context<Self>,
+    ) -> Entity<Dashboard> {
+        cx.new(|cx| Dashboard::from_live(session, diagnostics, cx))
     }
 
     fn new_api_token(window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
@@ -80,6 +91,7 @@ impl AppShell {
         let base_url = self.base_url.read(cx).unmask_value().to_string();
         let email = self.email.read(cx).unmask_value().to_string();
         let api_token = self.api_token.read(cx).unmask_value().to_string();
+        let diagnostics = self.diagnostics.clone();
 
         // Replace the control before dispatching the async request. This drops
         // the masked input's edit history even when connection fails; a retry
@@ -98,7 +110,7 @@ impl AppShell {
                 match result {
                     Ok(session) => {
                         this.connection_error = None;
-                        this.dashboard = Some(Self::dashboard_from_live(session, cx));
+                        this.dashboard = Some(Self::dashboard_from_live(session, diagnostics, cx));
                     }
                     Err(error) => {
                         // StartupError's Display implementation is intentionally
