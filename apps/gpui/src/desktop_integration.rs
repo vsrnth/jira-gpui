@@ -99,17 +99,17 @@ fn register(data_home: &Path, appdir: &Path, appimage: &Path) -> Result<(), Regi
     let icon_source = source_inside_appdir(appdir, ICON_SOURCE)?;
     let desktop_template = read_bounded(&desktop_source, MAX_DESKTOP_BYTES)?;
     let icon = read_bounded(&icon_source, MAX_ICON_BYTES)?;
-    let desktop = rewrite_desktop_entry(&desktop_template, appimage)?;
+    let icon_target = data_home.join(ICON_DIRECTORY).join(ICON_FILENAME);
+    let desktop = rewrite_desktop_entry(&desktop_template, appimage, &icon_target)?;
     validate_png(&icon)?;
 
     let applications = data_home.join(APPLICATIONS_DIRECTORY);
-    let icons = data_home.join(ICON_DIRECTORY);
     ensure_directory(&applications)?;
-    ensure_directory(&icons)?;
+    ensure_directory(icon_target.parent().ok_or(RegistrationError)?)?;
 
     // Install the icon first so a newly installed desktop entry never points
     // at a missing icon. rename replaces a target symlink itself.
-    atomic_write(&icons.join(ICON_FILENAME), &icon)?;
+    atomic_write(&icon_target, &icon)?;
     atomic_write(&applications.join(DESKTOP_FILENAME), &desktop)?;
     Ok(())
 }
@@ -135,7 +135,11 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, RegistrationEr
     Ok(bytes)
 }
 
-fn rewrite_desktop_entry(template: &[u8], appimage: &Path) -> Result<Vec<u8>, RegistrationError> {
+fn rewrite_desktop_entry(
+    template: &[u8],
+    appimage: &Path,
+    icon_path: &Path,
+) -> Result<Vec<u8>, RegistrationError> {
     if template.len() > MAX_DESKTOP_BYTES {
         return Err(RegistrationError);
     }
@@ -144,7 +148,15 @@ fn rewrite_desktop_entry(template: &[u8], appimage: &Path) -> Result<Vec<u8>, Re
     if appimage.is_empty() || appimage.chars().any(char::is_control) {
         return Err(RegistrationError);
     }
+    if !icon_path.is_absolute() {
+        return Err(RegistrationError);
+    }
+    let icon_path = icon_path.to_str().ok_or(RegistrationError)?;
+    if icon_path.chars().any(char::is_control) {
+        return Err(RegistrationError);
+    }
     let escaped = escape_exec_argument(appimage);
+    let escaped_icon = escape_key_file_value(icon_path);
     let replacement = format!(r#"Exec="{escaped}""#);
 
     let mut output = String::with_capacity(template.len() + replacement.len());
@@ -154,6 +166,7 @@ fn rewrite_desktop_entry(template: &[u8], appimage: &Path) -> Result<Vec<u8>, Re
     let mut exec_lines = 0;
     let mut name_lines = 0;
     let mut icon_lines = 0;
+    let mut icon_replacements = 0;
     for line in template.split_inclusive('\n') {
         let (body, ending) = line
             .strip_suffix('\n')
@@ -162,6 +175,11 @@ fn rewrite_desktop_entry(template: &[u8], appimage: &Path) -> Result<Vec<u8>, Re
             output.push_str(&replacement);
             output.push_str(ending);
             replacements += 1;
+        } else if body == "Icon=dev.jiradesk.JiraDesk" {
+            output.push_str("Icon=");
+            output.push_str(&escaped_icon);
+            output.push_str(ending);
+            icon_replacements += 1;
         } else {
             output.push_str(line);
         }
@@ -175,6 +193,7 @@ fn rewrite_desktop_entry(template: &[u8], appimage: &Path) -> Result<Vec<u8>, Re
         || exec_lines != 1
         || name_lines != 1
         || icon_lines != 1
+        || icon_replacements != 1
         || names != 1
         || icons != 1
         || output.len() > MAX_DESKTOP_BYTES
@@ -182,6 +201,18 @@ fn rewrite_desktop_entry(template: &[u8], appimage: &Path) -> Result<Vec<u8>, Re
         return Err(RegistrationError);
     }
     Ok(output.into_bytes())
+}
+
+fn escape_key_file_value(value: &str) -> String {
+    let backslash = 92_u8 as char;
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character == backslash {
+            escaped.push(backslash);
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn escape_exec_argument(path: &str) -> String {
@@ -389,7 +420,9 @@ mod tests {
             "/tmp/Jira Desk \"release\\100%$file{}tick.AppImage",
             96_u8 as char
         );
-        let result = rewrite_desktop_entry(DESKTOP, Path::new(&appimage)).expect("desktop");
+        let icon_path = Path::new(r#"/tmp/icons/Jira Desk\icon.png"#);
+        let result =
+            rewrite_desktop_entry(DESKTOP, Path::new(&appimage), icon_path).expect("desktop");
         assert!(
             std::str::from_utf8(&result)
                 .expect("utf8")
@@ -398,7 +431,7 @@ mod tests {
         assert!(
             std::str::from_utf8(&result)
                 .expect("utf8")
-                .contains("Icon=dev.jiradesk.JiraDesk")
+                .contains(r#"Icon=/tmp/icons/Jira Desk\\icon.png"#)
         );
         assert!(
             std::str::from_utf8(&result)
@@ -408,7 +441,23 @@ mod tests {
                     96_u8 as char
                 ))
         );
-        assert!(rewrite_desktop_entry(DESKTOP, Path::new("/tmp/new\nline")).is_err());
+        assert!(rewrite_desktop_entry(DESKTOP, Path::new("/tmp/new\nline"), icon_path).is_err());
+        assert!(
+            rewrite_desktop_entry(
+                DESKTOP,
+                Path::new("/tmp/jira.AppImage"),
+                Path::new("icon.png")
+            )
+            .is_err()
+        );
+        assert!(
+            rewrite_desktop_entry(
+                DESKTOP,
+                Path::new("/tmp/jira.AppImage"),
+                Path::new("/tmp/icon\n.png")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -420,7 +469,14 @@ mod tests {
             b"Exec=attacker\n",
         ]
         .concat();
-        assert!(rewrite_desktop_entry(&template, Path::new("/tmp/jira.AppImage")).is_err());
+        assert!(
+            rewrite_desktop_entry(
+                &template,
+                Path::new("/tmp/jira.AppImage"),
+                Path::new("/tmp/icon.png")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -447,7 +503,10 @@ mod tests {
         assert_eq!(fs::read(&icon_path).expect("icon"), png_256());
         let first_desktop = fs::read_to_string(&desktop_path).expect("desktop");
         assert!(first_desktop.contains("Name=Jira Desk"));
-        assert!(first_desktop.contains("Icon=dev.jiradesk.JiraDesk"));
+        assert!(first_desktop.contains(&format!(
+            "Icon={}",
+            icon_path.to_str().expect("icon path utf8")
+        )));
         assert!(first_desktop.contains(r#"Exec="/tmp/"#));
         register(&data, &appdir, &appimage).expect("repeat update");
         assert_eq!(
