@@ -20,6 +20,8 @@ const APPLICATIONS_DIRECTORY: &str = "applications";
 const ICON_DIRECTORY: &str = "icons/hicolor/256x256/apps";
 const DESKTOP_FILENAME: &str = "dev.jiradesk.JiraDesk.desktop";
 const ICON_FILENAME: &str = "dev.jiradesk.JiraDesk.png";
+const ICON_CACHE_PREFIX: &str = "dev.jiradesk.JiraDesk-";
+const ICON_CACHE_SUFFIX: &str = ".png";
 const DESKTOP_SOURCE: &str = "usr/share/applications/dev.jiradesk.JiraDesk.desktop";
 const ICON_SOURCE: &str = "usr/share/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png";
 const MAX_DESKTOP_BYTES: usize = 64 * 1024;
@@ -99,17 +101,22 @@ fn register(data_home: &Path, appdir: &Path, appimage: &Path) -> Result<(), Regi
     let icon_source = source_inside_appdir(appdir, ICON_SOURCE)?;
     let desktop_template = read_bounded(&desktop_source, MAX_DESKTOP_BYTES)?;
     let icon = read_bounded(&icon_source, MAX_ICON_BYTES)?;
-    let icon_target = data_home.join(ICON_DIRECTORY).join(ICON_FILENAME);
-    let desktop = rewrite_desktop_entry(&desktop_template, appimage, &icon_target)?;
     validate_png(&icon)?;
+    let icon_directory = data_home.join(ICON_DIRECTORY);
+    let stable_icon_target = icon_directory.join(ICON_FILENAME);
+    let cache_icon_target = icon_directory.join(content_addressed_icon_filename(&icon));
+    let desktop = rewrite_desktop_entry(&desktop_template, appimage, &cache_icon_target)?;
 
     let applications = data_home.join(APPLICATIONS_DIRECTORY);
     ensure_directory(&applications)?;
-    ensure_directory(icon_target.parent().ok_or(RegistrationError)?)?;
+    ensure_directory(&icon_directory)?;
 
     // Install the icon first so a newly installed desktop entry never points
-    // at a missing icon. rename replaces a target symlink itself.
-    atomic_write(&icon_target, &icon)?;
+    // at a missing icon. Keep the stable named copy for notification clients;
+    // the content-addressed copy avoids stale decoded Shell icon textures.
+    // rename replaces a target symlink itself.
+    atomic_write(&cache_icon_target, &icon)?;
+    atomic_write(&stable_icon_target, &icon)?;
     atomic_write(&applications.join(DESKTOP_FILENAME), &desktop)?;
     Ok(())
 }
@@ -213,6 +220,24 @@ fn escape_key_file_value(value: &str) -> String {
         escaped.push(character);
     }
     escaped
+}
+
+// FNV-1a is deliberately small and deterministic here. This fingerprint is
+// only a cache-busting filename, not an integrity or security hash.
+fn content_addressed_icon_filename(icon: &[u8]) -> String {
+    format!(
+        "{ICON_CACHE_PREFIX}{:016x}{ICON_CACHE_SUFFIX}",
+        icon_fingerprint(icon)
+    )
+}
+
+fn icon_fingerprint(icon: &[u8]) -> u64 {
+    let mut fingerprint = 0xcbf29ce484222325_u64;
+    for byte in icon {
+        fingerprint ^= u64::from(*byte);
+        fingerprint = fingerprint.wrapping_mul(0x100000001b3_u64);
+    }
+    fingerprint
 }
 
 fn escape_exec_argument(path: &str) -> String {
@@ -353,10 +378,15 @@ mod tests {
     }
 
     fn png_256() -> Vec<u8> {
+        png_256_with(0)
+    }
+
+    fn png_256_with(marker: u8) -> Vec<u8> {
         let mut png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
         png.extend_from_slice(&256_u32.to_be_bytes());
         png.extend_from_slice(&256_u32.to_be_bytes());
         png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png.push(marker);
         png
     }
 
@@ -369,6 +399,23 @@ mod tests {
         fs::write(appdir.join(DESKTOP_SOURCE), DESKTOP).expect("desktop");
         fs::write(appdir.join(ICON_SOURCE), png_256()).expect("icon");
         (appdir, appimage, root.join("data"))
+    }
+
+    fn assert_cache_icon_filename(path: &Path) {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("filename");
+        assert!(filename.starts_with(ICON_CACHE_PREFIX));
+        assert!(filename.ends_with(ICON_CACHE_SUFFIX));
+        let fingerprint =
+            &filename[ICON_CACHE_PREFIX.len()..filename.len() - ICON_CACHE_SUFFIX.len()];
+        assert_eq!(fingerprint.len(), 16);
+        assert!(
+            fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[test]
@@ -499,19 +546,70 @@ mod tests {
         let (appdir, appimage, data) = fixture(&root);
         register(&data, &appdir, &appimage).expect("first install");
         let desktop_path = data.join(APPLICATIONS_DIRECTORY).join(DESKTOP_FILENAME);
-        let icon_path = data.join(ICON_DIRECTORY).join(ICON_FILENAME);
-        assert_eq!(fs::read(&icon_path).expect("icon"), png_256());
+        let stable_icon_path = data.join(ICON_DIRECTORY).join(ICON_FILENAME);
+        assert_eq!(fs::read(&stable_icon_path).expect("stable icon"), png_256());
         let first_desktop = fs::read_to_string(&desktop_path).expect("desktop");
         assert!(first_desktop.contains("Name=Jira Desk"));
-        assert!(first_desktop.contains(&format!(
-            "Icon={}",
-            icon_path.to_str().expect("icon path utf8")
-        )));
+        let cache_icon_path = PathBuf::from(
+            first_desktop
+                .lines()
+                .find_map(|line| line.strip_prefix("Icon="))
+                .expect("cache icon path"),
+        );
+        assert_ne!(cache_icon_path, stable_icon_path);
+        assert_eq!(fs::read(&cache_icon_path).expect("cache icon"), png_256());
+        assert_cache_icon_filename(&cache_icon_path);
         assert!(first_desktop.contains(r#"Exec="/tmp/"#));
         register(&data, &appdir, &appimage).expect("repeat update");
         assert_eq!(
             fs::read_to_string(&desktop_path).expect("desktop"),
             first_desktop
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_addressed_icon_path_changes_for_new_content_and_stays_for_repeat() {
+        let root = temporary_root("content-addressed");
+        let (appdir, appimage, data) = fixture(&root);
+        let icon_source = appdir.join(ICON_SOURCE);
+        let icon_a = png_256_with(1);
+        let icon_b = png_256_with(2);
+        fs::write(&icon_source, &icon_a).expect("icon a");
+
+        register(&data, &appdir, &appimage).expect("register a");
+        let desktop_path = data.join(APPLICATIONS_DIRECTORY).join(DESKTOP_FILENAME);
+        let desktop_a = fs::read_to_string(&desktop_path).expect("desktop a");
+        let icon_path_a = PathBuf::from(
+            desktop_a
+                .lines()
+                .find_map(|line| line.strip_prefix("Icon="))
+                .expect("icon a path"),
+        );
+        assert_cache_icon_filename(&icon_path_a);
+        assert!(icon_path_a.exists());
+        assert_eq!(fs::read(&icon_path_a).expect("icon a bytes"), icon_a);
+
+        fs::write(&icon_source, &icon_b).expect("icon b");
+        register(&data, &appdir, &appimage).expect("register b");
+        let desktop_b = fs::read_to_string(&desktop_path).expect("desktop b");
+        let icon_path_b = PathBuf::from(
+            desktop_b
+                .lines()
+                .find_map(|line| line.strip_prefix("Icon="))
+                .expect("icon b path"),
+        );
+        assert_cache_icon_filename(&icon_path_b);
+        assert_ne!(icon_path_a, icon_path_b);
+        assert!(icon_path_b.exists());
+        assert_eq!(fs::read(&icon_path_b).expect("icon b bytes"), icon_b);
+
+        register(&data, &appdir, &appimage).expect("repeat b");
+        let desktop_b_repeat = fs::read_to_string(&desktop_path).expect("desktop b repeat");
+        assert_eq!(desktop_b_repeat, desktop_b);
+        assert_eq!(
+            fs::read(data.join(ICON_DIRECTORY).join(ICON_FILENAME)).expect("stable icon"),
+            icon_b
         );
         let _ = fs::remove_dir_all(root);
     }
