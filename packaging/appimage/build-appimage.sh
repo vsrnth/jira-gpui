@@ -43,7 +43,7 @@ case "$version" in
 esac
 
 binary="$project_root/target/release/jira-gpui"
-icon_source="$project_root/assets/app-icon/dev.jiradesk.JiraDesk.svg"
+icon_source="$project_root/assets/app-icon/target-target-svgrepo-com.svg"
 apprun="$project_root/packaging/appimage/AppRun"
 desktop="$project_root/packaging/appimage/dev.jiradesk.JiraDesk.desktop"
 metainfo="$project_root/packaging/appimage/dev.jiradesk.JiraDesk.metainfo.xml"
@@ -131,7 +131,7 @@ if ! command -v magick >/dev/null 2>&1; then
     printf '%s\n' "ImageMagick's magick command is required to render the AppImage root PNG icon" >&2
     exit 1
 fi
-magick "$icon_source" "$icon"
+magick -background none "$icon_source" -resize 256x256! "$icon"
 icon_format=$(magick identify -format '%m' "$icon") || {
     printf '%s\n' "Could not inspect rendered icon: $icon" >&2
     exit 1
@@ -140,6 +140,25 @@ icon_format=$(magick identify -format '%m' "$icon") || {
     printf '%s\n' "Icon renderer did not produce a PNG file: $icon" >&2
     exit 1
 }
+icon_dimensions=$(magick identify -format '%wx%h' "$icon") || {
+    printf '%s\n' "Could not inspect rendered icon dimensions: $icon" >&2
+    exit 1
+}
+[ "$icon_dimensions" = "256x256" ] || {
+    printf '%s\n' "Rendered icon must be exactly 256x256, got $icon_dimensions: $icon" >&2
+    exit 1
+}
+icon_channels=$(magick identify -format '%[channels]' "$icon") || {
+    printf '%s\n' "Could not inspect rendered icon alpha channel: $icon" >&2
+    exit 1
+}
+case "$icon_channels" in
+    *a*) ;;
+    *)
+        printf '%s\n' "Rendered icon must contain an alpha channel: $icon" >&2
+        exit 1
+        ;;
+esac
 mkdir -p "$appdir/usr/share/metainfo" "$appdir/usr/share/licenses/jira-gpui"
 cp -- "$metainfo" "$appdir/usr/share/metainfo/"
 cp -- "$license" "$appdir/usr/share/licenses/jira-gpui/LICENSE"
