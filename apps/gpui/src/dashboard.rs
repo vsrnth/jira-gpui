@@ -6,6 +6,8 @@ use std::{
     sync::Arc,
 };
 
+use chrono::{Local, SecondsFormat};
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _,
@@ -33,6 +35,7 @@ use jira_application::{
     JiraReadPort, MAX_JQL_SCOPE_LENGTH, SyncMode,
 };
 
+use jira_desktop_notifications::{TEST_NOTIFICATION_BODY, TEST_NOTIFICATION_SUMMARY};
 use jira_domain::{
     AccountId, Issue, IssueId, IssueKey, JiraSiteId, RichBlock, RichImage, RichTextDocument, User,
 };
@@ -40,6 +43,7 @@ use jira_domain::{
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
     diagnostics::{
+        DesktopNotificationTestResult as DiagnosticDesktopNotificationTestResult,
         DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageFetchResult, ImagePreflight,
         ImageSignature, ImageSource, ImageStateReason, ResponseMime,
     },
@@ -847,6 +851,23 @@ fn refresh_notification_message(result: &RefreshResult) -> String {
     )
 }
 
+fn desktop_notification_error_category(error: DiagnosticErrorKind) -> &'static str {
+    match error {
+        DiagnosticErrorKind::Authentication => "authentication",
+        DiagnosticErrorKind::Authorization => "authorization",
+        DiagnosticErrorKind::RateLimited => "rate_limited",
+        DiagnosticErrorKind::Offline => "offline",
+        DiagnosticErrorKind::Cancelled => "cancelled",
+        DiagnosticErrorKind::InvalidInput => "invalid_input",
+        DiagnosticErrorKind::NotFound => "not_found",
+        DiagnosticErrorKind::Upstream => "upstream",
+        DiagnosticErrorKind::Storage => "storage",
+        DiagnosticErrorKind::Notification => "notification",
+        DiagnosticErrorKind::Internal => "internal",
+        DiagnosticErrorKind::UnknownOutcome => "unknown_outcome",
+    }
+}
+
 fn authenticated_identity(user: Option<User>) -> (Vec<User>, Option<AccountId>) {
     let account = user.as_ref().map(|user| user.account_id.clone());
     (user.into_iter().collect(), account)
@@ -871,6 +892,25 @@ enum Section {
     Issues,
     Updates,
     Settings,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DesktopNotificationTestOutcome {
+    Accepted { notification_id: u32 },
+    Failed(DiagnosticErrorKind),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DesktopNotificationTestReport {
+    timestamp: String,
+    outcome: DesktopNotificationTestOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DesktopNotificationTestState {
+    Idle,
+    Sending,
+    Completed(DesktopNotificationTestReport),
 }
 
 struct RefreshNotification;
@@ -1348,6 +1388,8 @@ pub struct Dashboard {
     settings_warning: Option<String>,
     settings_feedback: Option<String>,
     settings_task: Option<gpui::Task<()>>,
+    desktop_notification_test_state: DesktopNotificationTestState,
+    desktop_notification_test_task: Option<gpui::Task<()>>,
 }
 
 impl Dashboard {
@@ -1432,6 +1474,8 @@ impl Dashboard {
             settings_warning: None,
             settings_feedback: None,
             settings_task: None,
+            desktop_notification_test_state: DesktopNotificationTestState::Idle,
+            desktop_notification_test_task: None,
         }
     }
 
@@ -1517,6 +1561,8 @@ impl Dashboard {
             settings_warning: None,
             settings_feedback: None,
             settings_task: None,
+            desktop_notification_test_state: DesktopNotificationTestState::Idle,
+            desktop_notification_test_task: None,
         };
 
         let site_id = session.site_id;
@@ -5119,6 +5165,58 @@ impl Dashboard {
         self.settings_task = Some(task);
     }
 
+    fn begin_test_desktop_notification(&mut self, cx: &mut Context<Self>) {
+        if !self.can_start_desktop_notification_test() {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        self.desktop_notification_test_state = DesktopNotificationTestState::Sending;
+        self.diagnostics.desktop_notification_test_started();
+        let diagnostics = self.diagnostics.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let outcome = match workspace.test_desktop_notification().await {
+                Ok(receipt) => {
+                    let result = DiagnosticDesktopNotificationTestResult::Accepted {
+                        notification_id: receipt.notification_id(),
+                    };
+                    diagnostics.desktop_notification_test_result(result);
+                    DesktopNotificationTestOutcome::Accepted {
+                        notification_id: receipt.notification_id(),
+                    }
+                }
+                Err(error) => {
+                    let result = DiagnosticDesktopNotificationTestResult::Failed(
+                        DiagnosticErrorKind::from(error.kind()),
+                    );
+                    diagnostics.desktop_notification_test_result(result);
+                    DesktopNotificationTestOutcome::Failed(DiagnosticErrorKind::from(error.kind()))
+                }
+            };
+            let timestamp = Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+            let _ = this.update(cx, |this, cx| {
+                this.desktop_notification_test_task = None;
+                this.desktop_notification_test_state =
+                    DesktopNotificationTestState::Completed(DesktopNotificationTestReport {
+                        timestamp,
+                        outcome,
+                    });
+                cx.notify();
+            });
+        });
+        self.desktop_notification_test_task = Some(task);
+        cx.notify();
+    }
+
+    fn can_start_desktop_notification_test(&self) -> bool {
+        self.workspace.is_some()
+            && matches!(
+                self.desktop_notification_test_state,
+                DesktopNotificationTestState::Idle | DesktopNotificationTestState::Completed(_)
+            )
+    }
+
     fn render_settings(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         let input = self.settings_input.clone();
         let text = self.settings_scope_text.clone();
@@ -5126,6 +5224,10 @@ impl Dashboard {
         let bytes = text.len();
         let validation = normalize_issue_jql_scope(Some(text.clone())).err();
         let live = self.workspace.is_some();
+        let test_running = matches!(
+            self.desktop_notification_test_state,
+            DesktopNotificationTestState::Sending
+        );
         v_flex()
             .size_full()
             .min_w_0()
@@ -5190,6 +5292,65 @@ impl Dashboard {
                             .when_some(self.settings_feedback.clone(), |this, feedback| {
                                 this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(feedback))
                             })
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .p_3()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(div().text_base().font_semibold().child("Desktop notifications"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Send a local test through the same Freedesktop service configuration used by Jira updates. This never calls Jira or changes the local update feed."),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop-entry: dev.jiradesk.JiraDesk · Summary: {TEST_NOTIFICATION_SUMMARY} · Body: {TEST_NOTIFICATION_BODY}")),
+                                    )
+                                    .child(
+                                        Button::new("test-desktop-notification")
+                                            .label(if test_running {
+                                                "Sending test notification…"
+                                            } else {
+                                                "Send test notification"
+                                            })
+                                            .disabled(!live || test_running)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.begin_test_desktop_notification(cx)
+                                            })),
+                                    )
+                                    .when_some(
+                                        match &self.desktop_notification_test_state {
+                                            DesktopNotificationTestState::Completed(report) => {
+                                                Some(report.clone())
+                                            }
+                                            _ => None,
+                                        },
+                                        |this, report| {
+                                            let result = match report.outcome {
+                                                DesktopNotificationTestOutcome::Accepted {
+                                                    notification_id,
+                                                } => format!(
+                                                    "Accepted by desktop service · notification ID {notification_id}"
+                                                ),
+                                                DesktopNotificationTestOutcome::Failed(error) => {
+                                                    format!("Failed · error category {}", desktop_notification_error_category(error))
+                                                }
+                                            };
+                                            this.child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_sm().child(format!("Last test · {} · {result}", report.timestamp)))
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Accepted by the desktop service does not prove GNOME displayed a banner."))
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Diagnostic events are written to diagnostics.jsonl.")),
+                                            )
+                                        },
+                                    ),
+                            )
                             .child(
                                 h_flex()
                                     .when(layout.is_mobile(), |this| this.flex_col())
@@ -5585,6 +5746,29 @@ mod tests {
         let dashboard = Dashboard::from_sample_data();
 
         assert_eq!(dashboard.settings_scope_text, DEFAULT_JQL_SCOPE);
+    }
+
+    #[test]
+    fn desktop_notification_test_is_unavailable_without_live_workspace() {
+        let dashboard = Dashboard::from_sample_data();
+
+        assert!(!dashboard.can_start_desktop_notification_test());
+        assert_eq!(
+            dashboard.desktop_notification_test_state,
+            DesktopNotificationTestState::Idle
+        );
+    }
+
+    #[test]
+    fn desktop_notification_error_copy_uses_stable_category() {
+        assert_eq!(
+            desktop_notification_error_category(DiagnosticErrorKind::Notification),
+            "notification"
+        );
+        assert_eq!(
+            desktop_notification_error_category(DiagnosticErrorKind::UnknownOutcome),
+            "unknown_outcome"
+        );
     }
 
     fn refresh_result_with_inserted_events(events_inserted: usize) -> RefreshResult {

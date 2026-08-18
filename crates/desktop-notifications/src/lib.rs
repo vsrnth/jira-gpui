@@ -12,6 +12,22 @@ const APP_ICON: &str = "dev.jiradesk.JiraDesk";
 #[cfg(target_os = "linux")]
 const APP_DESKTOP_ENTRY: &str = "dev.jiradesk.JiraDesk";
 const FAILURE_MESSAGE: &str = "desktop notification unavailable";
+pub const TEST_NOTIFICATION_SUMMARY: &str = "Jira Desk notification test";
+pub const TEST_NOTIFICATION_BODY: &str =
+    "If this appears, Jira Desk desktop notifications are working.";
+
+/// A local receipt from the Freedesktop notification service. This is not a
+/// Jira or database identifier; it is the daemon-assigned notification ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DesktopNotificationReceipt {
+    notification_id: u32,
+}
+
+impl DesktopNotificationReceipt {
+    pub const fn notification_id(self) -> u32 {
+        self.notification_id
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FreedesktopNotificationPort;
@@ -19,6 +35,15 @@ pub struct FreedesktopNotificationPort;
 impl NotificationPort for FreedesktopNotificationPort {
     fn deliver<'a>(&'a self, request: NotificationRequest) -> PortFuture<'a, ()> {
         Box::pin(async move { deliver_notification(request.event).await })
+    }
+}
+
+impl FreedesktopNotificationPort {
+    /// Send a fixed local diagnostic notification without contacting Jira or
+    /// mutating the local cache. The daemon ID is returned only after the
+    /// Freedesktop service accepts the request.
+    pub fn test_notification<'a>(&'a self) -> PortFuture<'a, DesktopNotificationReceipt> {
+        Box::pin(async { send_test_notification().await })
     }
 }
 
@@ -69,6 +94,29 @@ async fn deliver_notification(event: UpdateEvent) -> Result<(), ApplicationError
         .await
         .map(|_| ())
         .map_err(|_| notification_error())
+}
+
+#[cfg(target_os = "linux")]
+async fn send_test_notification() -> Result<DesktopNotificationReceipt, ApplicationError> {
+    notify_rust::Notification::new()
+        .appname(APP_NAME)
+        .summary(TEST_NOTIFICATION_SUMMARY)
+        .body(TEST_NOTIFICATION_BODY)
+        .icon(APP_ICON)
+        .hint(notify_rust::Hint::DesktopEntry(
+            APP_DESKTOP_ENTRY.to_owned(),
+        ))
+        .show_async()
+        .await
+        .map(|handle| DesktopNotificationReceipt {
+            notification_id: handle.id(),
+        })
+        .map_err(|_| notification_error())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn send_test_notification() -> Result<DesktopNotificationReceipt, ApplicationError> {
+    Err(notification_error())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -160,6 +208,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_notification_copy_is_fixed_and_privacy_safe() {
+        assert_eq!(TEST_NOTIFICATION_SUMMARY, "Jira Desk notification test");
+        assert_eq!(
+            TEST_NOTIFICATION_BODY,
+            "If this appears, Jira Desk desktop notifications are working."
+        );
+        assert!(!TEST_NOTIFICATION_BODY.contains("jira.atlassian"));
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn non_linux_delivery_is_redacted_unavailable() {
@@ -168,6 +226,16 @@ mod tests {
             event: event(UpdateKind::IssueAddedToView),
         };
         let result = futures_lite::future::block_on(FreedesktopNotificationPort.deliver(request));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Notification);
+        assert_eq!(error.message(), FAILURE_MESSAGE);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_test_notification_is_redacted_unavailable() {
+        let result =
+            futures_lite::future::block_on(FreedesktopNotificationPort.test_notification());
         let error = result.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Notification);
         assert_eq!(error.message(), FAILURE_MESSAGE);

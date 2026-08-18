@@ -117,6 +117,12 @@ pub(crate) enum ImageFetchResult {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum DesktopNotificationTestResult {
+    Accepted { notification_id: u32 },
+    Failed(DiagnosticErrorKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ResponseMime {
     Png,
     Jpeg,
@@ -348,10 +354,13 @@ impl DecodeFallbackReason {
 }
 
 /// The only values that can be emitted. In particular, this enum has no
-/// `String`, `&str`, URL, identifier, filename, or arbitrary message field.
+/// `String`, `&str`, URL, filename, or arbitrary message field. The one
+/// numeric identifier is the bounded daemon receipt ID from a local test.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum DiagnosticEvent {
     SessionStarted,
+    DesktopNotificationTestStarted,
+    DesktopNotificationTestResult(DesktopNotificationTestResult),
     ImageFetchStarted {
         flow: DiagnosticFlow,
         load_token: u64,
@@ -737,6 +746,14 @@ impl DiagnosticsSink {
         self.record(DiagnosticEvent::SessionStarted);
     }
 
+    pub(crate) fn desktop_notification_test_started(&self) {
+        self.record(DiagnosticEvent::DesktopNotificationTestStarted);
+    }
+
+    pub(crate) fn desktop_notification_test_result(&self, result: DesktopNotificationTestResult) {
+        self.record(DiagnosticEvent::DesktopNotificationTestResult(result));
+    }
+
     pub(crate) fn image_fetch_started(
         &self,
         flow: DiagnosticFlow,
@@ -994,6 +1011,18 @@ fn serialize_event(event: DiagnosticEvent, sequence: u64, timestamp: u64) -> Opt
     );
     let json = match event {
         DiagnosticEvent::SessionStarted => format!(r#"{prefix}session_started"}}"#),
+        DiagnosticEvent::DesktopNotificationTestStarted => {
+            format!(r#"{prefix}desktop_notification_test_started"}}"#)
+        }
+        DiagnosticEvent::DesktopNotificationTestResult(result) => match result {
+            DesktopNotificationTestResult::Accepted { notification_id } => format!(
+                r#"{prefix}desktop_notification_test_result","outcome":"accepted","notification_id":{notification_id}}}"#
+            ),
+            DesktopNotificationTestResult::Failed(error) => format!(
+                r#"{prefix}desktop_notification_test_result","outcome":"failed","error":"{}"}}"#,
+                error.as_json()
+            ),
+        },
         DiagnosticEvent::ImageFetchStarted {
             flow,
             load_token,
@@ -1407,6 +1436,27 @@ mod tests {
             assert!(!line.contains("attachment"));
             assert!(!line.contains("filename"));
         }
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn desktop_notification_events_use_fixed_schema_and_safe_outcomes() {
+        let root = temporary_root("notification-events");
+        let sink = DiagnosticsSink::for_directory(&root);
+        sink.desktop_notification_test_started();
+        sink.desktop_notification_test_result(DesktopNotificationTestResult::Accepted {
+            notification_id: u32::MAX,
+        });
+        sink.desktop_notification_test_result(DesktopNotificationTestResult::Failed(
+            DiagnosticErrorKind::Notification,
+        ));
+        let lines = read_lines(&root.join(DIAGNOSTICS_FILENAME));
+        assert!(lines[0].contains("\"event\":\"desktop_notification_test_started\""));
+        assert!(lines[1].contains("\"outcome\":\"accepted\""));
+        assert!(lines[1].contains("\"notification_id\":4294967295"));
+        assert!(lines[2].contains("\"outcome\":\"failed\""));
+        assert!(lines[2].contains("\"error\":\"notification\""));
+        assert!(lines.iter().all(|line| is_json_line(line)));
         fs::remove_dir_all(root).expect("cleanup");
     }
 

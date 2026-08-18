@@ -71,6 +71,14 @@ struct ScopeState {
 }
 
 impl LiveWorkspace {
+    /// Send a fixed local desktop-notification diagnostic. This intentionally
+    /// bypasses Jira, synchronization, and the local update feed.
+    pub async fn test_desktop_notification(
+        &self,
+    ) -> Result<jira_desktop_notifications::DesktopNotificationReceipt, ApplicationError> {
+        FreedesktopNotificationPort.test_notification().await
+    }
+
     /// Open the configured workspace, reusing its local user set when present.
     pub async fn initialize(
         site_id: JiraSiteId,
