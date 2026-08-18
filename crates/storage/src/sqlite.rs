@@ -1645,6 +1645,64 @@ mod tests {
     }
 
     #[test]
+    fn list_issues_orders_by_latest_update_and_keeps_pagination_global() {
+        let store = SqliteStore::in_memory().expect("open store");
+        let site_id = site("site-a");
+        let user_set_id = saved_set(&store, site_id.clone());
+        let newest_high_key = issue(
+            site_id.clone(),
+            "301",
+            "Newest high key",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+        let oldest = issue(
+            site_id.clone(),
+            "100",
+            "Oldest",
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let newest_low_key = issue(
+            site_id.clone(),
+            "300",
+            "Newest low key",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+
+        block_on(store.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            issues: vec![newest_high_key, oldest, newest_low_key],
+            update_events: vec![],
+            replace_membership: true,
+            state: SyncState::new(site_id.clone(), user_set_id.clone()),
+        }))
+        .expect("commit succeeds");
+
+        let page = |limit, offset| IssueListQuery {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            text: None,
+            assignees: vec![],
+            limit,
+            offset,
+        };
+        let keys = |issues: Vec<Issue>| {
+            issues
+                .into_iter()
+                .map(|issue| issue.key.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(block_on(store.list_issues(&page(2, 0))).expect("first page")),
+            vec!["APP-300", "APP-301"]
+        );
+        assert_eq!(
+            keys(block_on(store.list_issues(&page(2, 2))).expect("second page")),
+            vec!["APP-100"]
+        );
+    }
+
+    #[test]
     fn migrations_enable_pragmas_and_reject_newer_schema() {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("cache.sqlite");

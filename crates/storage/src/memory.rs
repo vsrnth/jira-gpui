@@ -554,8 +554,8 @@ fn normalize_matching_user_set_ids(event: &mut UpdateEvent) {
 mod tests {
     use futures_lite::future::block_on;
     use jira_application::{
-        ErrorKind, IssueCachePort, SyncCommit, SyncState, UpdateFeedPort, UpdateFeedQuery,
-        UserSetDraft, UserSetPort,
+        ErrorKind, IssueCachePort, IssueListQuery, SyncCommit, SyncState, UpdateFeedPort,
+        UpdateFeedQuery, UserSetDraft, UserSetPort,
     };
     use jira_domain::{
         AccountId, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, Priority, Project,
@@ -603,6 +603,77 @@ mod tests {
             datetime!(2026-01-02 00:00 UTC),
             None,
         )
+    }
+
+    fn issue_with(
+        site_id: JiraSiteId,
+        id: &str,
+        key: &str,
+        updated_at: time::OffsetDateTime,
+    ) -> Issue {
+        let mut issue = issue(site_id);
+        issue.id = IssueId::new(id).expect("valid issue id");
+        issue.key = IssueKey::new(key).expect("valid issue key");
+        issue.updated_at = updated_at;
+        issue
+    }
+
+    #[test]
+    fn list_issues_orders_by_latest_update_and_keeps_pagination_global() {
+        let store = InMemoryStore::new();
+        let site = site_id();
+        let user_set_id = UserSetId::new("team").expect("valid user set id");
+        let newest_high_key = issue_with(
+            site.clone(),
+            "301",
+            "APP-301",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+        let oldest = issue_with(
+            site.clone(),
+            "100",
+            "APP-100",
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        let newest_low_key = issue_with(
+            site.clone(),
+            "300",
+            "APP-300",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+
+        block_on(store.commit_sync(SyncCommit {
+            site_id: site.clone(),
+            user_set_id: user_set_id.clone(),
+            issues: vec![newest_high_key, oldest, newest_low_key],
+            update_events: vec![],
+            replace_membership: true,
+            state: SyncState::new(site.clone(), user_set_id.clone()),
+        }))
+        .expect("commit succeeds");
+
+        let page = |limit, offset| IssueListQuery {
+            site_id: site.clone(),
+            user_set_id: user_set_id.clone(),
+            text: None,
+            assignees: vec![],
+            limit,
+            offset,
+        };
+        let keys = |issues: Vec<Issue>| {
+            issues
+                .into_iter()
+                .map(|issue| issue.key.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(block_on(store.list_issues(&page(2, 0))).expect("first page")),
+            vec!["APP-300", "APP-301"]
+        );
+        assert_eq!(
+            keys(block_on(store.list_issues(&page(2, 2))).expect("second page")),
+            vec!["APP-100"]
+        );
     }
 
     #[test]
