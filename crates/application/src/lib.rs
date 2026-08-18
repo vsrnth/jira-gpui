@@ -31,8 +31,10 @@ pub use comment::{CommentService, MAX_COMMENT_BYTES, MAX_COMMENT_CHARS};
 pub use error::{ApplicationError, ErrorKind};
 pub use feed::UpdateFeedService;
 pub use issue_detail::{IssueDetailConfig, IssueDetailService};
-pub use issue_diff::DefaultIssueDiffer;
-pub use issue_edit::{IssueEditService, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, MAX_ISSUE_TRANSITIONS};
+pub use issue_diff::{DefaultIssueDiffer, enrich_with_changelog};
+pub use issue_edit::{
+    ISSUE_EDIT_CACHE_TTL, IssueEditService, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, MAX_ISSUE_TRANSITIONS,
+};
 pub use issue_media::{
     DEFAULT_ATTACHMENT_IMAGE_HEIGHT, DEFAULT_ATTACHMENT_IMAGE_WIDTH,
     DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, IssueMediaConfig,

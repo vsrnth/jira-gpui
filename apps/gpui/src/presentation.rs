@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 
+use chrono::{Local, LocalResult, TimeZone};
 use jira_domain::{
     ChangeValue, Issue, IssueCommentAuthor, IssueDetail, IssueKey, RichTextDocument, UpdateEvent,
     UpdateKind, UpdateReadState, User,
 };
-use time::{Date, OffsetDateTime};
+use time::{Date, OffsetDateTime, UtcOffset};
 
 /// A compact, presentation-only selection of Jira status categories.
 ///
@@ -467,6 +468,9 @@ fn describe_change(kind: &UpdateKind, identities: &IdentityDirectory) -> String 
         UpdateKind::IssueAddedToView => "Added to this user set".to_owned(),
         UpdateKind::IssueRemovedFromView => "Removed from this user set".to_owned(),
         UpdateKind::IssueUpdated => "Issue activity changed".to_owned(),
+        UpdateKind::FieldChanged { field, old, new } => {
+            change_sentence(field, old, new, identities)
+        }
         UpdateKind::StatusChanged { old, new } => change_sentence("Status", old, new, identities),
         UpdateKind::AssigneeChanged { old, new } => {
             change_sentence("Assignee", old, new, identities)
@@ -515,14 +519,42 @@ fn display_change_value(value: &ChangeValue, identities: &IdentityDirectory) -> 
 }
 
 fn format_timestamp(value: OffsetDateTime) -> String {
+    let offset = local_offset_for(value).unwrap_or(UtcOffset::UTC);
+    format_timestamp_with_offset(value, offset)
+}
+
+/// Resolve the system offset for this instant, rather than using the offset at the current time.
+/// This keeps historical/future timestamps correct across daylight-saving transitions. If the
+/// platform cannot resolve its local timezone, callers use UTC as a safe, explicit fallback.
+fn local_offset_for(value: OffsetDateTime) -> Option<UtcOffset> {
+    let local = match Local.timestamp_opt(value.unix_timestamp(), value.nanosecond()) {
+        LocalResult::Single(local) => local,
+        LocalResult::None | LocalResult::Ambiguous(_, _) => return None,
+    };
+    UtcOffset::from_whole_seconds(local.offset().local_minus_utc()).ok()
+}
+
+fn format_timestamp_with_offset(value: OffsetDateTime, offset: UtcOffset) -> String {
+    let local = value.to_offset(offset);
     format!(
-        "{} {:02}, {} · {:02}:{:02} UTC",
-        month_name(value.month() as u8),
-        value.day(),
-        value.year(),
-        value.hour(),
-        value.minute()
+        "{} {:02}, {} · {:02}:{:02} {}",
+        month_name(local.month() as u8),
+        local.day(),
+        local.year(),
+        local.hour(),
+        local.minute(),
+        format_offset(offset)
     )
+}
+
+fn format_offset(offset: UtcOffset) -> String {
+    let seconds = offset.whole_seconds();
+    if seconds == 0 {
+        return "UTC".to_owned();
+    }
+    let sign = if seconds.is_negative() { '-' } else { '+' };
+    let absolute = seconds.unsigned_abs();
+    format!("{sign}{:02}:{:02}", absolute / 3600, (absolute % 3600) / 60)
 }
 
 fn format_date(value: Date) -> String {
@@ -585,6 +617,28 @@ mod tests {
         assert_eq!(view.key, "DESK-184");
         assert_eq!(view.assignee, "Amina Yusuf");
         assert_eq!(view.project, "Developer Experience");
+    }
+
+    #[test]
+    fn formats_timestamp_with_explicit_offset_and_date_rollover() {
+        let value = datetime!(2026-08-17 23:45 UTC);
+        let offset = UtcOffset::from_hms(2, 0, 0).expect("valid offset");
+
+        assert_eq!(
+            format_timestamp_with_offset(value, offset),
+            "Aug 18, 2026 · 01:45 +02:00"
+        );
+    }
+
+    #[test]
+    fn renders_non_whole_hour_local_offset() {
+        let value = datetime!(2026-08-17 12:00 UTC);
+        let offset = UtcOffset::from_hms(-3, -30, 0).expect("valid offset");
+
+        assert_eq!(
+            format_timestamp_with_offset(value, offset),
+            "Aug 17, 2026 · 08:30 -03:30"
+        );
     }
 
     #[test]
@@ -988,6 +1042,33 @@ mod tests {
         assert_eq!(view.change, "Issue activity changed");
     }
 
+    #[test]
+    fn renders_changelog_field_change_as_exact_before_after_sentence() {
+        let issue = sample_issues().into_iter().next().expect("sample issue");
+        let event = UpdateEvent::new(
+            jira_domain::EventId::new("event-field").expect("event"),
+            issue.site_id.clone(),
+            issue.id.clone(),
+            issue.key.clone(),
+            UpdateKind::FieldChanged {
+                field: "Labels".into(),
+                old: ChangeValue::Text("old".into()),
+                new: ChangeValue::Text("new".into()),
+            },
+            issue.updated_at,
+            Vec::new(),
+        );
+
+        let view = &update_groups_for_events(
+            std::slice::from_ref(&event),
+            std::slice::from_ref(&issue),
+            &[],
+        )[0]
+        .events[0];
+
+        assert_eq!(view.change, "Labels: old → new");
+    }
+
     fn test_update_event(
         event_id: &str,
         issue: &Issue,
@@ -1029,7 +1110,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["event-a1", "event-a2"]
         );
-        assert_eq!(groups[0].latest_occurred_at, "Aug 16, 2026 · 10:00 UTC");
+        assert_eq!(
+            groups[0].latest_occurred_at,
+            format_timestamp(datetime!(2026-08-16 10:00 UTC))
+        );
     }
 
     #[test]

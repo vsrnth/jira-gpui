@@ -2,6 +2,7 @@ use jira_domain::{
     AccountId, Issue, IssueComment, IssueId, IssueKey, JiraSiteId, Status, Timestamp, UpdateEvent,
     UpdateKind, UserSetId,
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct UserSearchRequest {
@@ -18,6 +19,44 @@ pub struct IssueFetchRequest {
     pub updated_since: Option<Timestamp>,
     pub page_cursor: Option<PageCursor>,
     pub page_size: usize,
+}
+
+/// Request for bounded changelog enrichment for issue snapshots that changed
+/// since the previous synchronized snapshot. The Jira adapter enforces the
+/// 1,000-issue bulk endpoint limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueChangelogRequest {
+    pub site_id: JiraSiteId,
+    pub issue_ids: Vec<IssueId>,
+}
+
+/// One safe, transport-neutral changelog item. The application layer bounds
+/// and sanitizes the display fields before turning these into update events.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueChangelogItem {
+    pub field: Option<String>,
+    pub field_id: Option<String>,
+    pub from_string: Option<String>,
+    pub to_string: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueChangelogHistory {
+    pub id: String,
+    pub created: Timestamp,
+    pub items: Vec<IssueChangelogItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueChangelog {
+    pub issue_id: IssueId,
+    pub histories: Vec<IssueChangelogHistory>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueChangelogPage {
+    pub changelogs: Vec<IssueChangelog>,
+    pub next_page_token: Option<String>,
 }
 
 /// A user-confirmed Jira comment creation request. The body remains plain text
@@ -49,11 +88,27 @@ pub struct IssueTransitionsRequest {
 }
 
 /// A transition exposed by Jira's issue workflow.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct IssueTransition {
     pub id: String,
     pub name: String,
     pub to: Status,
+}
+
+/// A persisted issue-scoped candidate list and the instant at which Jira
+/// supplied it. The timestamp is the cache's freshness anchor, not a Jira
+/// issue update timestamp.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CachedAssignableUsers {
+    pub users: Vec<jira_domain::User>,
+    pub fetched_at: Timestamp,
+}
+
+/// A persisted issue-scoped workflow transition list and its fetch timestamp.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CachedIssueTransitions {
+    pub transitions: Vec<IssueTransition>,
+    pub fetched_at: Timestamp,
 }
 
 /// A user-confirmed assignment request.

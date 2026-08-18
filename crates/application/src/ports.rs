@@ -8,7 +8,8 @@ use jira_domain::{
 use crate::{
     AddCommentRequest, ApplicationError, ApplicationEvent, AssignIssueRequest,
     AssignableUserSearchRequest, AttachmentContent, AttachmentDownloadRequest, AttachmentImage,
-    AttachmentImageRequest, CancellationToken, ChangeSet, CommitOutcome, IssueCommentsPage,
+    AttachmentImageRequest, CachedAssignableUsers, CachedIssueTransitions, CancellationToken,
+    ChangeSet, CommitOutcome, IssueChangelog, IssueChangelogRequest, IssueCommentsPage,
     IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueListQuery, IssuePage,
     IssueTransition, IssueTransitionsRequest, NotificationRequest, SyncCommit, SyncState,
     TransitionIssueRequest, UpdateFeedQuery, UserSearchRequest, UserSetDraft,
@@ -18,6 +19,20 @@ pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationEr
 
 /// Read-only Jira gateway. Its implementation may own any async runtime it needs.
 pub trait JiraReadPort: Send + Sync {
+    /// Fetches bounded bulk changelog data for changed issue snapshots. Older
+    /// gateways may leave this unsupported; synchronization treats that as a
+    /// best-effort enrichment miss and retains its generic fallback event.
+    fn fetch_issue_changelog<'a>(
+        &'a self,
+        _request: &'a IssueChangelogRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueChangelog>> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "issue changelog is not supported by this Jira gateway",
+        ))))
+    }
+
     /// Fetches the original bytes of one authenticated attachment. The default preserves
     /// compatibility with gateways that do not implement attachment downloads.
     fn fetch_attachment_content<'a>(
@@ -137,6 +152,47 @@ pub trait JiraIssueEditPort: Send + Sync {
         &'a self,
         request: &'a TransitionIssueRequest,
         cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()>;
+}
+
+/// Persistent cache for issue-scoped edit metadata. Implementations must make
+/// each replacement atomic so readers never observe a partially written list.
+/// The locator kind is part of the key: an issue ID and an issue key are never
+/// allowed to collide accidentally.
+pub trait IssueEditCachePort: Send + Sync {
+    fn cached_assignable_users<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a crate::IssueLocator,
+    ) -> PortFuture<'a, Option<CachedAssignableUsers>>;
+
+    fn replace_assignable_users<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a crate::IssueLocator,
+        users: Vec<User>,
+        fetched_at: Timestamp,
+    ) -> PortFuture<'a, ()>;
+
+    fn cached_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a crate::IssueLocator,
+    ) -> PortFuture<'a, Option<CachedIssueTransitions>>;
+
+    fn replace_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a crate::IssueLocator,
+        transitions: Vec<IssueTransition>,
+        fetched_at: Timestamp,
+    ) -> PortFuture<'a, ()>;
+
+    /// Remove only the transition list for this exact site and locator.
+    fn invalidate_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a crate::IssueLocator,
     ) -> PortFuture<'a, ()>;
 }
 

@@ -2,6 +2,60 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraBulkChangelogRequest {
+    pub issue_ids_or_keys: Vec<String>,
+    pub max_results: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+/// Jira Cloud's bulk changelog response. These transport records stay in the
+/// adapter and are mapped to typed application changelog values below.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraBulkChangelogResponse {
+    #[serde(default)]
+    pub issue_change_logs: Vec<JiraIssueChangeLog>,
+    #[serde(default)]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueChangeLog {
+    pub issue_id: String,
+    #[serde(default)]
+    pub change_histories: Vec<JiraChangeHistory>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraChangeHistory {
+    pub id: String,
+    /// Jira currently documents Unix seconds here, while some deployments
+    /// return an ISO timestamp. Keep the transport representation lossless;
+    /// the mapper accepts both forms.
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub created: String,
+    #[serde(default)]
+    pub items: Vec<JiraChangeItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraChangeItem {
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub field_id: Option<String>,
+    #[serde(default)]
+    pub from_string: Option<String>,
+    #[serde(default)]
+    pub to_string: Option<String>,
+}
+
 /// Request body for Jira Cloud's `POST /rest/api/3/search/jql` endpoint.
 ///
 /// It intentionally exposes only read-only search parameters. Jira's API accepts a few more

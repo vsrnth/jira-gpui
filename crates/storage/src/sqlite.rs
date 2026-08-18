@@ -8,12 +8,14 @@ use std::{
 
 use futures_channel::oneshot;
 use jira_application::{
-    ApplicationError, CommitOutcome, ErrorKind, IssueCachePort, IssueListQuery, PortFuture,
-    SyncCommit, SyncState, UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
+    ApplicationError, CachedAssignableUsers, CachedIssueTransitions, CommitOutcome, ErrorKind,
+    IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator, IssueTransition,
+    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, MAX_ISSUE_TRANSITIONS, PortFuture, SyncCommit, SyncState,
+    UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
 };
 use jira_domain::{
     EventId, Issue, IssueId, JiraSiteId, NotificationDelivery, Timestamp, UpdateEvent, UpdateKind,
-    UpdateReadState, UserSet, UserSetId,
+    UpdateReadState, User, UserSet, UserSetId,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter, types::Value,
@@ -21,7 +23,7 @@ use rusqlite::{
 use time::{OffsetDateTime, UtcOffset};
 
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const SUPPORTED_SCHEMA_VERSION: i32 = 2;
+const SUPPORTED_SCHEMA_VERSION: i32 = 4;
 
 type Reply<T> = oneshot::Sender<Result<T, ApplicationError>>;
 
@@ -88,6 +90,35 @@ enum Request {
     },
     DeleteUserSet {
         user_set_id: UserSetId,
+        reply: Reply<()>,
+    },
+    CachedAssignableUsers {
+        site_id: JiraSiteId,
+        locator: IssueLocator,
+        reply: Reply<Option<CachedAssignableUsers>>,
+    },
+    ReplaceAssignableUsers {
+        site_id: JiraSiteId,
+        locator: IssueLocator,
+        users: Vec<User>,
+        fetched_at: Timestamp,
+        reply: Reply<()>,
+    },
+    CachedIssueTransitions {
+        site_id: JiraSiteId,
+        locator: IssueLocator,
+        reply: Reply<Option<CachedIssueTransitions>>,
+    },
+    ReplaceIssueTransitions {
+        site_id: JiraSiteId,
+        locator: IssueLocator,
+        transitions: Vec<IssueTransition>,
+        fetched_at: Timestamp,
+        reply: Reply<()>,
+    },
+    InvalidateIssueTransitions {
+        site_id: JiraSiteId,
+        locator: IssueLocator,
         reply: Reply<()>,
     },
 }
@@ -438,6 +469,101 @@ impl UserSetPort for SqliteStore {
     }
 }
 
+impl IssueEditCachePort for SqliteStore {
+    fn cached_assignable_users<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+    ) -> PortFuture<'a, Option<CachedAssignableUsers>> {
+        let (reply, receiver) = oneshot::channel();
+        dispatch(
+            self.worker.sender.clone(),
+            Request::CachedAssignableUsers {
+                site_id: site_id.clone(),
+                locator: locator.clone(),
+                reply,
+            },
+            receiver,
+        )
+    }
+
+    fn replace_assignable_users<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+        users: Vec<User>,
+        fetched_at: Timestamp,
+    ) -> PortFuture<'a, ()> {
+        let (reply, receiver) = oneshot::channel();
+        dispatch(
+            self.worker.sender.clone(),
+            Request::ReplaceAssignableUsers {
+                site_id: site_id.clone(),
+                locator: locator.clone(),
+                users,
+                fetched_at,
+                reply,
+            },
+            receiver,
+        )
+    }
+
+    fn cached_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+    ) -> PortFuture<'a, Option<CachedIssueTransitions>> {
+        let (reply, receiver) = oneshot::channel();
+        dispatch(
+            self.worker.sender.clone(),
+            Request::CachedIssueTransitions {
+                site_id: site_id.clone(),
+                locator: locator.clone(),
+                reply,
+            },
+            receiver,
+        )
+    }
+
+    fn replace_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+        transitions: Vec<IssueTransition>,
+        fetched_at: Timestamp,
+    ) -> PortFuture<'a, ()> {
+        let (reply, receiver) = oneshot::channel();
+        dispatch(
+            self.worker.sender.clone(),
+            Request::ReplaceIssueTransitions {
+                site_id: site_id.clone(),
+                locator: locator.clone(),
+                transitions,
+                fetched_at,
+                reply,
+            },
+            receiver,
+        )
+    }
+
+    fn invalidate_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+    ) -> PortFuture<'a, ()> {
+        let (reply, receiver) = oneshot::channel();
+        dispatch(
+            self.worker.sender.clone(),
+            Request::InvalidateIssueTransitions {
+                site_id: site_id.clone(),
+                locator: locator.clone(),
+                reply,
+            },
+            receiver,
+        )
+    }
+}
+
 fn initialize_connection(connection: &mut Connection, file_backed: bool) -> rusqlite::Result<()> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -478,6 +604,16 @@ fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     if version < 2 {
         migrate_update_event_kind_range(&transaction)?;
         transaction.execute_batch("PRAGMA user_version = 2;")?;
+    }
+    if version < 3 {
+        transaction.execute_batch(include_str!(
+            "../../../migrations/0003_issue_edit_cache.sql"
+        ))?;
+        transaction.execute_batch("PRAGMA user_version = 3;")?;
+    }
+    if version < 4 {
+        migrate_field_changed_kind(&transaction)?;
+        transaction.execute_batch("PRAGMA user_version = 4;")?;
     }
     transaction.commit()
 }
@@ -535,6 +671,12 @@ fn migrate_update_event_kind_range(transaction: &Transaction<'_>) -> rusqlite::R
     )
 }
 
+fn migrate_field_changed_kind(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(include_str!(
+        "../../../migrations/0004_field_changed_kind.sql"
+    ))
+}
+
 fn handle_request(connection: &mut Connection, request: Request) {
     match request {
         Request::ListIssues { query, reply } => send(reply, list_issues(connection, &query)),
@@ -590,11 +732,185 @@ fn handle_request(connection: &mut Connection, request: Request) {
         Request::DeleteUserSet { user_set_id, reply } => {
             send(reply, delete_user_set(connection, &user_set_id))
         }
+        Request::CachedAssignableUsers {
+            site_id,
+            locator,
+            reply,
+        } => send(
+            reply,
+            cached_assignable_users(connection, &site_id, &locator),
+        ),
+        Request::ReplaceAssignableUsers {
+            site_id,
+            locator,
+            users,
+            fetched_at,
+            reply,
+        } => send(
+            reply,
+            replace_assignable_users(connection, &site_id, &locator, &users, fetched_at),
+        ),
+        Request::CachedIssueTransitions {
+            site_id,
+            locator,
+            reply,
+        } => send(
+            reply,
+            cached_issue_transitions(connection, &site_id, &locator),
+        ),
+        Request::ReplaceIssueTransitions {
+            site_id,
+            locator,
+            transitions,
+            fetched_at,
+            reply,
+        } => send(
+            reply,
+            replace_issue_transitions(connection, &site_id, &locator, &transitions, fetched_at),
+        ),
+        Request::InvalidateIssueTransitions {
+            site_id,
+            locator,
+            reply,
+        } => send(
+            reply,
+            invalidate_issue_transitions(connection, &site_id, &locator),
+        ),
     }
 }
 
 fn send<T>(reply: Reply<T>, result: Result<T, ApplicationError>) {
     let _ = reply.send(result);
+}
+
+fn locator_parts(locator: &IssueLocator) -> (&'static str, &str) {
+    match locator {
+        IssueLocator::Id(value) => ("id", value.as_str()),
+        IssueLocator::Key(value) => ("key", value.as_str()),
+    }
+}
+
+fn cached_assignable_users(
+    connection: &Connection,
+    site_id: &JiraSiteId,
+    locator: &IssueLocator,
+) -> Result<Option<CachedAssignableUsers>, ApplicationError> {
+    let (kind, value) = locator_parts(locator);
+    let row = connection
+        .query_row(
+            "SELECT fetched_seconds, fetched_nanos, snapshot FROM issue_edit_users WHERE site_id = ?1 AND locator_kind = ?2 AND locator_value = ?3",
+            params![site_id.as_str(), kind, value],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    row.map(|(seconds, nanos, snapshot)| {
+        Ok(CachedAssignableUsers {
+            users: decode(&snapshot, "assignable users")?,
+            fetched_at: from_stamp(seconds, nanos)?,
+        })
+    })
+    .transpose()
+}
+
+fn replace_assignable_users(
+    connection: &mut Connection,
+    site_id: &JiraSiteId,
+    locator: &IssueLocator,
+    users: &[User],
+    fetched_at: Timestamp,
+) -> Result<(), ApplicationError> {
+    if users.len() > MAX_ASSIGNABLE_USER_SEARCH_LIMIT
+        || users.iter().any(|user| user.site_id != *site_id)
+    {
+        return Err(ApplicationError::invalid_input(
+            "cached assignable user belongs to another site",
+        ));
+    }
+    let snapshot = encode(&users, "assignable users")?;
+    let (kind, value) = locator_parts(locator);
+    let (seconds, nanos) = stamp(fetched_at);
+    connection
+        .execute(
+            "INSERT INTO issue_edit_users (site_id, locator_kind, locator_value, fetched_seconds, fetched_nanos, snapshot) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(site_id, locator_kind, locator_value) DO UPDATE SET fetched_seconds = excluded.fetched_seconds, fetched_nanos = excluded.fetched_nanos, snapshot = excluded.snapshot",
+            params![site_id.as_str(), kind, value, seconds, nanos, snapshot],
+        )
+        .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn cached_issue_transitions(
+    connection: &Connection,
+    site_id: &JiraSiteId,
+    locator: &IssueLocator,
+) -> Result<Option<CachedIssueTransitions>, ApplicationError> {
+    let (kind, value) = locator_parts(locator);
+    let row = connection
+        .query_row(
+            "SELECT fetched_seconds, fetched_nanos, snapshot FROM issue_edit_transitions WHERE site_id = ?1 AND locator_kind = ?2 AND locator_value = ?3",
+            params![site_id.as_str(), kind, value],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    row.map(|(seconds, nanos, snapshot)| {
+        Ok(CachedIssueTransitions {
+            transitions: decode(&snapshot, "issue transitions")?,
+            fetched_at: from_stamp(seconds, nanos)?,
+        })
+    })
+    .transpose()
+}
+
+fn replace_issue_transitions(
+    connection: &mut Connection,
+    site_id: &JiraSiteId,
+    locator: &IssueLocator,
+    transitions: &[IssueTransition],
+    fetched_at: Timestamp,
+) -> Result<(), ApplicationError> {
+    if transitions.len() > MAX_ISSUE_TRANSITIONS {
+        return Err(ApplicationError::invalid_input(
+            "cached transition list exceeds configured limit",
+        ));
+    }
+    let snapshot = encode(&transitions, "issue transitions")?;
+    let (kind, value) = locator_parts(locator);
+    let (seconds, nanos) = stamp(fetched_at);
+    connection
+        .execute(
+            "INSERT INTO issue_edit_transitions (site_id, locator_kind, locator_value, fetched_seconds, fetched_nanos, snapshot) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(site_id, locator_kind, locator_value) DO UPDATE SET fetched_seconds = excluded.fetched_seconds, fetched_nanos = excluded.fetched_nanos, snapshot = excluded.snapshot",
+            params![site_id.as_str(), kind, value, seconds, nanos, snapshot],
+        )
+        .map_err(sqlite_error)?;
+    Ok(())
+}
+
+fn invalidate_issue_transitions(
+    connection: &mut Connection,
+    site_id: &JiraSiteId,
+    locator: &IssueLocator,
+) -> Result<(), ApplicationError> {
+    let (kind, value) = locator_parts(locator);
+    connection
+        .execute(
+            "DELETE FROM issue_edit_transitions WHERE site_id = ?1 AND locator_kind = ?2 AND locator_value = ?3",
+            params![site_id.as_str(), kind, value],
+        )
+        .map_err(sqlite_error)?;
+    Ok(())
 }
 
 fn list_issues(
@@ -1174,6 +1490,7 @@ fn kind_tag(kind: &UpdateKind) -> i64 {
         UpdateKind::IssueAddedToView => 0,
         UpdateKind::IssueRemovedFromView => 1,
         UpdateKind::IssueUpdated => 9,
+        UpdateKind::FieldChanged { .. } => 10,
         UpdateKind::StatusChanged { .. } => 2,
         UpdateKind::AssigneeChanged { .. } => 3,
         UpdateKind::PriorityChanged { .. } => 4,
@@ -1261,13 +1578,14 @@ fn storage_error(message: impl Into<String>) -> ApplicationError {
 mod tests {
     use futures_lite::future::block_on;
     use jira_application::{
-        ErrorKind, IssueCachePort, IssueListQuery, SyncCommit, SyncState, UpdateFeedPort,
-        UpdateFeedQuery, UserSetDraft, UserSetPort,
+        ErrorKind, IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator,
+        IssueTransition, SyncCommit, SyncState, UpdateFeedPort, UpdateFeedQuery, UserSetDraft,
+        UserSetPort,
     };
     use jira_domain::{
         AccountId, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery,
         Priority, Project, RichBlock, RichInline, RichTextDocument, Status, Timestamp, UpdateEvent,
-        UpdateKind, UpdateReadState, UserSetId,
+        UpdateKind, UpdateReadState, User, UserSetId,
     };
     use tempfile::tempdir;
     use time::macros::datetime;
@@ -1336,7 +1654,7 @@ mod tests {
         let version: i32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
         let foreign_keys: i32 = connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .expect("foreign keys");
@@ -1386,7 +1704,7 @@ mod tests {
             "wal"
         );
         connection
-            .execute_batch("PRAGMA user_version = 3")
+            .execute_batch("PRAGMA user_version = 5")
             .expect("set newer version");
         drop(connection);
         assert!(SqliteStore::open(&path).is_err());
@@ -2090,5 +2408,80 @@ mod tests {
             NotificationDelivery::Delivered
         );
         assert_eq!(events[0].read_state, UpdateReadState::Read);
+    }
+
+    #[test]
+    fn issue_edit_cache_persists_and_isolates_locator_kind_and_site() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("edit-cache.sqlite");
+        let site_a = site("site-a");
+        let site_b = site("site-b");
+        let id_locator = IssueLocator::Id(IssueId::new("100").expect("id"));
+        let key_locator = IssueLocator::Key(IssueKey::new("APP-100").expect("key"));
+        let fetched_at = datetime!(2026-01-03 00:00 UTC);
+        let users = vec![User::new(
+            site_a.clone(),
+            AccountId::new("acct-1").expect("account"),
+            "Alice Example",
+            None,
+            true,
+        )];
+        let transitions = vec![IssueTransition {
+            id: "31".into(),
+            name: "In progress".into(),
+            to: Status {
+                id: "3".into(),
+                name: "In Progress".into(),
+                category: None,
+            },
+        }];
+        {
+            let store = SqliteStore::open(&path).expect("open");
+            block_on(store.replace_assignable_users(
+                &site_a,
+                &id_locator,
+                users.clone(),
+                fetched_at,
+            ))
+            .expect("replace users");
+            block_on(store.replace_issue_transitions(
+                &site_a,
+                &key_locator,
+                transitions.clone(),
+                fetched_at,
+            ))
+            .expect("replace transitions");
+            assert!(
+                block_on(store.cached_assignable_users(&site_a, &key_locator))
+                    .expect("different locator")
+                    .is_none()
+            );
+            assert!(
+                block_on(store.cached_assignable_users(&site_b, &id_locator))
+                    .expect("different site")
+                    .is_none()
+            );
+        }
+        let reopened = SqliteStore::open(&path).expect("reopen");
+        assert_eq!(
+            block_on(reopened.cached_assignable_users(&site_a, &id_locator))
+                .expect("users")
+                .expect("cached")
+                .users,
+            users
+        );
+        assert_eq!(
+            block_on(reopened.cached_issue_transitions(&site_a, &key_locator))
+                .expect("transitions")
+                .expect("cached")
+                .transitions,
+            transitions
+        );
+        block_on(reopened.invalidate_issue_transitions(&site_a, &key_locator)).expect("invalidate");
+        assert!(
+            block_on(reopened.cached_issue_transitions(&site_a, &key_locator))
+                .expect("read")
+                .is_none()
+        );
     }
 }

@@ -11,10 +11,11 @@ use jira_application::{
     AttachmentContent, AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest,
     CancellationToken, Clock, CommentService, DefaultDesktopNotificationPolicy, DefaultIssueDiffer,
     IssueCachePort, IssueCatalogService, IssueDetailConfig, IssueDetailRequest, IssueDetailService,
-    IssueEditService, IssueListQuery, IssueLocator, IssueMediaConfig, IssueMediaService,
-    IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort, NoopEventSink,
-    SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService, TransitionIssueRequest,
-    UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
+    IssueEditCachePort, IssueEditService, IssueListQuery, IssueLocator, IssueMediaConfig,
+    IssueMediaService, IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort,
+    JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
+    TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort,
+    UserSetService,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
@@ -151,7 +152,9 @@ impl LiveWorkspace {
         let detail = IssueDetailService::new(jira.clone(), IssueDetailConfig::default());
         let media = IssueMediaService::new(jira.clone(), IssueMediaConfig::default());
         let comments = CommentService::new(comment_writer);
-        let issue_editor = IssueEditService::new(issue_editor);
+        let edit_cache: Arc<dyn IssueEditCachePort> = cache.clone();
+        let issue_editor =
+            IssueEditService::new_with_cache(issue_editor, edit_cache, Arc::new(SystemClock));
         let events = Arc::new(NoopEventSink);
         let feed = UpdateFeedService::new(
             cache.clone() as Arc<dyn jira_application::UpdateFeedPort>,
@@ -608,7 +611,8 @@ mod tests {
     use futures_lite::future::block_on;
     use jira_application::{
         ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
-        IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage, PortFuture,
+        IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage,
+        IssueTransition, IssueTransitionsRequest, PortFuture, TransitionIssueRequest,
         UserSearchRequest,
     };
     use jira_domain::{
@@ -739,6 +743,105 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FakeIssueEditor {
+        users: Vec<User>,
+        transitions: Vec<IssueTransition>,
+        user_queries: Arc<Mutex<Vec<String>>>,
+        transition_reads: Arc<Mutex<usize>>,
+        transition_writes: Arc<Mutex<usize>>,
+    }
+
+    impl FakeIssueEditor {
+        fn new() -> Self {
+            let site_id = JiraSiteId::new("site").expect("site");
+            Self {
+                users: vec![
+                    User::new(
+                        site_id.clone(),
+                        account("alice-id"),
+                        "Alice Example",
+                        None,
+                        true,
+                    ),
+                    User::new(site_id, account("bob-id"), "Bob Example", None, true),
+                ],
+                transitions: vec![IssueTransition {
+                    id: "31".into(),
+                    name: "In progress".into(),
+                    to: Status {
+                        id: "3".into(),
+                        name: "In Progress".into(),
+                        category: None,
+                    },
+                }],
+                user_queries: Arc::new(Mutex::new(Vec::new())),
+                transition_reads: Arc::new(Mutex::new(0)),
+                transition_writes: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn user_queries(&self) -> Vec<String> {
+            self.user_queries.lock().expect("queries lock").clone()
+        }
+
+        fn transition_reads(&self) -> usize {
+            *self.transition_reads.lock().expect("transition reads lock")
+        }
+
+        fn transition_writes(&self) -> usize {
+            *self
+                .transition_writes
+                .lock()
+                .expect("transition writes lock")
+        }
+    }
+
+    impl JiraIssueEditPort for FakeIssueEditor {
+        fn search_assignable_users<'a>(
+            &'a self,
+            request: &'a AssignableUserSearchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<User>> {
+            self.user_queries
+                .lock()
+                .expect("queries lock")
+                .push(request.query.clone());
+            let users = self.users.clone();
+            Box::pin(async move { Ok(users) })
+        }
+
+        fn fetch_issue_transitions<'a>(
+            &'a self,
+            _request: &'a IssueTransitionsRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<IssueTransition>> {
+            *self.transition_reads.lock().expect("transition reads lock") += 1;
+            let transitions = self.transitions.clone();
+            Box::pin(async move { Ok(transitions) })
+        }
+
+        fn assign_issue<'a>(
+            &'a self,
+            _request: &'a AssignIssueRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn transition_issue<'a>(
+            &'a self,
+            _request: &'a TransitionIssueRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, ()> {
+            *self
+                .transition_writes
+                .lock()
+                .expect("transition writes lock") += 1;
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     fn account(value: &str) -> AccountId {
         AccountId::new(value).expect("valid account")
     }
@@ -804,6 +907,100 @@ mod tests {
             cache,
         ))
         .expect("workspace initializes")
+    }
+
+    fn make_edit_workspace(
+        jira: Arc<FakeJira>,
+        cache: Arc<SqliteStore>,
+        editor: Arc<FakeIssueEditor>,
+    ) -> LiveWorkspace {
+        block_on(LiveWorkspace::initialize_with_writers(
+            JiraSiteId::new("site").expect("valid site"),
+            Some(account("account-a")),
+            jira,
+            Arc::new(UnsupportedCommentWriter),
+            editor,
+            cache,
+        ))
+        .expect("workspace initializes")
+    }
+
+    fn edit_locator() -> IssueLocator {
+        IssueLocator::Key(IssueKey::new("APP-1").expect("valid key"))
+    }
+
+    #[test]
+    fn issue_editor_cache_fetches_empty_users_once_and_filters_follow_up_queries_locally() {
+        let editor = Arc::new(FakeIssueEditor::new());
+        let workspace = make_edit_workspace(
+            Arc::new(FakeJira::default()),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+            editor.clone(),
+        );
+        let cancellation = CancellationToken::new();
+
+        let all = block_on(workspace.search_assignable_users(
+            edit_locator(),
+            String::new(),
+            100,
+            &cancellation,
+        ))
+        .expect("initial candidates");
+        let alice = block_on(workspace.search_assignable_users(
+            edit_locator(),
+            "ALICE".into(),
+            100,
+            &cancellation,
+        ))
+        .expect("local filtered candidates");
+        let bob = block_on(workspace.search_assignable_users(
+            edit_locator(),
+            "bob-id".into(),
+            100,
+            &cancellation,
+        ))
+        .expect("local account-id filtered candidates");
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            alice
+                .iter()
+                .map(|user| user.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Alice Example"]
+        );
+        assert_eq!(
+            bob.iter()
+                .map(|user| user.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Bob Example"]
+        );
+        assert_eq!(editor.user_queries(), vec![String::new()]);
+    }
+
+    #[test]
+    fn issue_editor_transition_cache_reuses_reads_and_refreshes_after_successful_write() {
+        let editor = Arc::new(FakeIssueEditor::new());
+        let workspace = make_edit_workspace(
+            Arc::new(FakeJira::default()),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+            editor.clone(),
+        );
+        let cancellation = CancellationToken::new();
+
+        let first = block_on(workspace.available_transitions(edit_locator(), &cancellation))
+            .expect("initial transitions");
+        let second = block_on(workspace.available_transitions(edit_locator(), &cancellation))
+            .expect("cached transitions");
+        block_on(workspace.transition_issue(edit_locator(), "31".into(), &cancellation))
+            .expect("confirmed transition");
+        let refreshed = block_on(workspace.available_transitions(edit_locator(), &cancellation))
+            .expect("refreshed transitions");
+
+        assert_eq!(first, second);
+        assert_eq!(second, refreshed);
+        assert_eq!(editor.transition_reads(), 2);
+        assert_eq!(editor.transition_writes(), 1);
     }
 
     #[test]

@@ -13,7 +13,9 @@ use jira_domain::{
     UserSetId,
 };
 
-use crate::{ApplicationError, ChangeSet, ErrorKind, IssueDiffer};
+use crate::{
+    ApplicationError, ChangeSet, ErrorKind, IssueChangelog, IssueChangelogItem, IssueDiffer,
+};
 
 /// Production snapshot differ used by the synchronization service.
 #[derive(Debug, Default, Clone, Copy)]
@@ -86,6 +88,164 @@ impl IssueDiffer for DefaultIssueDiffer {
 
         Ok(events)
     }
+}
+
+/// Replaces snapshot-only events with bounded changelog events when Jira
+/// returned usable history inside the snapshot update window. A failed or
+/// unsupported changelog read is represented by the caller passing no logs;
+/// the original generic/snapshot events then remain honest fallbacks.
+pub fn enrich_with_changelog(
+    mut events: Vec<UpdateEvent>,
+    existing: &[Issue],
+    incoming: &[Issue],
+    changelogs: &[IssueChangelog],
+    site_id: &JiraSiteId,
+    user_set_id: &UserSetId,
+) -> Vec<UpdateEvent> {
+    let old_by_id = existing
+        .iter()
+        .map(|issue| (&issue.id, issue))
+        .collect::<BTreeMap<_, _>>();
+    let new_by_id = incoming
+        .iter()
+        .map(|issue| (&issue.id, issue))
+        .collect::<BTreeMap<_, _>>();
+    let mut mapped = Vec::new();
+    let mut seen_items = BTreeSet::new();
+    let mut changed_fields = BTreeSet::new();
+    let mut enriched_issue_ids = BTreeSet::new();
+    for changelog in changelogs {
+        let Some(old) = old_by_id.get(&changelog.issue_id) else {
+            continue;
+        };
+        let Some(new) = new_by_id.get(&changelog.issue_id) else {
+            continue;
+        };
+        if !is_in_view(old) || !is_in_view(new) || old.updated_at == new.updated_at {
+            continue;
+        }
+        for history in &changelog.histories {
+            if history.created <= old.updated_at || history.created > new.updated_at {
+                continue;
+            }
+            if history.id.trim().is_empty() {
+                continue;
+            }
+            for (item_index, item) in history.items.iter().enumerate() {
+                if !seen_items.insert((changelog.issue_id.clone(), history.id.clone(), item_index))
+                {
+                    continue;
+                }
+                let Some((field_key, field_name, old_value, new_value)) = map_changelog_item(item)
+                else {
+                    continue;
+                };
+                if old_value == new_value {
+                    continue;
+                }
+                changed_fields.insert((changelog.issue_id.clone(), field_key.clone()));
+                enriched_issue_ids.insert(changelog.issue_id.clone());
+                let token = format!("{}:{}:{}", history.id, item_index, field_key);
+                mapped.push(new_event(
+                    site_id,
+                    new,
+                    UpdateKind::FieldChanged {
+                        field: field_name,
+                        old: old_value,
+                        new: new_value,
+                    },
+                    history.created,
+                    user_set_id,
+                    "changelog",
+                    history.created,
+                    &token,
+                ));
+            }
+        }
+    }
+    if mapped.is_empty() {
+        return events;
+    }
+    events.retain(|event| {
+        if matches!(event.kind, UpdateKind::IssueUpdated) {
+            return !enriched_issue_ids.contains(&event.issue_id);
+        }
+        event_field_key(&event.kind).is_none_or(|field| {
+            !changed_fields.contains(&(event.issue_id.clone(), field.to_owned()))
+        })
+    });
+    events.extend(mapped);
+    events.sort_by(|left, right| {
+        left.occurred_at
+            .cmp(&right.occurred_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    events
+}
+
+fn event_field_key(kind: &UpdateKind) -> Option<&'static str> {
+    match kind {
+        UpdateKind::StatusChanged { .. } => Some("status"),
+        UpdateKind::AssigneeChanged { .. } => Some("assignee"),
+        UpdateKind::PriorityChanged { .. } => Some("priority"),
+        UpdateKind::DueDateChanged { .. } => Some("duedate"),
+        UpdateKind::SummaryChanged { .. } => Some("summary"),
+        UpdateKind::ParentChanged { .. } => Some("parent"),
+        _ => None,
+    }
+}
+
+fn map_changelog_item(
+    item: &IssueChangelogItem,
+) -> Option<(String, String, ChangeValue, ChangeValue)> {
+    let raw_field = item
+        .field
+        .as_deref()
+        .or(item.field_id.as_deref())
+        .map(str::trim)
+        .filter(|field| !field.is_empty())?;
+    let field_key = raw_field
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '_')
+        .collect::<String>();
+    if field_key.is_empty() || field_key.len() > 255 || field_key.chars().any(char::is_control) {
+        return None;
+    }
+    let field_name = match field_key.as_str() {
+        "duedate" => "Due date".to_owned(),
+        "fixversions" => "Fix version".to_owned(),
+        "worklog" => "Worklog".to_owned(),
+        _ => bounded_display(raw_field)?,
+    };
+    let old = changelog_value(item.from_string.as_deref())?;
+    let new = changelog_value(item.to_string.as_deref())?;
+    Some((field_key, field_name, old, new))
+}
+
+fn changelog_value(value: Option<&str>) -> Option<ChangeValue> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Some(ChangeValue::Text(bounded_display(value)?)),
+        None => Some(ChangeValue::Empty),
+    }
+}
+
+fn bounded_display(value: &str) -> Option<String> {
+    let mut output = String::new();
+    for character in value.chars() {
+        if character.is_control() {
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+        } else {
+            output.push(character);
+        }
+        if output.chars().count() >= 255 {
+            break;
+        }
+    }
+    let output = output.trim().to_owned();
+    (!output.is_empty()).then_some(output)
 }
 
 fn index_snapshot(
@@ -331,6 +491,12 @@ fn canonical_kind(kind: &UpdateKind) -> Vec<String> {
         UpdateKind::IssueAddedToView => fields.push("issue_added_to_view".into()),
         UpdateKind::IssueRemovedFromView => fields.push("issue_removed_from_view".into()),
         UpdateKind::IssueUpdated => fields.push("issue_updated".into()),
+        UpdateKind::FieldChanged { field, old, new } => {
+            fields.push("field_changed".into());
+            fields.push(field.clone());
+            canonical_change_value(&mut fields, old);
+            canonical_change_value(&mut fields, new);
+        }
         UpdateKind::StatusChanged { old, new } => {
             fields.push("status_changed".into());
             canonical_change_value(&mut fields, old);
@@ -426,6 +592,7 @@ fn digest(parts: &[&str], mut hash: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::IssueChangelogHistory;
     use jira_domain::{
         AccountId, IssueId, IssueKey, IssueType, ParentIssue, Priority, Project, Status,
     };
@@ -543,6 +710,140 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].kind, UpdateKind::SummaryChanged { .. }));
+    }
+
+    #[test]
+    fn changelog_enrichment_filters_window_deduplicates_snapshot_fields_and_is_stable() {
+        let old = issue("10001", datetime!(2026-08-16 10:00 UTC));
+        let mut new = issue("10001", datetime!(2026-08-16 11:00 UTC));
+        new.summary = "changed summary".into();
+        new.labels = vec!["new-label".into()];
+        let base = DefaultIssueDiffer
+            .diff(change_set(vec![old.clone()], vec![new.clone()]))
+            .expect("snapshot diff");
+        let changelogs = vec![IssueChangelog {
+            issue_id: new.id.clone(),
+            histories: vec![
+                IssueChangelogHistory {
+                    id: "history-1".into(),
+                    created: datetime!(2026-08-16 10:30 UTC),
+                    items: vec![
+                        IssueChangelogItem {
+                            field: Some("summary".into()),
+                            field_id: Some("summary".into()),
+                            from_string: Some("summary".into()),
+                            to_string: Some("changed summary".into()),
+                        },
+                        IssueChangelogItem {
+                            field: Some("Labels".into()),
+                            field_id: Some("labels".into()),
+                            from_string: None,
+                            to_string: Some("new-label".into()),
+                        },
+                    ],
+                },
+                IssueChangelogHistory {
+                    id: "outside-window".into(),
+                    created: datetime!(2026-08-16 09:59 UTC),
+                    items: vec![IssueChangelogItem {
+                        field: Some("description".into()),
+                        field_id: None,
+                        from_string: Some("old".into()),
+                        to_string: Some("new".into()),
+                    }],
+                },
+            ],
+        }];
+        let enriched = enrich_with_changelog(
+            base,
+            &[old],
+            &[new.clone()],
+            &changelogs,
+            &site("site-a"),
+            &user_set("team-a"),
+        );
+        assert_eq!(enriched.len(), 2);
+        assert!(
+            enriched
+                .iter()
+                .all(|event| matches!(event.kind, UpdateKind::FieldChanged { .. }))
+        );
+        assert!(enriched.iter().any(|event| matches!(
+            &event.kind,
+            UpdateKind::FieldChanged { field, .. } if field == "summary"
+        )));
+        assert!(enriched.iter().any(|event| matches!(
+            &event.kind,
+            UpdateKind::FieldChanged { field, .. } if field == "Labels"
+        )));
+        let reversed = enrich_with_changelog(
+            DefaultIssueDiffer
+                .diff(change_set(
+                    vec![issue("10001", datetime!(2026-08-16 10:00 UTC))],
+                    vec![new.clone()],
+                ))
+                .expect("snapshot diff"),
+            &[issue("10001", datetime!(2026-08-16 10:00 UTC))],
+            &[new],
+            &changelogs,
+            &site("site-a"),
+            &user_set("team-a"),
+        );
+        assert_eq!(
+            enriched.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            reversed.iter().map(|event| &event.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn changelog_deduplication_is_isolated_per_issue_and_missing_values_stay_generic() {
+        let old_one = issue("10001", datetime!(2026-08-16 10:00 UTC));
+        let old_two = issue("10002", datetime!(2026-08-16 10:00 UTC));
+        let mut new_one = issue("10001", datetime!(2026-08-16 11:00 UTC));
+        new_one.labels = vec!["new".into()];
+        let new_two = issue("10002", datetime!(2026-08-16 11:00 UTC));
+        let events = DefaultIssueDiffer
+            .diff(change_set(
+                vec![old_one.clone(), old_two.clone()],
+                vec![new_one.clone(), new_two.clone()],
+            ))
+            .expect("snapshot diff");
+        let enriched = enrich_with_changelog(
+            events,
+            &[old_one, old_two],
+            &[new_one.clone(), new_two],
+            &[IssueChangelog {
+                issue_id: new_one.id.clone(),
+                histories: vec![IssueChangelogHistory {
+                    id: "history-1".into(),
+                    created: datetime!(2026-08-16 10:30 UTC),
+                    items: vec![
+                        IssueChangelogItem {
+                            field: Some("labels".into()),
+                            field_id: None,
+                            from_string: None,
+                            to_string: Some("new".into()),
+                        },
+                        IssueChangelogItem {
+                            field: Some("description".into()),
+                            field_id: None,
+                            from_string: None,
+                            to_string: None,
+                        },
+                    ],
+                }],
+            }],
+            &site("site-a"),
+            &user_set("team-a"),
+        );
+        assert!(enriched.iter().any(|event| {
+            event.issue_id.as_str() == "10001"
+                && matches!(event.kind, UpdateKind::FieldChanged { .. })
+        }));
+        assert!(enriched.iter().any(|event| {
+            event.issue_id.as_str() == "10002" && matches!(event.kind, UpdateKind::IssueUpdated)
+        }));
+        assert_eq!(enriched.len(), 2);
     }
 
     #[test]

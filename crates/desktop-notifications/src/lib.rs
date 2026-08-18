@@ -9,6 +9,8 @@ use jira_domain::UpdateKind;
 const APP_NAME: &str = "Jira Desk";
 #[cfg(target_os = "linux")]
 const APP_ICON: &str = "dev.jiradesk.JiraDesk";
+#[cfg(target_os = "linux")]
+const APP_DESKTOP_ENTRY: &str = "dev.jiradesk.JiraDesk";
 const FAILURE_MESSAGE: &str = "desktop notification unavailable";
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -22,10 +24,11 @@ impl NotificationPort for FreedesktopNotificationPort {
 
 #[cfg(any(target_os = "linux", test))]
 fn notification_content(event: &UpdateEvent) -> (String, String) {
-    (
-        event.issue_key.to_string(),
-        event_kind_label(&event.kind).to_owned(),
-    )
+    let body = match &event.kind {
+        UpdateKind::FieldChanged { field, .. } => format!("Field changed: {field}"),
+        _ => event_kind_label(&event.kind).to_owned(),
+    };
+    (event.issue_key.to_string(), body)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -41,6 +44,7 @@ fn event_kind_label(kind: &UpdateKind) -> &'static str {
         UpdateKind::SummaryChanged { .. } => "Summary changed",
         UpdateKind::ParentChanged { .. } => "Parent changed",
         UpdateKind::CommentAdded { .. } => "Comment added",
+        UpdateKind::FieldChanged { .. } => "Field changed",
     }
 }
 
@@ -56,6 +60,9 @@ async fn deliver_notification(event: UpdateEvent) -> Result<(), ApplicationError
         .summary(&summary)
         .body(&body)
         .icon(APP_ICON)
+        .hint(notify_rust::Hint::DesktopEntry(
+            APP_DESKTOP_ENTRY.to_owned(),
+        ))
         .show_async()
         .await
         .map(|_| ())

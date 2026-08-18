@@ -21,6 +21,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 futures-channel = "0.3.31"
 futures-lite = "2.6.1"
 # Keep this source URL identical to gpui-component's declaration so Cargo

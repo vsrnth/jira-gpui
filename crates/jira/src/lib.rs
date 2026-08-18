@@ -10,15 +10,18 @@ mod models;
 
 pub use jql::{
     AccountId as JqlAccountId, JqlError, MAX_ISSUE_IDS, assigned_issues_for_account_ids,
-    assigned_issues_jql, enhanced_search_request, enhanced_search_request_for_issue_ids,
+    assigned_issues_jql, bulk_changelog_request, enhanced_search_request,
+    enhanced_search_request_for_issue_ids,
 };
 pub use mapping::{
     DomainIssuePage, IssueMapper, MappingError, RemoteIssue, RemoteIssuePage, RemoteNamedEntity,
     RemoteProject, RemoteUser, adf_to_plain_text,
 };
 pub use models::{
-    EnhancedSearchPage, EnhancedSearchRequest, JiraAttachment, JiraComment, JiraCommentPage,
-    JiraIssue, JiraIssueFields, JiraNamedEntity, JiraParentIssue, JiraProject, JiraUser,
+    EnhancedSearchPage, EnhancedSearchRequest, JiraAttachment, JiraBulkChangelogRequest,
+    JiraBulkChangelogResponse, JiraChangeHistory, JiraChangeItem, JiraComment, JiraCommentPage,
+    JiraIssue, JiraIssueChangeLog, JiraIssueFields, JiraNamedEntity, JiraParentIssue, JiraProject,
+    JiraUser,
 };
 
 /// The fields requested by the initial assigned-issues sync.

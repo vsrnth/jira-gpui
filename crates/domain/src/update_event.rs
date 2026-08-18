@@ -22,6 +22,12 @@ pub enum UpdateKind {
     IssueRemovedFromView,
     /// A Jira update was observed, but no more specific tracked field changed.
     IssueUpdated,
+    /// A bounded Jira changelog item with display-safe before/after values.
+    FieldChanged {
+        field: String,
+        old: ChangeValue,
+        new: ChangeValue,
+    },
     StatusChanged {
         old: ChangeValue,
         new: ChangeValue,

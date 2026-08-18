@@ -151,6 +151,50 @@ pub fn enhanced_search_request_for_issue_ids(
     })
 }
 
+/// Builds one bounded bulk changelog request. The HTTP adapter owns pagination
+/// by replacing the opaque token on each subsequent request.
+pub fn bulk_changelog_request(
+    request: &jira_application::IssueChangelogRequest,
+    next_page_token: Option<String>,
+) -> Result<crate::JiraBulkChangelogRequest, JqlError> {
+    if request.issue_ids.is_empty() {
+        return Err(JqlError::NoIssueIds);
+    }
+    if request.issue_ids.len() > MAX_ISSUE_IDS {
+        return Err(JqlError::TooManyIssueIds {
+            maximum: MAX_ISSUE_IDS,
+            received: request.issue_ids.len(),
+        });
+    }
+    let mut issue_ids = request
+        .issue_ids
+        .iter()
+        .map(|issue_id| {
+            let value = issue_id.as_str();
+            if value.trim().is_empty() {
+                return Err(JqlError::EmptyIssueId);
+            }
+            if value.len() > 255 {
+                return Err(JqlError::IssueIdTooLong);
+            }
+            if value
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+            {
+                return Err(JqlError::UnsafeIssueId);
+            }
+            Ok(value.to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    issue_ids.sort();
+    issue_ids.dedup();
+    Ok(crate::JiraBulkChangelogRequest {
+        issue_ids_or_keys: issue_ids,
+        max_results: 1_000,
+        next_page_token,
+    })
+}
+
 /// Converts the application-layer fetch command into Jira's enhanced-search request body.
 ///
 /// This is intentionally pure: it adds no HTTP client or credentials dependency. The cursor is
@@ -379,5 +423,25 @@ mod tests {
         assert_eq!(value["maxResults"], 100);
         assert_eq!(value["fields"][0], "summary");
         assert!(value.get("nextPageToken").is_none());
+    }
+
+    #[test]
+    fn serializes_bounded_bulk_changelog_request_and_cursor() {
+        let request = jira_application::IssueChangelogRequest {
+            site_id: jira_domain::JiraSiteId::new("site").expect("valid test site"),
+            issue_ids: vec![
+                IssueId::new("1002").expect("valid first test issue"),
+                IssueId::new("1001").expect("valid second test issue"),
+            ],
+        };
+        let body = bulk_changelog_request(&request, Some("opaque-page".into()))
+            .expect("valid bulk changelog request");
+        assert_eq!(body.issue_ids_or_keys, vec!["1001", "1002"]);
+        assert_eq!(body.max_results, 1_000);
+        assert_eq!(body.next_page_token.as_deref(), Some("opaque-page"));
+        let json = serde_json::to_value(body).expect("serializable bulk changelog request");
+        assert_eq!(json["issueIdsOrKeys"], serde_json::json!(["1001", "1002"]));
+        assert_eq!(json["maxResults"], 1_000);
+        assert_eq!(json["nextPageToken"], "opaque-page");
     }
 }

@@ -11,18 +11,21 @@ use std::{
     time::Duration,
 };
 
-use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraCommentPage, JiraIssue, JiraUser};
+use jira_adapter::{
+    EnhancedSearchPage, IssueMapper, JiraBulkChangelogResponse, JiraCommentPage, JiraIssue,
+    JiraUser,
+};
 use jira_application::{
     AddCommentRequest, ApplicationError, AssignIssueRequest, AssignableUserSearchRequest,
     AttachmentBodyClass, AttachmentContent, AttachmentDownloadRequest, AttachmentImage,
     AttachmentImageRequest, AttachmentMimeClass, AttachmentReadAttempt, AttachmentReadDiagnostic,
     AttachmentTransportClass, CancellationToken, DEFAULT_ATTACHMENT_IMAGE_HEIGHT,
     DEFAULT_ATTACHMENT_IMAGE_WIDTH, DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
-    DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind, IssueCommentsPage, IssueCommentsPageRequest,
-    IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, IssueTransition,
-    IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort,
-    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture, TransitionIssueRequest,
-    UserSearchRequest,
+    DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind, IssueChangelog, IssueChangelogRequest,
+    IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
+    IssueLocator, IssuePage, IssueTransition, IssueTransitionsRequest, JiraCommentWritePort,
+    JiraIssueEditPort, JiraReadPort, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture,
+    TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, Status, User};
 use reqwest::{Client, Response, StatusCode, header};
@@ -35,6 +38,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
+const MAX_CHANGELOG_PAGES: usize = 8;
 
 struct AttachmentReadOptions {
     attachment_id: String,
@@ -668,6 +672,52 @@ impl JiraHttpClient {
         ))
     }
 
+    async fn issue_changelog_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        request: IssueChangelogRequest,
+        cancellation: CancellationToken,
+        max_response_bytes: usize,
+    ) -> Result<Vec<IssueChangelog>, ApplicationError> {
+        let mut next_page_token = None;
+        let mut changelogs = Vec::new();
+        for _ in 0..MAX_CHANGELOG_PAGES {
+            cancellation.check()?;
+            let body = jira_adapter::bulk_changelog_request(&request, next_page_token.clone())
+                .map_err(|_| ApplicationError::invalid_input("invalid Jira changelog request"))?;
+            let response = client
+                .post(url.clone())
+                .basic_auth(&credentials.email, Some(&credentials.token))
+                .header(header::ACCEPT, "application/json")
+                .header(header::CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(transport_error)?;
+            let payload: JiraBulkChangelogResponse =
+                read_json(response, max_response_bytes).await?;
+            let mapped = IssueMapper.map_changelog_page(payload).map_err(|_| {
+                ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid changelog data")
+            })?;
+            changelogs.extend(mapped.changelogs);
+            let Some(token) = mapped.next_page_token else {
+                return Ok(changelogs);
+            };
+            if token.trim().is_empty() || next_page_token.as_deref() == Some(token.as_str()) {
+                return Err(ApplicationError::new(
+                    ErrorKind::Upstream,
+                    "Jira changelog pagination did not advance",
+                ));
+            }
+            next_page_token = Some(token);
+        }
+        Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira changelog pagination exceeded the safety limit",
+        ))
+    }
+
     async fn issue_detail_request(
         client: Client,
         mut url: Url,
@@ -847,6 +897,44 @@ impl JiraHttpClient {
 }
 
 impl JiraReadPort for JiraHttpClient {
+    fn fetch_issue_changelog<'a>(
+        &'a self,
+        request: &'a IssueChangelogRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueChangelog>> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if request.issue_ids.is_empty() || request.issue_ids.len() > jira_adapter::MAX_ISSUE_IDS {
+            return Box::pin(std::future::ready(Err(ApplicationError::invalid_input(
+                "Jira changelog issue count is invalid",
+            ))));
+        }
+        let url = match self.endpoint("rest/api/3/changelog/bulkfetch") {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let request = request.clone();
+        let cancellation_for_request = cancellation.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::issue_changelog_request(
+                client,
+                url,
+                credentials,
+                request,
+                cancellation_for_request,
+                max,
+            )
+            .await
+        })
+    }
+
     fn fetch_attachment_image<'a>(
         &'a self,
         request: &'a AttachmentImageRequest,
@@ -2312,6 +2400,115 @@ mod tests {
                 .kind(),
             ErrorKind::Cancelled
         );
+    }
+
+    #[test]
+    fn bulk_changelog_paginates_and_maps_documented_numeric_timestamps() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let responder = tokio::spawn(async move {
+                for (body, token) in [
+                    (r#"{"issueChangeLogs":[{"issueId":"10001","changeHistories":[{"id":"h1","created":1786876200,"items":[{"field":"Labels","fromString":"old","toString":"new"}]}]}],"nextPageToken":"page-2"}"#, true),
+                    (r#"{"issueChangeLogs":[],"nextPageToken":null}"#, false),
+                ] {
+                    let (mut stream, _) = listener.accept().await.expect("request");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes())
+                        .await
+                        .expect("response");
+                    assert_eq!(token, body.contains("page-2"));
+                }
+            });
+            let request = IssueChangelogRequest {
+                site_id: JiraSiteId::new("site-a").expect("site"),
+                issue_ids: vec![jira_domain::IssueId::new("10001").expect("issue")],
+            };
+            let logs = JiraHttpClient::issue_changelog_request(
+                Client::new(),
+                Url::parse(&format!("http://{address}/rest/api/3/changelog/bulkfetch"))
+                    .expect("url"),
+                ApiTokenCredentials::new("person@example.com", "token").expect("credentials"),
+                request,
+                CancellationToken::new(),
+                1_048_576,
+            )
+            .await
+            .expect("changelog response");
+            responder.await.expect("responder");
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].histories[0].created.unix_timestamp(), 1786876200);
+        });
+    }
+
+    #[test]
+    fn cancelled_or_unbounded_bulk_changelog_reads_stop_safely() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let request = IssueChangelogRequest {
+                site_id: JiraSiteId::new("site-a").expect("site"),
+                issue_ids: vec![jira_domain::IssueId::new("10001").expect("issue")],
+            };
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            let error = JiraHttpClient::issue_changelog_request(
+                Client::new(),
+                Url::parse("http://127.0.0.1:1/rest/api/3/changelog/bulkfetch").expect("url"),
+                ApiTokenCredentials::new("person@example.com", "token").expect("credentials"),
+                request.clone(),
+                cancellation,
+                1_048_576,
+            )
+            .await
+            .expect_err("cancelled read");
+            assert_eq!(error.kind(), ErrorKind::Cancelled);
+            assert!(MAX_CHANGELOG_PAGES > 0);
+
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let responder = tokio::spawn(async move {
+                for index in 0..MAX_CHANGELOG_PAGES {
+                    let (mut stream, _) = listener.accept().await.expect("request");
+                    let body = format!(
+                        r#"{{"issueChangeLogs":[],"nextPageToken":"next-{index}"}}"#
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes())
+                        .await
+                        .expect("response");
+                }
+            });
+            let error = JiraHttpClient::issue_changelog_request(
+                Client::new(),
+                Url::parse(&format!("http://{address}/rest/api/3/changelog/bulkfetch"))
+                    .expect("url"),
+                ApiTokenCredentials::new("person@example.com", "token").expect("credentials"),
+                request,
+                CancellationToken::new(),
+                1_048_576,
+            )
+            .await
+            .expect_err("pagination safety cap");
+            responder.await.expect("responder");
+            assert!(error.message().contains("safety limit"));
+        });
     }
 
     #[test]

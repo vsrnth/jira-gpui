@@ -3373,6 +3373,7 @@ name = "jira-application"
 version = "0.1.0"
 dependencies = [
  "jira-domain",
+ "serde",
  "thiserror 2.0.20",
  "time",
 ]
@@ -3401,6 +3402,7 @@ name = "jira-gpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "futures-lite",
  "gpui",
  "gpui-component",

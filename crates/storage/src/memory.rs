@@ -6,17 +6,20 @@ use std::{
 };
 
 use jira_application::{
-    ApplicationError, CommitOutcome, ErrorKind, IssueCachePort, IssueListQuery, PortFuture,
-    SyncCommit, SyncState, UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
+    ApplicationError, CachedAssignableUsers, CachedIssueTransitions, CommitOutcome, ErrorKind,
+    IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator, IssueTransition,
+    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, MAX_ISSUE_TRANSITIONS, PortFuture, SyncCommit, SyncState,
+    UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
 };
 use jira_domain::{
-    EventId, Issue, IssueId, JiraSiteId, NotificationDelivery, UpdateEvent, UpdateReadState,
-    UserSet, UserSetId,
+    EventId, Issue, IssueId, JiraSiteId, NotificationDelivery, Timestamp, UpdateEvent,
+    UpdateReadState, User, UserSet, UserSetId,
 };
 use time::OffsetDateTime;
 
 type IssueKey = (JiraSiteId, IssueId);
 type UserSetKey = (JiraSiteId, UserSetId);
+type EditCacheKey = (JiraSiteId, String, String);
 
 #[derive(Default)]
 struct State {
@@ -25,7 +28,16 @@ struct State {
     sync_states: HashMap<UserSetKey, SyncState>,
     events: Vec<UpdateEvent>,
     user_sets: HashMap<UserSetKey, UserSet>,
+    assignable_users: HashMap<EditCacheKey, CachedAssignableUsers>,
+    issue_transitions: HashMap<EditCacheKey, CachedIssueTransitions>,
     next_user_set_id: u64,
+}
+
+fn edit_cache_key(site_id: &JiraSiteId, locator: &IssueLocator) -> EditCacheKey {
+    match locator {
+        IssueLocator::Id(id) => (site_id.clone(), "id".to_owned(), id.as_str().to_owned()),
+        IssueLocator::Key(key) => (site_id.clone(), "key".to_owned(), key.as_str().to_owned()),
+    }
 }
 
 /// Thread-safe development adapter for the application persistence ports.
@@ -369,6 +381,96 @@ impl UpdateFeedPort for InMemoryStore {
                 }
             }
             Ok(changed)
+        })
+    }
+}
+
+impl IssueEditCachePort for InMemoryStore {
+    fn cached_assignable_users<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+    ) -> PortFuture<'a, Option<CachedAssignableUsers>> {
+        Box::pin(async move {
+            Ok(self
+                .read_state()?
+                .assignable_users
+                .get(&edit_cache_key(site_id, locator))
+                .cloned())
+        })
+    }
+
+    fn replace_assignable_users<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+        users: Vec<User>,
+        fetched_at: Timestamp,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            if users.len() > MAX_ASSIGNABLE_USER_SEARCH_LIMIT
+                || users.iter().any(|user| user.site_id != *site_id)
+            {
+                return Err(ApplicationError::invalid_input(
+                    "cached assignable user belongs to another site",
+                ));
+            }
+            self.write_state()?.assignable_users.insert(
+                edit_cache_key(site_id, locator),
+                CachedAssignableUsers { users, fetched_at },
+            );
+            Ok(())
+        })
+    }
+
+    fn cached_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+    ) -> PortFuture<'a, Option<CachedIssueTransitions>> {
+        Box::pin(async move {
+            Ok(self
+                .read_state()?
+                .issue_transitions
+                .get(&edit_cache_key(site_id, locator))
+                .cloned())
+        })
+    }
+
+    fn replace_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+        transitions: Vec<IssueTransition>,
+        fetched_at: Timestamp,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            if transitions.len() > MAX_ISSUE_TRANSITIONS {
+                return Err(ApplicationError::invalid_input(
+                    "cached transition list exceeds configured limit",
+                ));
+            }
+            self.write_state()?.issue_transitions.insert(
+                edit_cache_key(site_id, locator),
+                CachedIssueTransitions {
+                    transitions,
+                    fetched_at,
+                },
+            );
+            Ok(())
+        })
+    }
+
+    fn invalidate_issue_transitions<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        locator: &'a IssueLocator,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            self.write_state()?
+                .issue_transitions
+                .remove(&edit_cache_key(site_id, locator));
+            Ok(())
         })
     }
 }

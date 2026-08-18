@@ -13,6 +13,7 @@ impl crate::NotificationPolicy for DefaultDesktopNotificationPolicy {
             | UpdateKind::PriorityChanged { .. }
             | UpdateKind::DueDateChanged { .. }
             | UpdateKind::CommentAdded { .. }
+            | UpdateKind::FieldChanged { .. }
             | UpdateKind::IssueUpdated => true,
             UpdateKind::IssueRemovedFromView
             | UpdateKind::SummaryChanged { .. }

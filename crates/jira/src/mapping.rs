@@ -1,8 +1,11 @@
 use crate::models::{
-    EnhancedSearchPage, JiraAttachment, JiraComment, JiraCommentPage, JiraIssue, JiraNamedEntity,
-    JiraProject, JiraUser,
+    EnhancedSearchPage, JiraAttachment, JiraBulkChangelogResponse, JiraComment, JiraCommentPage,
+    JiraIssue, JiraNamedEntity, JiraProject, JiraUser,
 };
-use jira_application::{IssueCommentsPage, PageCursor};
+use jira_application::{
+    IssueChangelog, IssueChangelogHistory, IssueChangelogItem, IssueChangelogPage,
+    IssueCommentsPage, PageCursor,
+};
 use jira_domain::{
     AccountId, AttachmentMetadata, Issue, IssueComment, IssueCommentAuthor, IssueDetailCore,
     IssueId, IssueKey, IssueType, JiraSiteId, PanelKind, ParentIssue, Priority, Project,
@@ -94,6 +97,55 @@ impl IssueMapper {
             issues,
             next_page_token: page.next_page_token,
             is_last: page.is_last,
+        })
+    }
+
+    pub fn map_changelog_page(
+        &self,
+        response: JiraBulkChangelogResponse,
+    ) -> Result<IssueChangelogPage, MappingError> {
+        let changelogs = response
+            .issue_change_logs
+            .into_iter()
+            .map(|log| {
+                let issue_id = IssueId::new(bounded_changelog_text(
+                    log.issue_id,
+                    255,
+                    "changelog issue ID",
+                    false,
+                )?)
+                .map_err(MappingError::InvalidDomainValue)?;
+                let histories = log
+                    .change_histories
+                    .into_iter()
+                    .map(|history| {
+                        bounded_changelog_text(history.id, 255, "history ID", false).and_then(
+                            |id| {
+                                Ok(IssueChangelogHistory {
+                                    id,
+                                    created: parse_timestamp(history.created)?,
+                                    items: history
+                                        .items
+                                        .into_iter()
+                                        .map(map_changelog_item)
+                                        .collect::<Result<Vec<_>, _>>()?,
+                                })
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(IssueChangelog {
+                    issue_id,
+                    histories,
+                })
+            })
+            .collect::<Result<Vec<_>, MappingError>>()?;
+        Ok(IssueChangelogPage {
+            changelogs,
+            next_page_token: response
+                .next_page_token
+                .map(|token| bounded_changelog_text(token, 255, "changelog page token", false))
+                .transpose()?,
         })
     }
 
@@ -1325,9 +1377,78 @@ fn required<T>(field: &'static str, value: Option<T>) -> Result<T, MappingError>
 }
 
 fn parse_timestamp(value: String) -> Result<Timestamp, MappingError> {
-    OffsetDateTime::parse(&value, &Rfc3339)
+    if let Ok(timestamp) = OffsetDateTime::parse(&value, &Rfc3339)
         .or_else(|_| OffsetDateTime::parse(&value, JIRA_OFFSET_TIMESTAMP_FORMAT))
-        .map_err(|_| MappingError::InvalidTimestamp(value))
+    {
+        return Ok(timestamp);
+    }
+    value
+        .parse::<i64>()
+        .ok()
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .ok_or(MappingError::InvalidTimestamp(value))
+}
+
+fn map_changelog_item(
+    item: crate::models::JiraChangeItem,
+) -> Result<IssueChangelogItem, MappingError> {
+    Ok(IssueChangelogItem {
+        field: item
+            .field
+            .map(|value| bounded_changelog_text(value, 255, "changelog field", false))
+            .transpose()?,
+        field_id: item
+            .field_id
+            .map(|value| bounded_changelog_text(value, 255, "changelog field ID", false))
+            .transpose()?,
+        from_string: item
+            .from_string
+            .map(|value| bounded_changelog_display(value, 4_096, "changelog old value"))
+            .transpose()?,
+        to_string: item
+            .to_string
+            .map(|value| bounded_changelog_display(value, 4_096, "changelog new value"))
+            .transpose()?,
+    })
+}
+
+fn bounded_changelog_display(
+    value: String,
+    maximum: usize,
+    field: &'static str,
+) -> Result<String, MappingError> {
+    let mut output = String::new();
+    for character in value.chars() {
+        if character.is_control() {
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+        } else {
+            output.push(character);
+        }
+        if output.chars().count() >= maximum {
+            break;
+        }
+    }
+    if output.trim().is_empty() && !value.trim().is_empty() {
+        return Err(MappingError::InvalidChangelogValue(field));
+    }
+    Ok(output.trim().to_owned())
+}
+
+fn bounded_changelog_text(
+    value: String,
+    maximum: usize,
+    field: &'static str,
+    allow_empty: bool,
+) -> Result<String, MappingError> {
+    if (!allow_empty && value.trim().is_empty())
+        || value.chars().any(char::is_control)
+        || value.chars().count() > maximum
+    {
+        return Err(MappingError::InvalidChangelogValue(field));
+    }
+    Ok(value)
 }
 
 const JIRA_OFFSET_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] = time::macros::format_description!(
@@ -1420,6 +1541,8 @@ pub enum MappingError {
     InvalidTimestamp(String),
     #[error("Jira response has an invalid due date: {0}")]
     InvalidDate(String),
+    #[error("Jira response has an invalid changelog value: {0}")]
+    InvalidChangelogValue(&'static str),
 }
 
 #[cfg(test)]
@@ -1446,6 +1569,62 @@ mod tests {
         );
         assert_eq!(issue.parent.as_ref().unwrap().key, "ENG-1");
         assert_eq!(issue.project.as_ref().unwrap().name, "Engineering");
+    }
+
+    #[test]
+    fn maps_bulk_changelog_with_bounded_items_and_rejects_bad_timestamps() {
+        let response: JiraBulkChangelogResponse = serde_json::from_value(serde_json::json!({
+            "issueChangeLogs": [{
+                "issueId": "10001",
+                "changeHistories": [{
+                    "id": "history-1",
+                    "created": 1786876200,
+                    "items": [{
+                        "field": "Labels",
+                        "fieldId": "labels",
+                        "fromString": "old\nvalue",
+                        "toString": "new"
+                    }]
+                }]
+            }],
+            "nextPageToken": "next-1"
+        }))
+        .expect("valid changelog response");
+        let page = IssueMapper
+            .map_changelog_page(response)
+            .expect("mapped changelog");
+        assert_eq!(page.next_page_token.as_deref(), Some("next-1"));
+        assert_eq!(page.changelogs[0].issue_id.as_str(), "10001");
+        assert_eq!(
+            page.changelogs[0].histories[0].items[0].field.as_deref(),
+            Some("Labels")
+        );
+        assert_eq!(
+            page.changelogs[0].histories[0].created.unix_timestamp(),
+            1786876200
+        );
+        assert_eq!(
+            page.changelogs[0].histories[0].items[0]
+                .from_string
+                .as_deref(),
+            Some("old value")
+        );
+
+        let malformed: JiraBulkChangelogResponse = serde_json::from_value(serde_json::json!({
+            "issueChangeLogs": [{
+                "issueId": "10001",
+                "changeHistories": [{
+                    "id": "history-1",
+                    "created": "not-a-timestamp",
+                    "items": []
+                }]
+            }]
+        }))
+        .expect("response shape");
+        assert!(matches!(
+            IssueMapper.map_changelog_page(malformed),
+            Err(MappingError::InvalidTimestamp(_))
+        ));
     }
 
     #[test]

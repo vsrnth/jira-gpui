@@ -7,8 +7,10 @@ use crate::{
     ApplicationError, ApplicationEvent, ApplicationEventSink, CancellationToken, ChangeSet, Clock,
     IssueCachePort, IssueDiffer, IssueFetchRequest, JiraReadPort, NotificationPolicy,
     NotificationPort, NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest,
-    SyncState,
+    SyncState, enrich_with_changelog,
 };
+
+const MAX_CHANGELOG_ISSUES_PER_REQUEST: usize = 1_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SyncConfig {
@@ -184,15 +186,51 @@ impl SyncService {
         } else {
             Vec::new()
         };
+        let existing_for_enrichment = existing.clone();
         let update_events = if request.mode.emits_updates() {
-            self.differ.diff(ChangeSet {
+            let mut update_events = self.differ.diff(ChangeSet {
                 existing,
                 incoming: issues.clone(),
                 site_id: request.site_id.clone(),
                 user_set_id: request.user_set_id.clone(),
                 detected_at: cursor,
                 include_removed_from_view: request.mode.replaces_membership(),
-            })?
+            })?;
+            let changelog_issue_ids = changed_issue_ids(&existing_for_enrichment, &issues);
+            if !changelog_issue_ids.is_empty() {
+                for issue_ids in changelog_issue_ids.chunks(MAX_CHANGELOG_ISSUES_PER_REQUEST) {
+                    cancellation.check()?;
+                    match self
+                        .jira
+                        .fetch_issue_changelog(
+                            &crate::IssueChangelogRequest {
+                                site_id: request.site_id.clone(),
+                                issue_ids: issue_ids.to_vec(),
+                            },
+                            cancellation,
+                        )
+                        .await
+                    {
+                        Ok(page) => {
+                            update_events = enrich_with_changelog(
+                                update_events,
+                                &existing_for_enrichment,
+                                &issues,
+                                &page,
+                                &request.site_id,
+                                &request.user_set_id,
+                            );
+                        }
+                        Err(error) if error.kind() == crate::ErrorKind::Cancelled => {
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+            }
+            update_events
         } else {
             Vec::new()
         };
@@ -314,6 +352,26 @@ impl SyncService {
         }
         Ok(())
     }
+}
+
+fn changed_issue_ids(existing: &[Issue], incoming: &[Issue]) -> Vec<jira_domain::IssueId> {
+    let old = existing
+        .iter()
+        .map(|issue| (&issue.id, issue))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut ids = incoming
+        .iter()
+        .filter_map(|issue| {
+            let previous = old.get(&issue.id)?;
+            (previous.lifecycle == jira_domain::IssueLifecycle::Present
+                && issue.lifecycle == jira_domain::IssueLifecycle::Present
+                && previous.updated_at != issue.updated_at)
+                .then(|| issue.id.clone())
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 fn deduplicate_issues(issues: Vec<Issue>) -> Vec<Issue> {
