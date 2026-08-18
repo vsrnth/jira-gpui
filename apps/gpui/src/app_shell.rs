@@ -208,7 +208,7 @@ impl AppShell {
                                     .min_w_0()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. Jira remains read-only except for explicitly confirmed comment creation."),
+                                    .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. Jira changes are limited to explicitly confirmed comments, assignee changes, and status transitions."),
                             ),
                     )
                     .when_some(error, |this, error| this.child(error))
@@ -274,7 +274,7 @@ impl AppShell {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira read access is required; comment permission is used only after explicit confirmation. Create an API token in your Atlassian account security settings."),
+                                    .child("Jira read access is required; write permissions are used only after explicit confirmation. Create an API token in your Atlassian account security settings."),
                             ),
                     ),
             )

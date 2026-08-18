@@ -360,6 +360,7 @@ impl IssueDetailViewModel {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateViewModel {
+    pub event_id: jira_domain::EventId,
     pub issue_id: jira_domain::IssueId,
     pub issue_key: String,
     pub issue_summary: String,
@@ -369,22 +370,96 @@ pub struct UpdateViewModel {
 }
 
 impl UpdateViewModel {
-    pub fn from_domain(event: &UpdateEvent, issue: Option<&Issue>, users: &[User]) -> Self {
-        let mut identities = IdentityDirectory::from_users(users);
-        if let Some(issue) = issue {
-            identities.include_issue(issue);
-        }
+    fn from_domain_with_directory(
+        event: &UpdateEvent,
+        issue: Option<&Issue>,
+        identities: &IdentityDirectory,
+    ) -> Self {
         Self {
+            event_id: event.id.clone(),
             issue_id: event.issue_id.clone(),
             issue_key: event.issue_key.to_string(),
             issue_summary: issue
                 .map(|issue| issue.summary.clone())
                 .unwrap_or_else(|| "Issue no longer in this view".to_owned()),
-            change: describe_change(&event.kind, &identities),
+            change: describe_change(&event.kind, identities),
             occurred_at: format_timestamp(event.occurred_at),
             unread: event.read_state == UpdateReadState::Unread,
         }
     }
+}
+
+/// Presentation model for one issue's activity in the local update feed.
+///
+/// The domain feed is newest-first. Grouping retains the first appearance order of issues and
+/// the input order of events inside each issue, so the UI can render a stable ticket card without
+/// changing the feed's chronology.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateGroupViewModel {
+    pub issue_id: jira_domain::IssueId,
+    pub issue_key: String,
+    pub issue_summary: String,
+    pub events: Vec<UpdateViewModel>,
+    pub latest_occurred_at: String,
+    pub unread_count: usize,
+    pub unread: bool,
+}
+
+/// Groups update events by stable Jira issue ID for presentation.
+///
+/// Issue metadata is looked up by ID, while the event's key is retained as the safe fallback when
+/// the issue is no longer present in the current issue view. Account IDs are resolved through one
+/// shared identity directory, matching the existing individual update mapping behavior.
+pub fn update_groups_for_events(
+    events: &[UpdateEvent],
+    issues: &[Issue],
+    users: &[User],
+) -> Vec<UpdateGroupViewModel> {
+    let mut identities = IdentityDirectory::from_users(users);
+    let issues_by_id: HashMap<jira_domain::IssueId, &Issue> = issues
+        .iter()
+        .map(|issue| {
+            identities.include_issue(issue);
+            (issue.id.clone(), issue)
+        })
+        .collect();
+    let mut groups: Vec<UpdateGroupViewModel> = Vec::new();
+    let mut group_indexes: HashMap<jira_domain::IssueId, usize> = HashMap::new();
+    let mut latest_times: HashMap<jira_domain::IssueId, jira_domain::Timestamp> = HashMap::new();
+
+    for event in events {
+        let issue = issues_by_id.get(&event.issue_id).copied();
+        let update = UpdateViewModel::from_domain_with_directory(event, issue, &identities);
+        let event_id = event.issue_id.clone();
+        if let Some(&group_index) = group_indexes.get(&event_id) {
+            let group = &mut groups[group_index];
+            group.unread_count += usize::from(update.unread);
+            group.unread |= update.unread;
+            group.events.push(update);
+            if latest_times
+                .get(&event_id)
+                .is_none_or(|latest| event.occurred_at > *latest)
+            {
+                latest_times.insert(event_id, event.occurred_at);
+                group.latest_occurred_at = format_timestamp(event.occurred_at);
+            }
+        } else {
+            let group_index = groups.len();
+            group_indexes.insert(event_id.clone(), group_index);
+            latest_times.insert(event_id, event.occurred_at);
+            groups.push(UpdateGroupViewModel {
+                issue_id: update.issue_id.clone(),
+                issue_key: update.issue_key.clone(),
+                issue_summary: update.issue_summary.clone(),
+                latest_occurred_at: update.occurred_at.clone(),
+                unread_count: usize::from(update.unread),
+                unread: update.unread,
+                events: vec![update],
+            });
+        }
+    }
+
+    groups
 }
 
 fn describe_change(kind: &UpdateKind, identities: &IdentityDirectory) -> String {
@@ -800,7 +875,12 @@ mod tests {
             Vec::new(),
         );
 
-        let view = UpdateViewModel::from_domain(&event, Some(&issue), &users);
+        let view = &update_groups_for_events(
+            std::slice::from_ref(&event),
+            std::slice::from_ref(&issue),
+            &users,
+        )[0]
+        .events[0];
 
         assert_eq!(view.change, "Assignee: Old Name → New Name");
         assert!(!view.change.contains("account"));
@@ -824,7 +904,12 @@ mod tests {
             Vec::new(),
         );
 
-        let view = UpdateViewModel::from_domain(&event, Some(&issue), &sample_users());
+        let view = &update_groups_for_events(
+            std::slice::from_ref(&event),
+            std::slice::from_ref(&issue),
+            &sample_users(),
+        )[0]
+        .events[0];
 
         assert_eq!(view.change, "Amina Yusuf commented: A useful update");
         assert!(!view.change.contains("amina"));
@@ -891,9 +976,159 @@ mod tests {
             Vec::new(),
         );
 
-        let view = UpdateViewModel::from_domain(&event, Some(&issue), &[]);
+        let view = &update_groups_for_events(
+            std::slice::from_ref(&event),
+            std::slice::from_ref(&issue),
+            &[],
+        )[0]
+        .events[0];
 
         assert_eq!(view.issue_id, issue.id);
+        assert_eq!(view.event_id.as_str(), "event-1");
         assert_eq!(view.change, "Issue activity changed");
+    }
+
+    fn test_update_event(
+        event_id: &str,
+        issue: &Issue,
+        occurred_at: jira_domain::Timestamp,
+    ) -> UpdateEvent {
+        UpdateEvent::new(
+            jira_domain::EventId::new(event_id).expect("event ID"),
+            issue.site_id.clone(),
+            issue.id.clone(),
+            issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            occurred_at,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn groups_adjacent_events_for_one_issue_into_one_ticket_card() {
+        let issues = sample_issues();
+        let first = &issues[0];
+        let second = &issues[1];
+        let events = vec![
+            test_update_event("event-a1", first, datetime!(2026-08-16 10:00 UTC)),
+            test_update_event("event-a2", first, datetime!(2026-08-16 09:00 UTC)),
+            test_update_event("event-b1", second, datetime!(2026-08-16 08:00 UTC)),
+        ];
+
+        let groups = update_groups_for_events(&events, &issues, &sample_users());
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].issue_id, first.id);
+        assert_eq!(groups[0].issue_key, "DESK-184");
+        assert_eq!(groups[0].issue_summary, first.summary);
+        assert_eq!(
+            groups[0]
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-a1", "event-a2"]
+        );
+        assert_eq!(groups[0].latest_occurred_at, "Aug 16, 2026 · 10:00 UTC");
+    }
+
+    #[test]
+    fn groups_non_adjacent_events_without_reordering_groups_or_events() {
+        let issues = sample_issues();
+        let first = &issues[0];
+        let second = &issues[1];
+        let events = vec![
+            test_update_event("event-a1", first, datetime!(2026-08-16 10:00 UTC)),
+            test_update_event("event-b1", second, datetime!(2026-08-16 09:00 UTC)),
+            test_update_event("event-a2", first, datetime!(2026-08-16 08:00 UTC)),
+        ];
+
+        let groups = update_groups_for_events(&events, &issues, &[]);
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.issue_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["DESK-184", "DESK-179"]
+        );
+        assert_eq!(
+            groups[0]
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-a1", "event-a2"]
+        );
+        assert_eq!(
+            groups[1]
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-b1"]
+        );
+    }
+
+    #[test]
+    fn groups_expose_all_event_ids_and_aggregate_mixed_read_states() {
+        let issues = sample_issues();
+        let issue = &issues[0];
+        let mut read = test_update_event("event-read", issue, datetime!(2026-08-16 09:00 UTC));
+        read.mark_read();
+        let events = vec![
+            test_update_event("event-unread-1", issue, datetime!(2026-08-16 10:00 UTC)),
+            read,
+            test_update_event("event-unread-2", issue, datetime!(2026-08-16 08:00 UTC)),
+        ];
+
+        let groups = update_groups_for_events(&events, &issues, &[]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].unread_count, 2);
+        assert!(groups[0].unread);
+        assert_eq!(
+            groups[0]
+                .events
+                .iter()
+                .map(|event| (event.event_id.as_str(), event.unread))
+                .collect::<Vec<_>>(),
+            vec![
+                ("event-unread-1", true),
+                ("event-read", false),
+                ("event-unread-2", true)
+            ]
+        );
+    }
+
+    #[test]
+    fn grouping_missing_issue_uses_safe_event_metadata_fallbacks() {
+        let issue_id = jira_domain::IssueId::new("missing-issue").expect("issue ID");
+        let site_id = jira_domain::JiraSiteId::new("sample-site").expect("site ID");
+        let issue_key = IssueKey::new("DESK-999").expect("issue key");
+        let secret_account = jira_domain::AccountId::new("secret-account").expect("account ID");
+        let event = UpdateEvent::new(
+            jira_domain::EventId::new("event-missing").expect("event ID"),
+            site_id,
+            issue_id,
+            issue_key,
+            UpdateKind::AssigneeChanged {
+                old: ChangeValue::Account(secret_account.clone()),
+                new: ChangeValue::Account(secret_account),
+            },
+            datetime!(2026-08-16 10:00 UTC),
+            Vec::new(),
+        );
+
+        let groups = update_groups_for_events(&[event], &[], &[]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].issue_key, "DESK-999");
+        assert_eq!(groups[0].issue_summary, "Issue no longer in this view");
+        assert_eq!(
+            groups[0].events[0].change,
+            "Assignee: Unknown user → Unknown user"
+        );
+        assert!(!groups[0].events[0].change.contains("secret-account"));
     }
 }

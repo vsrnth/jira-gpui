@@ -29,7 +29,7 @@ use gpui_component::{
 };
 use jira_application::{
     ApplicationError, AttachmentDownloadRequest, CancellationToken, DefaultPollingPolicy,
-    IssueLocator, JiraCommentWritePort, JiraReadPort, SyncMode,
+    IssueLocator, IssueTransition, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort, SyncMode,
 };
 
 use jira_domain::{
@@ -45,7 +45,7 @@ use crate::{
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     presentation::{
         IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
-        UpdateViewModel, issue_views_for_filter,
+        UpdateGroupViewModel, issue_views_for_filter, update_groups_for_events,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
@@ -846,6 +846,7 @@ enum Section {
 
 struct RefreshNotification;
 struct CommentNotification;
+struct IssueEditNotification;
 struct AttachmentNotification;
 
 #[derive(Clone, Debug)]
@@ -924,6 +925,109 @@ enum CommentPostState {
         message: String,
         unknown_outcome: bool,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum IssueEditState {
+    Idle,
+    LoadingAssignees {
+        issue_id: IssueId,
+        query: String,
+    },
+    AssigneeChooser {
+        issue_id: IssueId,
+        issue_key: String,
+        query: String,
+        users: Vec<User>,
+    },
+    LoadingTransitions {
+        issue_id: IssueId,
+    },
+    TransitionChooser {
+        issue_id: IssueId,
+        issue_key: String,
+        transitions: Vec<IssueTransition>,
+    },
+    ConfirmingAssignee {
+        issue_id: IssueId,
+        issue_key: String,
+        account_id: Option<AccountId>,
+        display_name: String,
+    },
+    ConfirmingTransition {
+        issue_id: IssueId,
+        issue_key: String,
+        transition_id: String,
+        transition_name: String,
+        target_status: String,
+    },
+    Submitting {
+        issue_id: IssueId,
+        target: String,
+    },
+    Error {
+        issue_id: IssueId,
+        message: String,
+        unknown_outcome: bool,
+        operation: IssueEditOperation,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IssueEditOperation {
+    Assignee,
+    Transition,
+}
+
+fn issue_edit_error_message(error: &ApplicationError, operation: &str) -> (&'static str, bool) {
+    match error.kind() {
+        jira_application::ErrorKind::UnknownOutcome => (
+            "Jira may have accepted this change. Refresh Jira before another attempt.",
+            true,
+        ),
+        jira_application::ErrorKind::Authentication => (
+            "Change not applied · Jira authentication was rejected",
+            false,
+        ),
+        jira_application::ErrorKind::Authorization => {
+            ("Change not applied · Jira denied permission", false)
+        }
+        jira_application::ErrorKind::NotFound => {
+            ("Change not applied · the Jira issue was not found", false)
+        }
+        jira_application::ErrorKind::RateLimited => (
+            "Change not applied · Jira rate limit reached; try later",
+            false,
+        ),
+        jira_application::ErrorKind::Offline => ("Change not applied · Jira is unreachable", false),
+        jira_application::ErrorKind::InvalidInput => (
+            "Change not applied · Jira rejected the requested change",
+            false,
+        ),
+        jira_application::ErrorKind::Cancelled => ("Change cancelled", false),
+        _ if operation == "lookup" => (
+            "Jira options unavailable · request was not completed",
+            false,
+        ),
+        _ => ("Change not applied · Jira returned an error", false),
+    }
+}
+
+fn issue_edit_target_is_current(
+    selected_issue: Option<&IssueId>,
+    expected_issue: &IssueId,
+    generation: u64,
+    expected_generation: u64,
+) -> bool {
+    selected_issue == Some(expected_issue) && generation == expected_generation
+}
+
+fn update_group_event_ids(group: &UpdateGroupViewModel) -> Vec<jira_domain::EventId> {
+    group
+        .events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect()
 }
 
 fn comment_error_message(error: &ApplicationError) -> (&'static str, bool) {
@@ -1086,7 +1190,7 @@ pub struct Dashboard {
     section: Section,
     domain_issues: Vec<Issue>,
     issues: Vec<IssueViewModel>,
-    updates: Vec<UpdateViewModel>,
+    update_groups: Vec<UpdateGroupViewModel>,
     selected_issue: Option<IssueId>,
     selected_issue_core: Option<Issue>,
     mobile_detail_open: bool,
@@ -1123,6 +1227,13 @@ pub struct Dashboard {
     comment_generation: u64,
     comment_cancellation: Option<CancellationToken>,
     comment_task: Option<gpui::Task<()>>,
+    issue_edit_state: IssueEditState,
+    issue_edit_generation: u64,
+    issue_edit_cancellation: Option<CancellationToken>,
+    issue_edit_task: Option<gpui::Task<()>>,
+    assignee_input: Option<Entity<InputState>>,
+    assignee_subscriptions: Vec<Subscription>,
+    issue_edit_reconciliation_pending: bool,
     attachment_download_state: AttachmentDownloadState,
     attachment_download_generation: u64,
     attachment_download_cancellation: Option<CancellationToken>,
@@ -1137,15 +1248,8 @@ impl Dashboard {
     fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink) -> Self {
         let domain_issues = sample_issues();
         let users = sample_users();
-        let updates = sample_updates()
-            .iter()
-            .map(|event| {
-                let issue = domain_issues
-                    .iter()
-                    .find(|issue| issue.id == event.issue_id);
-                UpdateViewModel::from_domain(event, issue, &users)
-            })
-            .collect();
+        let sample_events = sample_updates();
+        let update_groups = update_groups_for_events(&sample_events, &domain_issues, &users);
         let issues = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All, "");
         let selected_issue = issues.first().map(|issue| issue.id.clone());
 
@@ -1154,7 +1258,7 @@ impl Dashboard {
             section: Section::Issues,
             domain_issues,
             issues,
-            updates,
+            update_groups,
             selected_issue,
             selected_issue_core: None,
             mobile_detail_open: false,
@@ -1199,6 +1303,13 @@ impl Dashboard {
             comment_generation: 0,
             comment_cancellation: None,
             comment_task: None,
+            issue_edit_state: IssueEditState::Idle,
+            issue_edit_generation: 0,
+            issue_edit_cancellation: None,
+            issue_edit_task: None,
+            assignee_input: None,
+            assignee_subscriptions: Vec::new(),
+            issue_edit_reconciliation_pending: false,
             attachment_download_state: AttachmentDownloadState::Idle,
             attachment_download_generation: 0,
             attachment_download_cancellation: None,
@@ -1218,7 +1329,7 @@ impl Dashboard {
             section: Section::Issues,
             domain_issues: Vec::new(),
             issues: Vec::new(),
-            updates: Vec::new(),
+            update_groups: Vec::new(),
             selected_issue: None,
             selected_issue_core: None,
             mobile_detail_open: false,
@@ -1233,7 +1344,7 @@ impl Dashboard {
             },
             site_label: session.site_label,
             mode_label:
-                "Live Jira sync · explicit comments only · best-effort desktop notifications"
+                "Live Jira sync · confirmed comments, assignee changes, and status transitions · best-effort desktop notifications"
                     .to_owned(),
             operation_in_progress: true,
             polling_task: None,
@@ -1269,6 +1380,13 @@ impl Dashboard {
             comment_generation: 0,
             comment_cancellation: None,
             comment_task: None,
+            issue_edit_state: IssueEditState::Idle,
+            issue_edit_generation: 0,
+            issue_edit_cancellation: None,
+            issue_edit_task: None,
+            assignee_input: None,
+            assignee_subscriptions: Vec::new(),
+            issue_edit_reconciliation_pending: false,
             attachment_download_state: AttachmentDownloadState::Idle,
             attachment_download_generation: 0,
             attachment_download_cancellation: None,
@@ -1290,12 +1408,14 @@ impl Dashboard {
                 Ok(authenticated_user) => {
                     let authenticated_account = authenticated_user.account_id.clone();
                     let jira_read: Arc<dyn JiraReadPort> = jira.clone();
-                    let jira_write: Arc<dyn JiraCommentWritePort> = jira.clone();
-                    match LiveWorkspace::initialize_with_comment_writer(
+                    let jira_comment_write: Arc<dyn JiraCommentWritePort> = jira.clone();
+                    let jira_issue_edit: Arc<dyn JiraIssueEditPort> = jira.clone();
+                    match LiveWorkspace::initialize_with_writers(
                         site_id,
                         Some(authenticated_account),
                         jira_read,
-                        jira_write,
+                        jira_comment_write,
+                        jira_issue_edit,
                         cache,
                     )
                     .await
@@ -1418,7 +1538,7 @@ impl Dashboard {
         let mut dashboard = Self::from_sample_data();
         dashboard.domain_issues.clear();
         dashboard.issues.clear();
-        dashboard.updates.clear();
+        dashboard.update_groups.clear();
         dashboard.selected_issue = None;
         dashboard.invalidate_detail_selection();
         dashboard.users.clear();
@@ -1697,7 +1817,30 @@ impl Dashboard {
         }
     }
 
+    fn invalidate_issue_edit_selection(&mut self) {
+        self.issue_edit_generation = self.issue_edit_generation.wrapping_add(1);
+        self.assignee_input = None;
+        self.assignee_subscriptions.clear();
+        if !matches!(self.issue_edit_state, IssueEditState::Submitting { .. }) {
+            if let Some(cancellation) = self.issue_edit_cancellation.take() {
+                cancellation.cancel();
+            }
+            self.issue_edit_task.take();
+        }
+        // A dispatched write is never cancelled or converted into a retryable
+        // state; its completion is simply ignored after this generation bump.
+        self.issue_edit_state = IssueEditState::Idle;
+    }
+
     fn select_issue(&mut self, issue_id: IssueId, cx: &mut Context<Self>, force: bool) {
+        if matches!(self.issue_edit_state, IssueEditState::Submitting { .. })
+            && self.selected_issue.as_ref() != Some(&issue_id)
+        {
+            self.sync_message =
+                "Finish the confirmed Jira change before changing issues".to_owned();
+            cx.notify();
+            return;
+        }
         let selection_changed = self.selected_issue.as_ref() != Some(&issue_id);
         if self.selected_issue.as_ref() == Some(&issue_id)
             && !force
@@ -1719,6 +1862,9 @@ impl Dashboard {
             load_token,
         );
         self.invalidate_comment_selection();
+        if !matches!(self.issue_edit_state, IssueEditState::Submitting { .. }) {
+            self.invalidate_issue_edit_selection();
+        }
         self.detail_task.take();
         self.detail_generation = self.detail_generation.wrapping_add(1);
         if selection_changed {
@@ -1863,9 +2009,9 @@ impl Dashboard {
         cx.notify();
     }
 
-    fn open_update(&mut self, update: &UpdateViewModel, mobile: bool, cx: &mut Context<Self>) {
+    fn open_update_issue(&mut self, issue_id: IssueId, mobile: bool, cx: &mut Context<Self>) {
         self.clear_remote_lookup();
-        self.select_issue(update.issue_id.clone(), cx, false);
+        self.select_issue(issue_id, cx, false);
         self.section = Section::Issues;
         self.mobile_detail_open = mobile;
         cx.notify();
@@ -2231,21 +2377,411 @@ impl Dashboard {
         }
     }
 
+    fn ensure_assignee_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assignee_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter assignees"));
+        self.assignee_subscriptions.push(cx.subscribe_in(
+            &input,
+            window,
+            |_this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        ));
+        self.assignee_input = Some(input);
+    }
+
+    fn begin_assignee_chooser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(issue) = selected_issue_from_sources(
+            self.selected_issue.as_ref(),
+            &self.domain_issues,
+            self.selected_issue_core.as_ref(),
+        )
+        .cloned() else {
+            return;
+        };
+        self.ensure_assignee_input(window, cx);
+        if let Some(input) = &self.assignee_input {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.start_assignee_search_for_issue(issue.id, issue.key.to_string(), String::new(), cx);
+    }
+
+    fn start_assignee_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let (issue_id, issue_key) = match &self.issue_edit_state {
+            IssueEditState::AssigneeChooser {
+                issue_id,
+                issue_key,
+                ..
+            } => (issue_id.clone(), issue_key.clone()),
+            IssueEditState::LoadingAssignees { issue_id, .. } => {
+                let key = self
+                    .selected_issue_view()
+                    .filter(|issue| issue.id == *issue_id)
+                    .map(|issue| issue.key)
+                    .unwrap_or_default();
+                (issue_id.clone(), key)
+            }
+            _ => return,
+        };
+        self.start_assignee_search_for_issue(issue_id, issue_key, query, cx);
+    }
+
+    fn start_assignee_search_for_issue(
+        &mut self,
+        issue_id: IssueId,
+        issue_key: String,
+        query: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        if let Some(cancellation) = self.issue_edit_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.issue_edit_task.take();
+        self.issue_edit_generation = self.issue_edit_generation.wrapping_add(1);
+        let generation = self.issue_edit_generation;
+        let cancellation = CancellationToken::new();
+        self.issue_edit_cancellation = Some(cancellation.clone());
+        self.issue_edit_state = IssueEditState::LoadingAssignees {
+            issue_id: issue_id.clone(),
+            query: query.clone(),
+        };
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace
+                .search_assignable_users(
+                    IssueLocator::Id(issue_id.clone()),
+                    query.clone(),
+                    100,
+                    &cancellation,
+                )
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !issue_edit_target_is_current(
+                    this.selected_issue.as_ref(),
+                    &issue_id,
+                    this.issue_edit_generation,
+                    generation,
+                ) {
+                    return;
+                }
+                this.issue_edit_cancellation = None;
+                this.issue_edit_task = None;
+                match result {
+                    Ok(users) => {
+                        this.issue_edit_state = IssueEditState::AssigneeChooser {
+                            issue_id: issue_id.clone(),
+                            issue_key: issue_key.clone(),
+                            query: query.clone(),
+                            users,
+                        };
+                    }
+                    Err(error) => {
+                        let (message, unknown_outcome) = issue_edit_error_message(&error, "lookup");
+                        this.issue_edit_state = IssueEditState::Error {
+                            issue_id: issue_id.clone(),
+                            message: message.to_owned(),
+                            unknown_outcome,
+                            operation: IssueEditOperation::Assignee,
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.issue_edit_task = Some(task);
+        cx.notify();
+    }
+
+    fn choose_assignee(
+        &mut self,
+        account_id: Option<AccountId>,
+        display_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let IssueEditState::AssigneeChooser {
+            issue_id,
+            issue_key,
+            ..
+        } = &self.issue_edit_state
+        else {
+            return;
+        };
+        if let Some(cancellation) = self.issue_edit_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.issue_edit_task.take();
+        self.issue_edit_generation = self.issue_edit_generation.wrapping_add(1);
+        self.issue_edit_state = IssueEditState::ConfirmingAssignee {
+            issue_id: issue_id.clone(),
+            issue_key: issue_key.clone(),
+            account_id,
+            display_name,
+        };
+        cx.notify();
+    }
+
+    fn begin_transition_chooser(&mut self, cx: &mut Context<Self>) {
+        let Some(issue) = selected_issue_from_sources(
+            self.selected_issue.as_ref(),
+            &self.domain_issues,
+            self.selected_issue_core.as_ref(),
+        )
+        .cloned() else {
+            return;
+        };
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        if let Some(cancellation) = self.issue_edit_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.issue_edit_task.take();
+        self.issue_edit_generation = self.issue_edit_generation.wrapping_add(1);
+        let generation = self.issue_edit_generation;
+        let cancellation = CancellationToken::new();
+        self.issue_edit_cancellation = Some(cancellation.clone());
+        self.issue_edit_state = IssueEditState::LoadingTransitions {
+            issue_id: issue.id.clone(),
+        };
+        let issue_id = issue.id.clone();
+        let issue_key = issue.key.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace
+                .available_transitions(IssueLocator::Id(issue_id.clone()), &cancellation)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !issue_edit_target_is_current(
+                    this.selected_issue.as_ref(),
+                    &issue_id,
+                    this.issue_edit_generation,
+                    generation,
+                ) {
+                    return;
+                }
+                this.issue_edit_cancellation = None;
+                this.issue_edit_task = None;
+                match result {
+                    Ok(transitions) => {
+                        this.issue_edit_state = IssueEditState::TransitionChooser {
+                            issue_id: issue_id.clone(),
+                            issue_key: issue_key.clone(),
+                            transitions,
+                        };
+                    }
+                    Err(error) => {
+                        let (message, unknown_outcome) = issue_edit_error_message(&error, "lookup");
+                        this.issue_edit_state = IssueEditState::Error {
+                            issue_id: issue_id.clone(),
+                            message: message.to_owned(),
+                            unknown_outcome,
+                            operation: IssueEditOperation::Transition,
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.issue_edit_task = Some(task);
+        cx.notify();
+    }
+
+    fn choose_transition(&mut self, transition: IssueTransition, cx: &mut Context<Self>) {
+        let IssueEditState::TransitionChooser {
+            issue_id,
+            issue_key,
+            ..
+        } = &self.issue_edit_state
+        else {
+            return;
+        };
+        self.issue_edit_generation = self.issue_edit_generation.wrapping_add(1);
+        self.issue_edit_state = IssueEditState::ConfirmingTransition {
+            issue_id: issue_id.clone(),
+            issue_key: issue_key.clone(),
+            transition_id: transition.id,
+            transition_name: transition.name,
+            target_status: transition.to.name,
+        };
+        cx.notify();
+    }
+
+    fn cancel_issue_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancellation) = self.issue_edit_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.issue_edit_task.take();
+        self.issue_edit_generation = self.issue_edit_generation.wrapping_add(1);
+        self.issue_edit_state = IssueEditState::Idle;
+        cx.notify();
+    }
+
+    fn submit_assignee(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let IssueEditState::ConfirmingAssignee {
+            issue_id,
+            account_id,
+            display_name,
+            ..
+        } = &self.issue_edit_state
+        else {
+            return;
+        };
+        let issue_id = issue_id.clone();
+        let dispatch_issue_id = issue_id.clone();
+        let account_id = account_id.clone();
+        let display_name = display_name.clone();
+        self.submit_issue_write(
+            window,
+            cx,
+            issue_id,
+            IssueEditOperation::Assignee,
+            format!("assignee {display_name}"),
+            move |workspace, cancellation| {
+                let account_id = account_id.clone();
+                let issue_id = dispatch_issue_id.clone();
+                async move {
+                    workspace
+                        .assign_issue(
+                            IssueLocator::Id(issue_id.clone()),
+                            account_id,
+                            &cancellation,
+                        )
+                        .await
+                }
+            },
+        );
+    }
+
+    fn submit_transition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let IssueEditState::ConfirmingTransition {
+            issue_id,
+            transition_id,
+            target_status,
+            ..
+        } = &self.issue_edit_state
+        else {
+            return;
+        };
+        let issue_id = issue_id.clone();
+        let dispatch_issue_id = issue_id.clone();
+        let transition_id = transition_id.clone();
+        let target_status = target_status.clone();
+        self.submit_issue_write(
+            window,
+            cx,
+            issue_id,
+            IssueEditOperation::Transition,
+            format!("status {target_status}"),
+            move |workspace, cancellation| {
+                let transition_id = transition_id.clone();
+                let issue_id = dispatch_issue_id.clone();
+                async move {
+                    workspace
+                        .transition_issue(
+                            IssueLocator::Id(issue_id.clone()),
+                            transition_id,
+                            &cancellation,
+                        )
+                        .await
+                }
+            },
+        );
+    }
+
+    fn submit_issue_write<F, Fut>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        issue_id: IssueId,
+        operation: IssueEditOperation,
+        target: String,
+        dispatch: F,
+    ) where
+        F: FnOnce(Arc<LiveWorkspace>, CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), ApplicationError>> + Send + 'static,
+    {
+        if self.operation_in_progress {
+            self.sync_message =
+                "Finish the current Jira operation before applying another change".to_owned();
+            cx.notify();
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.issue_edit_state = IssueEditState::Error {
+                issue_id,
+                message: "Change unavailable · live Jira workspace is not ready".to_owned(),
+                unknown_outcome: false,
+                operation,
+            };
+            cx.notify();
+            return;
+        };
+        if matches!(self.issue_edit_state, IssueEditState::Submitting { .. }) {
+            return;
+        }
+        let cancellation = CancellationToken::new();
+        self.operation_in_progress = true;
+        self.issue_edit_state = IssueEditState::Submitting {
+            issue_id: issue_id.clone(),
+            target: target.clone(),
+        };
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = dispatch(workspace, cancellation.clone()).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        this.operation_in_progress = false;
+                        this.issue_edit_state = IssueEditState::Idle;
+                        window.push_notification(
+                            Notification::success(format!("Jira change applied · {target}"))
+                                .id::<IssueEditNotification>(),
+                            cx,
+                        );
+                        this.issue_edit_reconciliation_pending = true;
+                        this.sync_message = "Change applied · reconciling with Jira…".to_owned();
+                        this.begin_refresh(window, cx);
+                    }
+                    Err(error) => {
+                        this.operation_in_progress = false;
+                        let (message, unknown_outcome) = issue_edit_error_message(&error, "write");
+                        this.issue_edit_state = IssueEditState::Error {
+                            issue_id: issue_id.clone(),
+                            message: message.to_owned(),
+                            unknown_outcome,
+                            operation,
+                        };
+                        window.push_notification(
+                            Notification::error(message).id::<IssueEditNotification>(),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        });
+        // The dispatched write owns its cancellation token and runs detached.
+        // Selection changes must not abort or turn this uncertain attempt into
+        // a retryable operation.
+        task.detach();
+        cx.notify();
+    }
+
     fn apply_cached(&mut self, cached: CachedWorkspace, cx: &mut Context<Self>) {
         let CachedWorkspace { issues, events } = cached;
-        let updates = events
-            .iter()
-            .map(|event| {
-                let issue = issues.iter().find(|issue| issue.id == event.issue_id);
-                UpdateViewModel::from_domain(event, issue, &self.users)
-            })
-            .collect();
+        let update_groups = update_groups_for_events(&events, &issues, &self.users);
         self.apply_live_issues(issues, true, cx);
-        self.updates = updates;
+        self.update_groups = update_groups;
     }
 
     fn begin_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.operation_in_progress {
+        if self.operation_in_progress
+            || matches!(self.issue_edit_state, IssueEditState::Submitting { .. })
+        {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
@@ -2279,6 +2815,16 @@ impl Dashboard {
                         );
                         this.sync_message = refresh_complete_message(&outcome);
                         this.apply_cached(outcome.cached, cx);
+                        this.issue_edit_reconciliation_pending = false;
+                        if matches!(
+                            this.issue_edit_state,
+                            IssueEditState::Error {
+                                unknown_outcome: true,
+                                ..
+                            }
+                        ) {
+                            this.issue_edit_state = IssueEditState::Idle;
+                        }
                         this.start_automatic_polling(cx);
                     }
                     Err(error) => {
@@ -2287,7 +2833,11 @@ impl Dashboard {
                             Notification::error(message).id::<RefreshNotification>(),
                             cx,
                         );
-                        this.sync_message = message.to_owned();
+                        this.sync_message = if this.issue_edit_reconciliation_pending {
+                            "Change applied · refresh still needed".to_owned()
+                        } else {
+                            message.to_owned()
+                        };
                     }
                 }
                 cx.notify();
@@ -2298,8 +2848,12 @@ impl Dashboard {
 
     fn mark_all_read(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.clone() else {
-            for update in &mut self.updates {
-                update.unread = false;
+            for group in &mut self.update_groups {
+                group.unread = false;
+                group.unread_count = 0;
+                for event in &mut group.events {
+                    event.unread = false;
+                }
             }
             cx.notify();
             return;
@@ -2328,7 +2882,62 @@ impl Dashboard {
     }
 
     fn unread_count(&self) -> usize {
-        self.updates.iter().filter(|update| update.unread).count()
+        self.update_groups
+            .iter()
+            .map(|group| group.unread_count)
+            .sum()
+    }
+
+    fn mark_group_read(&mut self, issue_id: IssueId, cx: &mut Context<Self>) {
+        let Some(group) = self
+            .update_groups
+            .iter()
+            .find(|group| group.issue_id == issue_id)
+            .cloned()
+        else {
+            return;
+        };
+        if !group.unread {
+            return;
+        }
+        let event_ids = update_group_event_ids(&group);
+        let Some(workspace) = self.workspace.clone() else {
+            if let Some(group) = self
+                .update_groups
+                .iter_mut()
+                .find(|group| group.issue_id == issue_id)
+            {
+                group.unread = false;
+                group.unread_count = 0;
+                for event in &mut group.events {
+                    event.unread = false;
+                }
+            }
+            cx.notify();
+            return;
+        };
+        if self.operation_in_progress {
+            return;
+        }
+        self.operation_in_progress = true;
+        self.sync_message = "Marking ticket updates read…".to_owned();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = workspace.mark_read(&event_ids, true).await;
+            let _ = this.update(cx, |this, cx| {
+                this.operation_in_progress = false;
+                match result {
+                    Ok(result) => {
+                        this.apply_cached(result.cached, cx);
+                        this.sync_message =
+                            format!("Marked {} ticket updates read", result.changed);
+                    }
+                    Err(error) => this.sync_message = safe_sync_error(&error).to_owned(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn rich_text_palette(&self, cx: &mut Context<Self>) -> RichTextPalette {
@@ -2431,7 +3040,7 @@ impl Dashboard {
                                 .truncate()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Read-only sync · explicit comments"),
+                                .child("Synced workspace · confirmed comments and issue edits"),
                         )
                     })),
             )
@@ -3206,6 +3815,7 @@ impl Dashboard {
                         },
                     ),
             )
+            .child(self.render_issue_edit_controls(issue.as_ref(), layout, cx))
             .child(
                 v_flex()
                     .gap_2()
@@ -3520,6 +4130,329 @@ impl Dashboard {
         }
     }
 
+    fn render_issue_edit_controls(
+        &self,
+        issue: Option<&IssueViewModel>,
+        layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(issue) = issue else {
+            return div().into_any_element();
+        };
+        if self.workspace.is_none() || self.selected_issue.as_ref() != Some(&issue.id) {
+            return div().into_any_element();
+        }
+        let busy = self.operation_in_progress;
+        let state = self.issue_edit_state.clone();
+        let controls = match state {
+            IssueEditState::Idle => h_flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new("change-assignee")
+                        .secondary()
+                        .outline()
+                        .compact()
+                        .label("Change assignee")
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.begin_assignee_chooser(window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("change-status")
+                        .secondary()
+                        .outline()
+                        .compact()
+                        .label("Change status")
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.begin_transition_chooser(cx))),
+                )
+                .into_any_element(),
+            IssueEditState::LoadingAssignees { .. } => h_flex()
+                .gap_2()
+                .child(Spinner::new())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading assignable users…"),
+                )
+                .child(
+                    Button::new("cancel-assignee-load")
+                        .compact()
+                        .label("Cancel")
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
+                )
+                .into_any_element(),
+            IssueEditState::AssigneeChooser { users, .. } => {
+                let no_users = users.is_empty();
+                v_flex()
+                    .gap_2()
+                    .child(div().text_sm().font_semibold().child("Choose assignee"))
+                    .when_some(self.assignee_input.clone(), |this, input| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Input::new(&input)
+                                        .cleanable(true)
+                                        .aria_label("Filter assignees")
+                                        .flex_1(),
+                                )
+                                .child(
+                                    Button::new("search-assignees")
+                                        .compact()
+                                        .label("Search")
+                                        .disabled(busy)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let query = this
+                                                .assignee_input
+                                                .as_ref()
+                                                .map(|input| input.read(cx).value().to_string())
+                                                .unwrap_or_default();
+                                            this.start_assignee_search(query, cx);
+                                        })),
+                                ),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .child(
+                                Button::new("assignee-unassigned")
+                                    .compact()
+                                    .label("Unassigned")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_assignee(None, "Unassigned".to_owned(), cx)
+                                    })),
+                            )
+                            .children(users.into_iter().enumerate().map(|(index, user)| {
+                                let name = user.display_name.clone();
+                                let account_id = user.account_id.clone();
+                                Button::new(format!("assignee-{index}"))
+                                    .compact()
+                                    .label(name.clone())
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.choose_assignee(
+                                            Some(account_id.clone()),
+                                            name.clone(),
+                                            cx,
+                                        )
+                                    }))
+                            })),
+                    )
+                    .when(no_users, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No assignable Jira users match this search."),
+                        )
+                    })
+                    .child(
+                        Button::new("cancel-assignee")
+                            .compact()
+                            .label("Cancel")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
+                    )
+                    .into_any_element()
+            }
+            IssueEditState::LoadingTransitions { .. } => h_flex()
+                .gap_2()
+                .child(Spinner::new())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading available transitions…"),
+                )
+                .child(
+                    Button::new("cancel-transition-load")
+                        .compact()
+                        .label("Cancel")
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
+                )
+                .into_any_element(),
+            IssueEditState::TransitionChooser { transitions, .. } => {
+                let no_transitions = transitions.is_empty();
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child("Choose available status transition"),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .children(transitions.into_iter().map(|transition| {
+                                let label = format!("{} → {}", transition.name, transition.to.name);
+                                Button::new(format!("transition-{}", transition.id))
+                                    .compact()
+                                    .label(label)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.choose_transition(transition.clone(), cx)
+                                    }))
+                            })),
+                    )
+                    .when(no_transitions, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No status transitions are currently available."),
+                        )
+                    })
+                    .child(
+                        Button::new("cancel-transition")
+                            .compact()
+                            .label("Cancel")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
+                    )
+                    .into_any_element()
+            }
+            IssueEditState::ConfirmingAssignee {
+                issue_key,
+                display_name,
+                ..
+            } => v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(format!("Assign {issue_key} to {display_name}?")),
+                )
+                .child(
+                    h_flex()
+                        .when(layout.is_mobile(), |this| this.flex_col())
+                        .gap_2()
+                        .child(
+                            Button::new("confirm-assignee")
+                                .primary()
+                                .label("Confirm change")
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_assignee(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-assignee-confirmation")
+                                .compact()
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
+                        ),
+                )
+                .into_any_element(),
+            IssueEditState::ConfirmingTransition {
+                issue_key,
+                transition_name,
+                target_status,
+                ..
+            } => v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(format!(
+                            "Move {issue_key} via {transition_name} to {target_status}?"
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .when(layout.is_mobile(), |this| this.flex_col())
+                        .gap_2()
+                        .child(
+                            Button::new("confirm-transition")
+                                .primary()
+                                .label("Confirm change")
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_transition(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-transition-confirmation")
+                                .compact()
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
+                        ),
+                )
+                .into_any_element(),
+            IssueEditState::Submitting { target, .. } => h_flex()
+                .gap_2()
+                .child(Spinner::new())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("Applying {target}…")),
+                )
+                .into_any_element(),
+            IssueEditState::Error {
+                message,
+                unknown_outcome,
+                operation,
+                ..
+            } => v_flex()
+                .gap_2()
+                .child(div().text_sm().text_color(cx.theme().danger).child(message))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .when(!unknown_outcome, |this| {
+                            this.child(
+                                Button::new("retry-issue-edit")
+                                    .compact()
+                                    .label("Choose again")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| match operation {
+                                            IssueEditOperation::Assignee => {
+                                                this.begin_assignee_chooser(window, cx)
+                                            }
+                                            IssueEditOperation::Transition => {
+                                                this.begin_transition_chooser(cx)
+                                            }
+                                        },
+                                    )),
+                            )
+                        })
+                        .when(unknown_outcome, |this| {
+                            this.child(
+                                Button::new("refresh-after-issue-edit")
+                                    .compact()
+                                    .label("Refresh Jira")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.begin_refresh(window, cx)
+                                    })),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        };
+        v_flex()
+            .gap_2()
+            .child(div().text_sm().font_semibold().child("Jira issue actions"))
+            .child(controls)
+            .into_any_element()
+    }
+
     fn render_comment_composer(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
         let Some(input) = self.comment_input.as_ref() else {
             return div().into_any_element();
@@ -3807,45 +4740,42 @@ impl Dashboard {
                     .p(px(layout.list_padding()))
                     .gap_3()
                     .children(
-                        self.updates
+                        self.update_groups
                             .iter()
                             .enumerate()
-                            .map(|(index, update)| self.update_card(index, update, layout, cx)),
+                            .map(|(index, group)| self.update_group_card(index, group, layout, cx)),
                     ),
             )
     }
 
-    fn update_card(
+    fn update_group_card(
         &self,
         index: usize,
-        update: &UpdateViewModel,
+        group: &UpdateGroupViewModel,
         layout: LayoutMode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let issue_type = self
             .domain_issues
             .iter()
-            .find(|issue| issue.id == update.issue_id)
+            .find(|issue| issue.id == group.issue_id)
             .map(|issue| issue.issue_type.name.as_str())
             .unwrap_or("Unknown");
         let mobile = layout.is_mobile();
-        let update = update.clone();
-        let clicked_update = update.clone();
-        Button::new(("update-card", index))
+        let issue_id = group.issue_id.clone();
+        let clicked_issue_id = issue_id.clone();
+        let open_area = Button::new(("update-open", index))
             .ghost()
-            .w_full()
+            .flex_1()
             .h_auto()
             .items_start()
             .min_w_0()
             .gap_3()
-            .p_4()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .when(update.unread, |this| this.bg(cx.theme().list_active))
+            .p_3()
+            .when(group.unread, |this| this.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_update(&clicked_update, mobile, cx);
+                this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
             }))
             .child(
                 div()
@@ -3853,8 +4783,8 @@ impl Dashboard {
                     .size_2()
                     .flex_shrink_0()
                     .rounded_full()
-                    .when(update.unread, |this| this.bg(cx.theme().primary))
-                    .when(!update.unread, |this| this.bg(cx.theme().muted)),
+                    .when(group.unread, |this| this.bg(cx.theme().primary))
+                    .when(!group.unread, |this| this.bg(cx.theme().muted)),
             )
             .child(
                 v_flex()
@@ -3871,7 +4801,7 @@ impl Dashboard {
                                     .when(layout.is_mobile(), |this| this.flex_col())
                                     .gap_2()
                                     .child(self.issue_key_with_icon(
-                                        update.issue_key.clone(),
+                                        group.issue_key.clone(),
                                         issue_type,
                                         cx,
                                     ))
@@ -3881,7 +4811,7 @@ impl Dashboard {
                                             .line_clamp(2)
                                             .text_sm()
                                             .font_semibold()
-                                            .child(update.issue_summary.clone()),
+                                            .child(group.issue_summary.clone()),
                                     ),
                             )
                             .child(
@@ -3889,16 +4819,44 @@ impl Dashboard {
                                     .flex_shrink_0()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(update.occurred_at.clone()),
+                                    .child(group.latest_occurred_at.clone()),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(update.change.clone()),
-                    ),
+                    .child(v_flex().gap_1().children(group.events.iter().map(|event| {
+                        h_flex()
+                            .min_w_0()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().min_w_0().flex_1().child(event.change.clone()))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(event.occurred_at.clone()),
+                            )
+                    }))),
             )
+            .into_any_element();
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .items_start()
+            .gap_2()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(open_area)
+            .when(group.unread, |this| {
+                this.child(
+                    Button::new(("update-mark-read", index))
+                        .ghost()
+                        .compact()
+                        .label("Mark as read")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mark_group_read(issue_id.clone(), cx);
+                        })),
+                )
+            })
             .into_any_element()
     }
 
@@ -3977,7 +4935,7 @@ impl Render for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::normalized_issue_key;
+    use crate::presentation::{UpdateViewModel, normalized_issue_key};
     use crate::sample_data::{sample_issues, sample_users};
     use gpui_component::searchable_list::SearchableListDelegate as _;
 
@@ -4153,15 +5111,10 @@ mod tests {
             .into_iter()
             .find(|issue| issue.key.as_str() == "DESK-176")
             .expect("issue");
-        let event = crate::sample_data::sample_updates()
-            .into_iter()
-            .find(|event| event.issue_id == issue.id)
-            .expect("update");
-        let update = UpdateViewModel::from_domain(&event, Some(&issue), &sample_users());
         let dashboard = cx.new(|_| Dashboard::from_sample_data());
 
         cx.update_entity(&dashboard, |dashboard, cx| {
-            dashboard.open_update(&update, true, cx);
+            dashboard.open_update_issue(issue.id.clone(), true, cx);
         });
         let (selected_issue, section, mobile_detail_open) =
             cx.read_entity(&dashboard, |dashboard, _| {
@@ -4352,6 +5305,72 @@ mod tests {
         assert!(unknown);
         assert!(message.contains("Refresh comments"));
         assert!(!message.contains("secret response"));
+    }
+
+    #[test]
+    fn issue_edit_failures_have_safe_definite_and_unknown_copy() {
+        let definite = ApplicationError::new(
+            jira_application::ErrorKind::Authorization,
+            "raw Jira response must not reach UI",
+        );
+        let (message, unknown) = issue_edit_error_message(&definite, "write");
+        assert_eq!(message, "Change not applied · Jira denied permission");
+        assert!(!unknown);
+        assert!(!message.contains("raw Jira response"));
+
+        let uncertain = ApplicationError::new(
+            jira_application::ErrorKind::UnknownOutcome,
+            "secret transport detail",
+        );
+        let (message, unknown) = issue_edit_error_message(&uncertain, "write");
+        assert!(unknown);
+        assert!(message.contains("Refresh Jira"));
+        assert!(!message.contains("secret transport detail"));
+    }
+
+    #[test]
+    fn issue_edit_target_snapshot_requires_current_issue_and_generation() {
+        let issue = IssueId::new("100").expect("issue");
+        assert!(issue_edit_target_is_current(Some(&issue), &issue, 4, 4));
+        assert!(!issue_edit_target_is_current(Some(&issue), &issue, 5, 4));
+        let other = IssueId::new("200").expect("issue");
+        assert!(!issue_edit_target_is_current(Some(&other), &issue, 4, 4));
+    }
+
+    #[test]
+    fn grouped_activity_dispatch_ids_include_read_and_unread_events() {
+        let issue = IssueId::new("100").expect("issue");
+        let first = jira_domain::EventId::new("event-1").expect("event");
+        let second = jira_domain::EventId::new("event-2").expect("event");
+        let group = UpdateGroupViewModel {
+            issue_id: issue,
+            issue_key: "IX-100".to_owned(),
+            issue_summary: "Summary".to_owned(),
+            latest_occurred_at: "now".to_owned(),
+            unread_count: 1,
+            unread: true,
+            events: vec![
+                UpdateViewModel {
+                    event_id: first.clone(),
+                    issue_id: IssueId::new("100").expect("issue"),
+                    issue_key: "IX-100".to_owned(),
+                    issue_summary: "Summary".to_owned(),
+                    change: "first".to_owned(),
+                    occurred_at: "earlier".to_owned(),
+                    unread: false,
+                },
+                UpdateViewModel {
+                    event_id: second.clone(),
+                    issue_id: IssueId::new("100").expect("issue"),
+                    issue_key: "IX-100".to_owned(),
+                    issue_summary: "Summary".to_owned(),
+                    change: "second".to_owned(),
+                    occurred_at: "latest".to_owned(),
+                    unread: true,
+                },
+            ],
+        };
+        assert_eq!(update_group_event_ids(&group), vec![first, second]);
     }
 
     #[test]
