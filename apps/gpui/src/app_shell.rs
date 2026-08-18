@@ -6,9 +6,9 @@ use gpui::{
     Pixels, Render, Styled as _, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Root, StyledExt as _, Theme, TitleBar, button::Button,
-    button::ButtonVariants as _, h_flex, input::Input, input::InputState,
-    scroll::ScrollableElement as _, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Root, Sizable as _, StyledExt as _, Theme,
+    ThemeMode, TitleBar, button::Button, button::ButtonVariants as _, h_flex, input::Input,
+    input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 
 use crate::Dashboard;
@@ -21,6 +21,14 @@ const NOTIFICATION_SIDE_MARGIN: f32 = 16.0;
 fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) -> f32 {
     let available_width = (viewport_width - NOTIFICATION_SIDE_MARGIN * 2.0).max(0.0);
     preferred_width.min(available_width)
+}
+
+fn opposite_theme_mode(mode: ThemeMode) -> ThemeMode {
+    if mode.is_dark() {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    }
 }
 
 /// The top-level view: either the configured dashboard or the first-run form.
@@ -305,10 +313,43 @@ impl Render for AppShell {
                 .into_any_element()
         };
 
+        let current_mode = cx.theme().mode;
+        let dark_mode = current_mode.is_dark();
+        let (theme_icon, theme_tooltip, theme_accessibility_id) = if dark_mode {
+            (
+                IconName::Sun,
+                "Switch to light mode",
+                "switch-to-light-mode",
+            )
+        } else {
+            (IconName::Moon, "Switch to dark mode", "switch-to-dark-mode")
+        };
+        let destination_mode = opposite_theme_mode(current_mode);
+        let theme_toggle = Button::new("theme-toggle")
+            .compact()
+            .ghost()
+            .xsmall()
+            .icon(theme_icon)
+            .tooltip(theme_tooltip)
+            .accessibility_id(theme_accessibility_id)
+            .on_click(move |_, window, cx| {
+                Theme::change(destination_mode, Some(window), cx);
+            });
+
         v_flex()
             .size_full()
             .min_w_0()
-            .child(TitleBar::new().child(div().text_sm().font_semibold().child("Jira Desk")))
+            .child(
+                TitleBar::new().child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .pr_2()
+                        .child(div().text_sm().font_semibold().child("Jira Desk"))
+                        .child(theme_toggle),
+                ),
+            )
             .child(content)
             .when_some(notification_layer, |this, layer| this.child(layer))
             .into_any_element()
@@ -317,7 +358,14 @@ impl Render for AppShell {
 
 #[cfg(test)]
 mod tests {
-    use super::notification_width_for_viewport;
+    use super::{notification_width_for_viewport, opposite_theme_mode};
+    use gpui_component::ThemeMode;
+
+    #[test]
+    fn opposite_theme_mode_switches_between_light_and_dark() {
+        assert_eq!(opposite_theme_mode(ThemeMode::Light), ThemeMode::Dark);
+        assert_eq!(opposite_theme_mode(ThemeMode::Dark), ThemeMode::Light);
+    }
 
     #[test]
     fn notification_width_preserves_margins_on_narrow_viewports() {

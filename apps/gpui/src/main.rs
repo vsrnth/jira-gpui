@@ -3,10 +3,8 @@ mod desktop_integration;
 
 #[cfg(target_os = "linux")]
 fn main() {
-    use gpui::{
-        App, AppContext as _, Styled as _, WindowBounds, WindowDecorations, WindowOptions, px, size,
-    };
-    use gpui_component::{ActiveTheme as _, Root, TitleBar};
+    use gpui::{App, AppContext as _, WindowBounds, WindowDecorations, WindowOptions, px, size};
+    use gpui_component::{Root, TitleBar};
     use gpui_component_assets::Assets;
     use jira_gpui::{AppShell, startup_from_environment};
 
@@ -34,7 +32,7 @@ fn main() {
                     window.set_window_title("Jira Desk");
 
                     let shell = cx.new(|shell_cx| AppShell::new(startup, window, shell_cx));
-                    cx.new(|cx| Root::new(shell, window, cx).bg(cx.theme().background))
+                    cx.new(|cx| Root::new(shell, window, cx))
                 })
                 .expect("failed to open the Jira dashboard window");
             })
