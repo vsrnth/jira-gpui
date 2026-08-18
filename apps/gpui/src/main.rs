@@ -1,4 +1,7 @@
 #[cfg(target_os = "linux")]
+mod desktop_integration;
+
+#[cfg(target_os = "linux")]
 fn main() {
     use gpui::{
         App, AppContext as _, Styled as _, WindowBounds, WindowDecorations, WindowOptions, px, size,
@@ -6,6 +9,10 @@ fn main() {
     use gpui_component::{ActiveTheme as _, Root, TitleBar};
     use gpui_component_assets::Assets;
     use jira_gpui::{AppShell, startup_from_environment};
+
+    if desktop_integration::register_from_environment().is_err() {
+        eprintln!("Jira Desk: desktop integration unavailable");
+    }
 
     let startup = startup_from_environment();
 

@@ -50,10 +50,41 @@ metainfo="$project_root/packaging/appimage/dev.jiradesk.JiraDesk.metainfo.xml"
 license="$project_root/LICENSE"
 output_dir="$project_root/dist"
 output="$output_dir/Jira_Desk-${version}-x86_64.AppImage"
+app_id=dev.jiradesk.JiraDesk
 
 for input in "$desktop" "$icon_source" "$apprun" "$metainfo" "$license"; do
     [ -f "$input" ] || { printf '%s\n' "Missing packaging input: $input" >&2; exit 1; }
 done
+
+# Keep the source desktop entry launcher-neutral: the application replaces
+# Exec with the absolute current AppImage path after a real launch.
+desktop_exec_count=$(awk '/^Exec=/{count++} END{print count + 0}' "$desktop")
+[ "$desktop_exec_count" -eq 1 ] || {
+    printf '%s\n' "Desktop template must contain exactly one Exec entry" >&2
+    exit 1
+}
+grep -Fqx 'Exec=jira-gpui' "$desktop" || {
+    printf '%s\n' "Desktop template must contain exactly: Exec=jira-gpui" >&2
+    exit 1
+}
+desktop_name_count=$(awk '/^Name=/{count++} END{print count + 0}' "$desktop")
+[ "$desktop_name_count" -eq 1 ] && grep -Fqx 'Name=Jira Desk' "$desktop" || {
+    printf '%s\n' "Desktop template must contain exactly one Name=Jira Desk entry" >&2
+    exit 1
+}
+desktop_icon_count=$(awk '/^Icon=/{count++} END{print count + 0}' "$desktop")
+[ "$desktop_icon_count" -eq 1 ] && grep -Fqx "Icon=$app_id" "$desktop" || {
+    printf '%s\n' "Desktop template must contain exactly one Icon=$app_id entry" >&2
+    exit 1
+}
+grep -Fqx "  <id>$app_id</id>" "$metainfo" || {
+    printf '%s\n' "AppStream metadata ID must be $app_id" >&2
+    exit 1
+}
+grep -Fqx "  <launchable type=\"desktop-id\">$app_id.desktop</launchable>" "$metainfo" || {
+    printf '%s\n' "AppStream launchable must be $app_id.desktop" >&2
+    exit 1
+}
 
 if [ "$skip_build" -eq 0 ]; then
     (cd "$project_root" && cargo build --release --locked -p jira-gpui)
