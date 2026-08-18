@@ -9,7 +9,7 @@ Tokio, or SQLite.
 
 | Path | Responsibility |
 | --- | --- |
-| `apps/gpui` | Linux desktop shell, onboarding, dashboard, detail views, and window controls |
+| `apps/gpui` | Linux desktop shell, onboarding, dashboard, detail views, window controls, and per-user desktop registration |
 | `crates/domain` | Jira-independent identifiers, issues, comments, users, and update values |
 | `crates/application` | Use cases, ports, cancellation, sync, detail/media loading, comments, and polling policy |
 | `crates/jira` | Pure Jira JSON/JQL mapping and bounded request construction |

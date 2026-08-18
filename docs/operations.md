@@ -136,6 +136,21 @@ title-bar and semantic icons rendered at rest. Client-side minimize, maximize,
 and close controls remain discoverable when the window is idle; hover styling
 adds emphasis but is not required to find the controls.
 
+When started from an AppImage, startup also best-effort installs the current
+launcher and icon for the current user before creating the GPUI window. With
+an absolute `XDG_DATA_HOME`, the files are
+`$XDG_DATA_HOME/applications/dev.jiradesk.JiraDesk.desktop` and
+`$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png`;
+otherwise the same paths are rooted at `$HOME/.local/share`. The desktop copy
+contains the canonical absolute `APPIMAGE` path, is atomically refreshed on
+each launch, and is safe to repeat. Permission or filesystem failures are
+isolated: Jira Desk continues starting. To remove this integration, delete
+those two files under the active data root; this does not remove the AppImage
+or local Jira data. Extracted AppDir runs without `APPIMAGE` do not register.
+On GNOME, the registered `Name=Jira Desk` and named icon are then used for
+Alt-Tab and taskbar presentation instead of the raw `dev.jiradesk.JiraDesk`
+app ID.
+
 On desktop, the issue list and selected-issue detail are separated by a
 resizable split. On mobile, the shell presents one pane at a time with an
 explicit back action. Status filtering accepts multiple categories; no

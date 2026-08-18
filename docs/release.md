@@ -23,6 +23,14 @@ existing AppImage or checksum. It produces an AppImage and adjacent SHA-256
 checksum. Inspecting an extracted AppImage is supported without FUSE; see the
 packaging README for the exact commands.
 
+The packaging script rejects drift in the launcher-neutral `Exec=jira-gpui`
+template, named icon, AppStream ID, and desktop launchable ID. On a real
+AppImage launch, the application installs an idempotent per-user desktop entry
+and icon using the absolute current `APPIMAGE` path before creating the GPUI
+window; registration failures are best-effort and do not block startup.
+Extracted AppDir smoke runs should verify that registration is skipped when
+`APPIMAGE` is absent.
+
 The icon build invokes ImageMagick's `magick` command. Ubuntu 22.04 ships
 ImageMagick 6, so CI must install the compatibility launcher described in
 [`packaging/appimage/README.md`](../packaging/appimage/README.md), or run the
