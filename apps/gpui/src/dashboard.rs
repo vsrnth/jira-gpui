@@ -45,7 +45,7 @@ use crate::{
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     presentation::{
         IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
-        UpdateGroupViewModel, issue_views_for_filter, update_groups_for_events,
+        UpdateGroupViewModel, UpdateViewModel, issue_views_for_filter, update_groups_for_events,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
@@ -824,12 +824,24 @@ fn refresh_complete_message(result: &RefreshResult) -> String {
         SyncMode::Reconciliation => "reconciliation",
     };
     format!(
-        "Refresh complete · {} issues · {} new local updates · {} local updates loaded · desktop notifications: {} delivered, {} unavailable · {mode}",
+        "Refresh complete · {} issues · {} new local updates · {} local updates loaded · desktop notifications: {} accepted by desktop service, {} unavailable · {mode}",
         result.cached.issues.len(),
         result.outcome.events_inserted,
         result.cached.events.len(),
         result.outcome.notifications_delivered,
         result.outcome.notification_failures,
+    )
+}
+
+fn refresh_notification_message(result: &RefreshResult) -> String {
+    let updates = match result.outcome.events_inserted {
+        0 => "no new local updates".to_owned(),
+        1 => "1 new local update".to_owned(),
+        count => format!("{count} new local updates"),
+    };
+    format!(
+        "Refresh complete · {} issues · {updates}",
+        result.cached.issues.len()
     )
 }
 
@@ -1030,6 +1042,79 @@ fn update_group_event_ids(group: &UpdateGroupViewModel) -> Vec<jira_domain::Even
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum UpdateFilter {
+    #[default]
+    All,
+    Unread,
+}
+
+fn filtered_update_group_indices(
+    groups: &[UpdateGroupViewModel],
+    filter: UpdateFilter,
+) -> Vec<usize> {
+    groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| filter == UpdateFilter::All || group.unread)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompactedUpdateRow {
+    Event(UpdateViewModel),
+    GenericSummary { count: usize, occurred_at: String },
+}
+
+fn compact_update_rows(events: &[UpdateViewModel]) -> Vec<CompactedUpdateRow> {
+    let generic_count = events
+        .iter()
+        .filter(|event| event.change == "Issue activity changed")
+        .count();
+    let mut summary_inserted = false;
+    events
+        .iter()
+        .filter_map(|event| {
+            if event.change == "Issue activity changed" {
+                if summary_inserted {
+                    None
+                } else {
+                    summary_inserted = true;
+                    Some(CompactedUpdateRow::GenericSummary {
+                        count: generic_count,
+                        occurred_at: event.occurred_at.clone(),
+                    })
+                }
+            } else {
+                Some(CompactedUpdateRow::Event(event.clone()))
+            }
+        })
+        .collect()
+}
+
+fn generic_summary_label(count: usize) -> String {
+    if count == 1 {
+        "Other Jira activity · exact field not available from sync".to_owned()
+    } else {
+        format!("Other Jira activity · {count} events · exact field not available from sync")
+    }
+}
+
+const UPDATE_PREVIEW_LIMIT: usize = 3;
+
+fn visible_update_row_count(row_count: usize, expanded: bool) -> usize {
+    if expanded {
+        row_count
+    } else {
+        row_count.min(UPDATE_PREVIEW_LIMIT)
+    }
+}
+
+fn hidden_update_row_count(row_count: usize, expanded: bool) -> usize {
+    row_count.saturating_sub(visible_update_row_count(row_count, expanded))
+}
+
 fn comment_error_message(error: &ApplicationError) -> (&'static str, bool) {
     match error.kind() {
         jira_application::ErrorKind::Authentication => (
@@ -1191,6 +1276,8 @@ pub struct Dashboard {
     domain_issues: Vec<Issue>,
     issues: Vec<IssueViewModel>,
     update_groups: Vec<UpdateGroupViewModel>,
+    update_filter: UpdateFilter,
+    expanded_update_groups: HashSet<IssueId>,
     selected_issue: Option<IssueId>,
     selected_issue_core: Option<Issue>,
     mobile_detail_open: bool,
@@ -1259,6 +1346,8 @@ impl Dashboard {
             domain_issues,
             issues,
             update_groups,
+            update_filter: UpdateFilter::All,
+            expanded_update_groups: HashSet::new(),
             selected_issue,
             selected_issue_core: None,
             mobile_detail_open: false,
@@ -1330,6 +1419,8 @@ impl Dashboard {
             domain_issues: Vec::new(),
             issues: Vec::new(),
             update_groups: Vec::new(),
+            update_filter: UpdateFilter::All,
+            expanded_update_groups: HashSet::new(),
             selected_issue: None,
             selected_issue_core: None,
             mobile_detail_open: false,
@@ -2805,12 +2896,9 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     Ok(outcome) => {
-                        let issue_count = outcome.cached.issues.len();
                         window.push_notification(
-                            Notification::success(format!(
-                                "Refresh complete · {issue_count} issues"
-                            ))
-                            .id::<RefreshNotification>(),
+                            Notification::success(refresh_notification_message(&outcome))
+                                .id::<RefreshNotification>(),
                             cx,
                         );
                         this.sync_message = refresh_complete_message(&outcome);
@@ -2886,6 +2974,20 @@ impl Dashboard {
             .iter()
             .map(|group| group.unread_count)
             .sum()
+    }
+
+    fn set_update_filter(&mut self, filter: UpdateFilter, cx: &mut Context<Self>) {
+        if self.update_filter != filter {
+            self.update_filter = filter;
+            cx.notify();
+        }
+    }
+
+    fn toggle_update_group_expanded(&mut self, issue_id: IssueId, cx: &mut Context<Self>) {
+        if !self.expanded_update_groups.remove(&issue_id) {
+            self.expanded_update_groups.insert(issue_id);
+        }
+        cx.notify();
     }
 
     fn mark_group_read(&mut self, issue_id: IssueId, cx: &mut Context<Self>) {
@@ -4698,52 +4800,121 @@ impl Dashboard {
 
     fn render_updates(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         let mobile = layout.is_mobile();
+        let unread = self.unread_count();
+        let visible_groups = filtered_update_group_indices(&self.update_groups, self.update_filter);
+        let no_visible_groups = visible_groups.is_empty();
         v_flex()
             .size_full()
             .min_w_0()
             .child(
                 v_flex()
-                    .h(px(if mobile { 80. } else { 54. }))
+                    .h(px(if mobile { 104. } else { 86. }))
                     .px(px(if mobile { 12. } else { 20. }))
-                    .py(px(if mobile { 8. } else { 0. }))
+                    .py(px(10.))
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(cx.theme().border)
+                    .gap_1()
                     .child(
                         h_flex()
                             .min_w_0()
                             .justify_between()
-                            .child(div()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} unread local updates · Changes detected by Jira Desk, not Jira notifications",
-                                self.unread_count()
-                            )))
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(div().text_sm().font_semibold().child("Change ledger"))
+                                    .child(
+                                        div()
+                                            .px_1()
+                                            .rounded_full()
+                                            .bg(cx.theme().secondary)
+                                            .text_xs()
+                                            .text_color(cx.theme().secondary_foreground)
+                                            .child(format!("{unread} unread")),
+                                    ),
+                            )
                             .child(
                                 Button::new("mark-all-read")
                                     .compact()
                                     .ghost()
+                                    .disabled(unread == 0 || self.operation_in_progress)
                                     .label("Mark all read")
                                     .on_click(cx.listener(|this, _, _, cx| this.mark_all_read(cx))),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                Button::new("updates-filter-unread")
+                                    .compact()
+                                    .when(self.update_filter == UpdateFilter::Unread, |this| {
+                                        this.primary()
+                                    })
+                                    .label(format!("Unread · {unread}"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_update_filter(UpdateFilter::Unread, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("updates-filter-all")
+                                    .compact()
+                                    .when(self.update_filter == UpdateFilter::All, |this| {
+                                        this.primary()
+                                    })
+                                    .label(format!("All · {}", self.update_groups.len()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_update_filter(UpdateFilter::All, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Operational change ledger · local Jira activity"),
                             ),
                     ),
             )
             .child(
-                v_flex()
+                h_flex()
                     .id("update-list")
                     .flex_1()
                     .overflow_y_scrollbar()
                     .min_h_0()
-                    .p(px(layout.list_padding()))
-                    .gap_3()
-                    .children(
-                        self.update_groups
-                            .iter()
-                            .enumerate()
-                            .map(|(index, group)| self.update_group_card(index, group, layout, cx)),
+                    .w_full()
+                    .justify_center()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(1120.))
+                            .p(px(layout.list_padding()))
+                            .gap_3()
+                            .children(visible_groups.into_iter().map(|index| {
+                                self.update_group_card(
+                                    index,
+                                    &self.update_groups[index],
+                                    layout,
+                                    cx,
+                                )
+                            }))
+                            .when(no_visible_groups, |this| {
+                                this.child(
+                                    div()
+                                        .p_4()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if self.update_filter == UpdateFilter::Unread {
+                                            "No unread local updates"
+                                        } else {
+                                            "No local updates yet"
+                                        }),
+                                )
+                            }),
                     ),
             )
     }
@@ -4764,6 +4935,10 @@ impl Dashboard {
         let mobile = layout.is_mobile();
         let issue_id = group.issue_id.clone();
         let clicked_issue_id = issue_id.clone();
+        let expanded = self.expanded_update_groups.contains(&group.issue_id);
+        let rows = compact_update_rows(&group.events);
+        let visible_row_count = visible_update_row_count(rows.len(), expanded);
+        let hidden_row_count = hidden_update_row_count(rows.len(), expanded);
         let open_area = Button::new(("update-open", index))
             .ghost()
             .flex_1()
@@ -4772,7 +4947,6 @@ impl Dashboard {
             .min_w_0()
             .gap_3()
             .p_3()
-            .when(group.unread, |this| this.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
@@ -4822,19 +4996,13 @@ impl Dashboard {
                                     .child(group.latest_occurred_at.clone()),
                             ),
                     )
-                    .child(v_flex().gap_1().children(group.events.iter().map(|event| {
-                        h_flex()
-                            .min_w_0()
-                            .gap_2()
-                            .text_xs()
-                            .child(div().min_w_0().flex_1().child(event.change.clone()))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(event.occurred_at.clone()),
-                            )
-                    }))),
+                    .child(
+                        v_flex().gap_1().children(
+                            rows.iter()
+                                .take(visible_row_count)
+                                .map(|row| self.update_row_element(row, cx)),
+                        ),
+                    ),
             )
             .into_any_element();
         h_flex()
@@ -4845,18 +5013,71 @@ impl Dashboard {
             .rounded(cx.theme().radius)
             .border_1()
             .border_color(cx.theme().border)
+            .when(group.unread, |this| this.border_color(cx.theme().primary))
             .child(open_area)
-            .when(group.unread, |this| {
-                this.child(
-                    Button::new(("update-mark-read", index))
-                        .ghost()
-                        .compact()
-                        .label("Mark as read")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mark_group_read(issue_id.clone(), cx);
-                        })),
-                )
-            })
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .items_end()
+                    .gap_1()
+                    .p_2()
+                    .when(hidden_row_count > 0, |this| {
+                        let issue_id = issue_id.clone();
+                        this.child(
+                            Button::new(("update-expand", index))
+                                .compact()
+                                .ghost()
+                                .label(format!("Show {hidden_row_count} more"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_update_group_expanded(issue_id.clone(), cx);
+                                })),
+                        )
+                    })
+                    .when(expanded && rows.len() > UPDATE_PREVIEW_LIMIT, |this| {
+                        let issue_id = issue_id.clone();
+                        this.child(
+                            Button::new(("update-collapse", index))
+                                .compact()
+                                .ghost()
+                                .label("Show less")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_update_group_expanded(issue_id.clone(), cx);
+                                })),
+                        )
+                    })
+                    .when(group.unread, |this| {
+                        this.child(
+                            Button::new(("update-mark-read", index))
+                                .ghost()
+                                .compact()
+                                .label("Mark read")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mark_group_read(issue_id.clone(), cx);
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn update_row_element(&self, row: &CompactedUpdateRow, cx: &mut Context<Self>) -> AnyElement {
+        let (change, occurred_at) = match row {
+            CompactedUpdateRow::Event(event) => (event.change.clone(), event.occurred_at.clone()),
+            CompactedUpdateRow::GenericSummary { count, occurred_at } => {
+                (generic_summary_label(*count), occurred_at.clone())
+            }
+        };
+        h_flex()
+            .min_w_0()
+            .gap_2()
+            .text_xs()
+            .child(div().min_w_0().flex_1().child(change))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(occurred_at),
+            )
             .into_any_element()
     }
 
@@ -4938,6 +5159,154 @@ mod tests {
     use crate::presentation::{UpdateViewModel, normalized_issue_key};
     use crate::sample_data::{sample_issues, sample_users};
     use gpui_component::searchable_list::SearchableListDelegate as _;
+    use time::macros::datetime;
+
+    fn update_view(event_id: &str, change: &str, occurred_at: &str) -> UpdateViewModel {
+        UpdateViewModel {
+            event_id: jira_domain::EventId::new(event_id).expect("event"),
+            issue_id: IssueId::new("100").expect("issue"),
+            issue_key: "IX-100".to_owned(),
+            issue_summary: "Summary".to_owned(),
+            change: change.to_owned(),
+            occurred_at: occurred_at.to_owned(),
+            unread: false,
+        }
+    }
+
+    #[test]
+    fn update_filter_returns_only_unread_ticket_groups() {
+        let mut groups = vec![
+            UpdateGroupViewModel {
+                issue_id: IssueId::new("100").expect("issue"),
+                issue_key: "IX-100".to_owned(),
+                issue_summary: "Unread".to_owned(),
+                events: Vec::new(),
+                latest_occurred_at: "now".to_owned(),
+                unread_count: 1,
+                unread: true,
+            },
+            UpdateGroupViewModel {
+                issue_id: IssueId::new("200").expect("issue"),
+                issue_key: "IX-200".to_owned(),
+                issue_summary: "Read".to_owned(),
+                events: Vec::new(),
+                latest_occurred_at: "earlier".to_owned(),
+                unread_count: 0,
+                unread: false,
+            },
+        ];
+
+        assert_eq!(
+            filtered_update_group_indices(&groups, UpdateFilter::All),
+            vec![0, 1]
+        );
+        assert_eq!(
+            filtered_update_group_indices(&groups, UpdateFilter::Unread),
+            vec![0]
+        );
+
+        groups[0].unread = false;
+        assert!(filtered_update_group_indices(&groups, UpdateFilter::Unread).is_empty());
+    }
+
+    #[test]
+    fn compacts_generic_activity_rows_but_keeps_specific_changes() {
+        let rows = compact_update_rows(&[
+            update_view("event-1", "Issue activity changed", "latest"),
+            update_view("event-2", "Status: To do → Done", "middle"),
+            update_view("event-3", "Issue activity changed", "earlier"),
+        ]);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            CompactedUpdateRow::GenericSummary {
+                count: 2,
+                occurred_at: "latest".to_owned(),
+            }
+        );
+        assert!(matches!(
+            &rows[1],
+            CompactedUpdateRow::Event(UpdateViewModel { change, .. })
+                if change == "Status: To do → Done"
+        ));
+    }
+
+    #[test]
+    fn generic_summary_copy_is_honest_and_counted() {
+        assert_eq!(
+            generic_summary_label(1),
+            "Other Jira activity · exact field not available from sync"
+        );
+        assert_eq!(
+            generic_summary_label(3),
+            "Other Jira activity · 3 events · exact field not available from sync"
+        );
+    }
+
+    #[test]
+    fn update_preview_limits_rows_without_discarding_audit_data() {
+        assert_eq!(visible_update_row_count(5, false), 3);
+        assert_eq!(hidden_update_row_count(5, false), 2);
+        assert_eq!(visible_update_row_count(5, true), 5);
+        assert_eq!(hidden_update_row_count(5, true), 0);
+        assert_eq!(visible_update_row_count(2, false), 2);
+    }
+
+    #[test]
+    fn update_filter_and_expansion_state_start_in_safe_defaults() {
+        let dashboard = Dashboard::from_sample_data();
+
+        assert_eq!(dashboard.update_filter, UpdateFilter::All);
+        assert!(dashboard.expanded_update_groups.is_empty());
+    }
+
+    fn refresh_result_with_inserted_events(events_inserted: usize) -> RefreshResult {
+        RefreshResult {
+            cached: CachedWorkspace {
+                issues: sample_issues(),
+                events: Vec::new(),
+            },
+            outcome: jira_application::SyncOutcome {
+                mode: SyncMode::Incremental,
+                pages_fetched: 1,
+                issues_fetched: 5,
+                events_inserted,
+                notifications_delivered: events_inserted,
+                notification_failures: 0,
+                cursor: datetime!(2026-08-18 00:00 UTC),
+            },
+        }
+    }
+
+    #[test]
+    fn refresh_notification_reports_new_update_count() {
+        let result = refresh_result_with_inserted_events(2);
+
+        assert_eq!(
+            refresh_notification_message(&result),
+            "Refresh complete · 5 issues · 2 new local updates"
+        );
+    }
+
+    #[test]
+    fn refresh_notification_distinguishes_zero_new_updates() {
+        let result = refresh_result_with_inserted_events(0);
+
+        assert_eq!(
+            refresh_notification_message(&result),
+            "Refresh complete · 5 issues · no new local updates"
+        );
+    }
+
+    #[test]
+    fn refresh_status_uses_submission_wording_for_desktop_notifications() {
+        let result = refresh_result_with_inserted_events(1);
+
+        let message = refresh_complete_message(&result);
+        assert!(message.contains("accepted by desktop service"));
+        assert!(!message.contains("delivered"));
+    }
 
     #[test]
     fn status_filter_trigger_summary_is_deterministic() {
