@@ -140,19 +140,25 @@ When started from an AppImage, startup also best-effort installs the current
 launcher and icon for the current user before creating the GPUI window. With
 an absolute `XDG_DATA_HOME`, the files are
 `$XDG_DATA_HOME/applications/dev.jiradesk.JiraDesk.desktop` and
-`$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png`;
+`$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png`, plus
+the content-addressed
+`$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk-<fingerprint>.png`;
 otherwise the same paths are rooted at `$HOME/.local/share`. The desktop copy
 contains the canonical absolute `APPIMAGE` path, is atomically refreshed on
-each launch, and is safe to repeat. Although the embedded template uses the
-named `Icon=dev.jiradesk.JiraDesk`, the generated per-user entry points to the
-absolute installed PNG path to avoid GNOME Shell's stale named-icon cache on
-first launch. No cache updater runs. Permission or filesystem failures are
-isolated: Jira Desk continues starting. To remove this integration, delete
-those two files under the active data root; this does not remove the AppImage
-or local Jira data. Extracted AppDir runs without `APPIMAGE` do not register.
-On GNOME, the registered `Name=Jira Desk` and named icon are then used for
-Alt-Tab and taskbar presentation instead of the raw `dev.jiradesk.JiraDesk`
-app ID.
+each launch, and is safe to repeat. The stable
+`dev.jiradesk.JiraDesk.png` copy supports named notification lookup; the
+generated per-user entry points to an absolute
+`dev.jiradesk.JiraDesk-<fingerprint>.png` copy, making icon-content changes
+produce a new GNOME Shell cache key. Older fingerprint variants are not
+automatically deleted. Although the embedded template uses the named
+`Icon=dev.jiradesk.JiraDesk`, no cache updater runs. Permission or filesystem
+failures are isolated: Jira Desk continues starting. To remove this
+integration, delete the desktop entry, stable icon, and only the managed
+app-ID-prefixed fingerprint variants in the exact icon directory; do not
+broadly delete unrelated icons. This does not remove the AppImage or local
+Jira data. Extracted AppDir runs without `APPIMAGE` do not register. On GNOME,
+the registered `Name=Jira Desk` and installed icon are then used for Alt-Tab
+and taskbar presentation instead of the raw `dev.jiradesk.JiraDesk` app ID.
 
 On desktop, the issue list and selected-issue detail are separated by a
 resizable split. On mobile, the shell presents one pane at a time with an

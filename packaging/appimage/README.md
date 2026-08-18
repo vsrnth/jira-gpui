@@ -44,31 +44,39 @@ and written as the desktop entry's `Exec` value. Extracted AppDirs and other
 runs without an absolute `APPIMAGE` path skip registration.
 
 The registration is idempotent: each launch atomically refreshes the same
-desktop entry and icon, so moving to a new AppImage updates the launcher path
-without creating duplicates. With an absolute `XDG_DATA_HOME`, files are
-written to:
+desktop entry, stable named icon, and content-addressed icon for the current
+image. With an absolute `XDG_DATA_HOME`, files are written to:
 
 ```text
 $XDG_DATA_HOME/applications/dev.jiradesk.JiraDesk.desktop
 $XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png
+$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk-<fingerprint>.png
 ```
 
 Otherwise the fallback is `$HOME/.local/share` with the same relative paths.
+The stable `dev.jiradesk.JiraDesk.png` copy supports named notification-icon
+lookup. The generated desktop entry points to the absolute
+content-addressed `dev.jiradesk.JiraDesk-<fingerprint>.png` path, so changing
+icon content also changes GNOME Shell's cache key. Older fingerprint variants
+are not deleted automatically.
 The embedded template remains `Exec=jira-gpui`; only the per-user copy gets
 the absolute current-AppImage launcher. The embedded template also remains
 `Icon=dev.jiradesk.JiraDesk`; the per-user copy uses the absolute installed
-PNG path so GNOME Shell can show the icon immediately even when its named-icon
-cache is stale. Missing permissions, an unavailable home/data directory, or a
-missing bundled icon are non-fatal: registration is skipped and the application
-still starts. No credentials, Jira data, or other
+content-addressed PNG path so GNOME Shell can show the icon immediately even
+when its named-icon cache is stale. Missing permissions, an unavailable
+home/data directory, or a missing bundled icon are non-fatal: registration is
+skipped and the application still starts. No credentials, Jira data, or other
 host state is written. On GNOME, this registration lets the shell resolve the
 Wayland app ID to the desktop entry's human-facing `Name=Jira Desk` and
 installed icon, so Alt-Tab and taskbar entries do not show the raw
 `dev.jiradesk.JiraDesk` identifier.
 
-To remove the integration, delete only the two files above (under the active
-`XDG_DATA_HOME`, or under `$HOME/.local/share` when it is unset), then refresh
-the desktop shell if it caches application metadata. This does not remove the
+To remove the integration, delete the desktop entry, the stable
+`dev.jiradesk.JiraDesk.png`, and only the managed
+`dev.jiradesk.JiraDesk-<fingerprint>.png` variants in that exact icon
+directory (under the active `XDG_DATA_HOME`, or under `$HOME/.local/share`
+when it is unset), then refresh the desktop shell if it caches application
+metadata. Do not broadly delete unrelated icons. This does not remove the
 AppImage or Jira Desk's local database.
 
 The build excludes `libxkbcommon.so.0` from linuxdeploy's ELF rewriting and then copies the exact library linked by the release binary into the AppDir. This avoids a Fedora RELR relocation incompatibility in linuxdeploy's rewriting path. Because the library comes from the build host, AppImages should be built and tested on a compatible Linux distribution/ABI; the script resolves the host path from the binary rather than assuming a distro-specific library directory.
