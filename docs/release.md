@@ -29,7 +29,9 @@ AppImage launch, the application installs an idempotent per-user desktop entry
 and icon using the absolute current `APPIMAGE` path before creating the GPUI
 window; registration failures are best-effort and do not block startup.
 Extracted AppDir smoke runs should verify that registration is skipped when
-`APPIMAGE` is absent.
+`APPIMAGE` is absent. The embedded desktop template retains the named
+`Icon=dev.jiradesk.JiraDesk`; the generated per-user entry uses the absolute
+installed PNG path, with no desktop-cache updater assumed.
 
 The icon build invokes ImageMagick's `magick` command. Ubuntu 22.04 ships
 ImageMagick 6, so CI must install the compatibility launcher described in

@@ -55,12 +55,15 @@ $XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png
 
 Otherwise the fallback is `$HOME/.local/share` with the same relative paths.
 The embedded template remains `Exec=jira-gpui`; only the per-user copy gets
-the absolute current-AppImage launcher. Missing permissions, an unavailable
-home/data directory, or a missing bundled icon are non-fatal: registration is
-skipped and the application still starts. No credentials, Jira data, or other
+the absolute current-AppImage launcher. The embedded template also remains
+`Icon=dev.jiradesk.JiraDesk`; the per-user copy uses the absolute installed
+PNG path so GNOME Shell can show the icon immediately even when its named-icon
+cache is stale. Missing permissions, an unavailable home/data directory, or a
+missing bundled icon are non-fatal: registration is skipped and the application
+still starts. No credentials, Jira data, or other
 host state is written. On GNOME, this registration lets the shell resolve the
-Wayland app ID to the desktop entry's human-facing `Name=Jira Desk` and named
-icon, so Alt-Tab and taskbar entries do not show the raw
+Wayland app ID to the desktop entry's human-facing `Name=Jira Desk` and
+installed icon, so Alt-Tab and taskbar entries do not show the raw
 `dev.jiradesk.JiraDesk` identifier.
 
 To remove the integration, delete only the two files above (under the active

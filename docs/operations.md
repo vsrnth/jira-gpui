@@ -143,7 +143,10 @@ an absolute `XDG_DATA_HOME`, the files are
 `$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png`;
 otherwise the same paths are rooted at `$HOME/.local/share`. The desktop copy
 contains the canonical absolute `APPIMAGE` path, is atomically refreshed on
-each launch, and is safe to repeat. Permission or filesystem failures are
+each launch, and is safe to repeat. Although the embedded template uses the
+named `Icon=dev.jiradesk.JiraDesk`, the generated per-user entry points to the
+absolute installed PNG path to avoid GNOME Shell's stale named-icon cache on
+first launch. No cache updater runs. Permission or filesystem failures are
 isolated: Jira Desk continues starting. To remove this integration, delete
 those two files under the active data root; this does not remove the AppImage
 or local Jira data. Extracted AppDir runs without `APPIMAGE` do not register.
