@@ -4,18 +4,18 @@
 //! wiring needed by a shell, while the application services and storage ports
 //! remain reusable by a future Tauri frontend.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use jira_application::{
     AddCommentRequest, ApplicationError, AssignIssueRequest, AssignableUserSearchRequest,
     AttachmentContent, AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest,
-    CancellationToken, Clock, CommentService, DefaultDesktopNotificationPolicy, DefaultIssueDiffer,
-    IssueCachePort, IssueCatalogService, IssueDetailConfig, IssueDetailRequest, IssueDetailService,
-    IssueEditCachePort, IssueEditService, IssueListQuery, IssueLocator, IssueMediaConfig,
-    IssueMediaService, IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort,
-    JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService,
-    TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort,
-    UserSetService,
+    CancellationToken, Clock, CommentService, DEFAULT_JQL_SCOPE, DefaultDesktopNotificationPolicy,
+    DefaultIssueDiffer, IssueCachePort, IssueCatalogService, IssueDetailConfig, IssueDetailRequest,
+    IssueDetailService, IssueEditCachePort, IssueEditService, IssueListQuery, IssueLocator,
+    IssueMediaConfig, IssueMediaService, IssueTransitionsRequest, JiraCommentWritePort,
+    JiraIssueEditPort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest,
+    SyncService, TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSetDraft,
+    UserSetPort, UserSetService, validate_jql_scope,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
@@ -53,7 +53,7 @@ pub struct FeedActionResult {
 pub struct LiveWorkspace {
     site_id: JiraSiteId,
     authenticated_account: Option<AccountId>,
-    user_set_id: UserSetId,
+    scope_state: Arc<RwLock<ScopeState>>,
     catalog: IssueCatalogService,
     feed: UpdateFeedService,
     detail: IssueDetailService,
@@ -62,6 +62,12 @@ pub struct LiveWorkspace {
     issue_editor: IssueEditService,
     cache: Arc<SqliteStore>,
     sync: SyncService,
+}
+
+#[derive(Clone, Debug)]
+struct ScopeState {
+    user_set_id: UserSetId,
+    normalized_scope: String,
 }
 
 impl LiveWorkspace {
@@ -108,8 +114,30 @@ impl LiveWorkspace {
         issue_editor: Arc<dyn JiraIssueEditPort>,
         cache: Arc<SqliteStore>,
     ) -> Result<Self, ApplicationError> {
+        Self::initialize_with_writers_and_scope(
+            site_id,
+            authenticated_account,
+            jira,
+            comment_writer,
+            issue_editor,
+            cache,
+            None,
+        )
+        .await
+    }
+
+    pub async fn initialize_with_writers_and_scope(
+        site_id: JiraSiteId,
+        authenticated_account: Option<AccountId>,
+        jira: Arc<dyn JiraReadPort>,
+        comment_writer: Arc<dyn JiraCommentWritePort>,
+        issue_editor: Arc<dyn JiraIssueEditPort>,
+        cache: Arc<SqliteStore>,
+        requested_scope: Option<String>,
+    ) -> Result<Self, ApplicationError> {
         let members = authenticated_account.iter().cloned().collect::<Vec<_>>();
-        let workspace_name = workspace_name();
+        let normalized_scope = normalize_scope(requested_scope.as_deref())?;
+        let workspace_name = workspace_name(&normalized_scope);
 
         let user_sets = UserSetService::new(cache.clone() as Arc<dyn UserSetPort>);
         let existing_user_set = user_sets
@@ -125,7 +153,7 @@ impl LiveWorkspace {
             Some(user_set) => user_set.id,
             None if members.is_empty() => {
                 // UserSetService models nonempty user sets; save the deliberate
-                // empty project-wide cache partition directly through the port.
+                // empty unrestricted cache partition directly through the port.
                 cache
                     .save(UserSetDraft {
                         site_id: site_id.clone(),
@@ -174,7 +202,10 @@ impl LiveWorkspace {
         Ok(Self {
             site_id,
             authenticated_account,
-            user_set_id,
+            scope_state: Arc::new(RwLock::new(ScopeState {
+                user_set_id,
+                normalized_scope,
+            })),
             catalog,
             feed,
             detail,
@@ -194,8 +225,63 @@ impl LiveWorkspace {
         self.authenticated_account.as_ref()
     }
 
-    pub fn user_set_id(&self) -> &UserSetId {
-        &self.user_set_id
+    pub fn user_set_id(&self) -> UserSetId {
+        self.scope_state
+            .read()
+            .expect("scope state lock")
+            .user_set_id
+            .clone()
+    }
+
+    /// Return the active user-editable Jira scope. `None` means the default scope is active.
+    pub fn jql_scope(&self) -> Option<String> {
+        let scope = self
+            .scope_state
+            .read()
+            .expect("scope state lock")
+            .normalized_scope
+            .clone();
+        (scope != DEFAULT_JQL_SCOPE).then_some(scope)
+    }
+
+    fn scope_state(&self) -> ScopeState {
+        self.scope_state.read().expect("scope state lock").clone()
+    }
+
+    /// Validate and stage a scope change. The new scope has a distinct user-set/cache identity;
+    /// the next refresh therefore starts a quiet baseline instead of reusing another scope's
+    /// cursor or membership.
+    pub async fn set_jql_scope(&self, scope: Option<String>) -> Result<(), ApplicationError> {
+        let normalized_scope = normalize_scope(scope.as_deref())?;
+        let members = self
+            .authenticated_account
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let name = workspace_name(&normalized_scope);
+        let user_sets = UserSetService::new(self.cache.clone() as Arc<dyn UserSetPort>);
+        let existing = user_sets
+            .list(&self.site_id)
+            .await?
+            .into_iter()
+            .find(|user_set| user_set.name == name && user_set.members == members);
+        let user_set_id = if let Some(existing) = existing {
+            existing.id
+        } else {
+            self.cache
+                .save(UserSetDraft {
+                    site_id: self.site_id.clone(),
+                    name,
+                    members,
+                })
+                .await?
+                .id
+        };
+        *self.scope_state.write().expect("scope state lock") = ScopeState {
+            user_set_id,
+            normalized_scope,
+        };
+        Ok(())
     }
 
     /// Fetch one issue's complete read-only detail through the application service.
@@ -345,37 +431,28 @@ impl LiveWorkspace {
             .await
     }
 
-    /// Load bounded cached data without contacting Jira.
-    pub async fn load_cached(&self) -> Result<CachedWorkspace, ApplicationError> {
-        self.load_cached_with_assignees(Vec::new()).await
-    }
-
-    /// Load the authenticated account's issues from the local cache without
-    /// contacting Jira. This is a presentation filter over the project-wide
-    /// cache, not a second remote synchronization.
-    pub async fn load_cached_for_assignee(
-        &self,
-        account_id: AccountId,
-    ) -> Result<CachedWorkspace, ApplicationError> {
-        self.load_cached_with_assignees(vec![account_id]).await
-    }
-
     /// Load only the authenticated user's local view. A missing identity is
-    /// never treated as permission to show the project-wide cache.
+    /// never treated as permission to show an unrestricted cache.
     pub async fn load_cached_for_authenticated_account(
         &self,
     ) -> Result<CachedWorkspace, ApplicationError> {
-        let Some(account_id) = self.authenticated_account.clone() else {
+        if self.authenticated_account.is_none() {
             return Err(ApplicationError::invalid_input(
                 "authenticated Jira identity is required",
             ));
-        };
-        self.load_cached_for_assignee(account_id).await
+        }
+        self.load_cached().await
     }
 
-    async fn load_cached_with_assignees(
+    /// Load bounded cached data without contacting Jira.
+    pub async fn load_cached(&self) -> Result<CachedWorkspace, ApplicationError> {
+        let scope_state = self.scope_state();
+        self.load_cached_for_scope(&scope_state).await
+    }
+
+    async fn load_cached_for_scope(
         &self,
-        assignees: Vec<AccountId>,
+        scope_state: &ScopeState,
     ) -> Result<CachedWorkspace, ApplicationError> {
         let mut issues = Vec::new();
         for offset in (0..MAX_CACHED_ISSUES).step_by(ISSUE_PAGE_SIZE) {
@@ -383,9 +460,11 @@ impl LiveWorkspace {
                 .catalog
                 .list_cached(&IssueListQuery {
                     site_id: self.site_id.clone(),
-                    user_set_id: self.user_set_id.clone(),
+                    user_set_id: scope_state.user_set_id.clone(),
                     text: None,
-                    assignees: assignees.clone(),
+                    // Membership is already account-scoped by the remote JQL and user-set
+                    // identity. Re-filtering by assignee would hide watched issues.
+                    assignees: Vec::new(),
                     limit: ISSUE_PAGE_SIZE,
                     offset,
                 })
@@ -422,8 +501,12 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let mode = self.next_mode(SyncMode::Reconciliation).await?;
-        self.refresh_with_mode(mode, cancellation).await
+        let scope_state = self.scope_state();
+        let mode = self
+            .next_mode(&scope_state, SyncMode::Reconciliation)
+            .await?;
+        self.refresh_with_mode(&scope_state, mode, cancellation)
+            .await
     }
 
     /// Synchronize Jira automatically, using the incremental cursor after the
@@ -432,14 +515,20 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let mode = self.next_mode(SyncMode::Incremental).await?;
-        self.refresh_with_mode(mode, cancellation).await
+        let scope_state = self.scope_state();
+        let mode = self.next_mode(&scope_state, SyncMode::Incremental).await?;
+        self.refresh_with_mode(&scope_state, mode, cancellation)
+            .await
     }
 
-    async fn next_mode(&self, subsequent_mode: SyncMode) -> Result<SyncMode, ApplicationError> {
+    async fn next_mode(
+        &self,
+        scope_state: &ScopeState,
+        subsequent_mode: SyncMode,
+    ) -> Result<SyncMode, ApplicationError> {
         if self
             .cache
-            .sync_state(&self.site_id, &self.user_set_id)
+            .sync_state(&self.site_id, &scope_state.user_set_id)
             .await?
             .is_some_and(|state| state.last_incremental_succeeded_at.is_some())
         {
@@ -451,6 +540,7 @@ impl LiveWorkspace {
 
     async fn refresh_with_mode(
         &self,
+        scope_state: &ScopeState,
         mode: SyncMode,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
@@ -459,8 +549,16 @@ impl LiveWorkspace {
             .run(
                 SyncRequest {
                     site_id: self.site_id.clone(),
-                    user_set_id: self.user_set_id.clone(),
-                    assignees: None,
+                    user_set_id: scope_state.user_set_id.clone(),
+                    assignees: self
+                        .authenticated_account
+                        .clone()
+                        .map(|account_id| vec![account_id]),
+                    watchers: self
+                        .authenticated_account
+                        .clone()
+                        .map(|account_id| vec![account_id]),
+                    jql_scope: Some(scope_state.normalized_scope.clone()),
                     notification_assignees: self
                         .authenticated_account
                         .clone()
@@ -470,7 +568,7 @@ impl LiveWorkspace {
                 cancellation,
             )
             .await?;
-        let cached = self.load_cached_for_authenticated_account().await?;
+        let cached = self.load_cached_for_scope(scope_state).await?;
         Ok(RefreshResult { cached, outcome })
     }
 
@@ -591,8 +689,26 @@ impl JiraIssueEditPort for UnsupportedIssueEditor {
     }
 }
 
-fn workspace_name() -> String {
-    format!("{WORKSPACE_NAME} · Jira Project")
+fn workspace_name(scope: &str) -> String {
+    format!(
+        "{WORKSPACE_NAME} · account view · scope-{}",
+        scope_fingerprint(scope)
+    )
+}
+
+fn normalize_scope(scope: Option<&str>) -> Result<String, ApplicationError> {
+    validate_jql_scope(scope).map_err(ApplicationError::invalid_input)?;
+    Ok(scope.unwrap_or(DEFAULT_JQL_SCOPE).trim().to_owned())
+}
+
+fn scope_fingerprint(scope: &str) -> String {
+    // FNV-1a is small, deterministic across restarts, and sufficient for a bounded cache key.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in scope.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[derive(Debug)]
@@ -631,6 +747,7 @@ mod tests {
         comment_pages: Mutex<VecDeque<IssueCommentsPage>>,
         request_count: Mutex<usize>,
         assignee_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
+        watcher_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
     }
 
     impl FakeJira {
@@ -660,6 +777,13 @@ mod tests {
             self.assignee_filters
                 .lock()
                 .expect("assignee filters lock")
+                .clone()
+        }
+
+        fn watcher_filters(&self) -> Vec<Option<Vec<AccountId>>> {
+            self.watcher_filters
+                .lock()
+                .expect("watcher filters lock")
                 .clone()
         }
     }
@@ -724,6 +848,10 @@ mod tests {
                 .lock()
                 .expect("assignee filters lock")
                 .push(request.assignees.clone());
+            self.watcher_filters
+                .lock()
+                .expect("watcher filters lock")
+                .push(request.watchers.clone());
             let result = self
                 .pages
                 .lock()
@@ -1023,6 +1151,23 @@ mod tests {
     }
 
     #[test]
+    fn initialization_uses_the_requested_normalized_scope_identity() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("memory store"));
+        let workspace = block_on(LiveWorkspace::initialize_with_writers_and_scope(
+            JiraSiteId::new("site").expect("site"),
+            Some(account("account-a")),
+            jira,
+            Arc::new(UnsupportedCommentWriter),
+            Arc::new(UnsupportedIssueEditor),
+            cache,
+            Some("  project = APP  ".to_owned()),
+        ))
+        .expect("workspace initializes");
+        assert_eq!(workspace.jql_scope().as_deref(), Some("project = APP"));
+    }
+
+    #[test]
     fn initialization_does_not_reuse_legacy_assignee_only_user_set() {
         let jira = Arc::new(FakeJira::default());
         let cache = Arc::new(SqliteStore::in_memory().expect("memory store"));
@@ -1035,10 +1180,11 @@ mod tests {
         .expect("save legacy user set");
 
         let current = make_workspace(jira, cache.clone());
-        assert_ne!(current.user_set_id(), &legacy.id);
+        assert_ne!(current.user_set_id(), legacy.id);
         let sets = block_on(cache.list(&site_id)).expect("list sets");
         assert_eq!(sets.len(), 2);
-        assert!(sets.iter().any(|set| set.name.contains("Jira Project")));
+        assert!(sets.iter().all(|set| !set.name.contains("Jira Project")));
+        assert!(sets.iter().any(|set| set.name.contains("account view")));
     }
 
     #[test]
@@ -1203,24 +1349,33 @@ mod tests {
         let _reconciliation =
             block_on(workspace.refresh(&cancellation)).expect("reconciliation refresh");
         let requests_after_sync = jira.request_count();
-        assert_eq!(jira.assignee_filters(), vec![None, None]);
+        assert_eq!(
+            jira.assignee_filters(),
+            vec![
+                Some(vec![account("account-a")]),
+                Some(vec![account("account-a")])
+            ]
+        );
+        assert_eq!(
+            jira.watcher_filters(),
+            vec![
+                Some(vec![account("account-a")]),
+                Some(vec![account("account-a")])
+            ]
+        );
 
         let all = block_on(workspace.load_cached()).expect("load all local issues");
         assert_eq!(all.issues.len(), 2);
 
-        let mine = block_on(workspace.load_cached_for_assignee(account("account-a")))
-            .expect("load local my filter");
-        assert_eq!(mine.issues.len(), 1);
+        let mine = block_on(workspace.load_cached_for_authenticated_account())
+            .expect("load local account view");
+        assert_eq!(mine.issues.len(), 2);
         assert!(
             mine.events
                 .iter()
-                .all(|event| event.issue_id == mine.issues[0].id)
+                .all(|event| mine.issues.iter().any(|issue| issue.id == event.issue_id))
         );
-        assert!(
-            all.events
-                .iter()
-                .any(|event| event.issue_id != mine.issues[0].id)
-        );
+        assert_eq!(all.events.len(), mine.events.len());
         assert_eq!(jira.request_count(), requests_after_sync);
     }
 

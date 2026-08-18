@@ -7,7 +7,8 @@ assignee-set onboarding and a fully read-only Jira policy.
 ## Current milestone
 
 The durable Linux Wayland vertical slice is implemented: GPUI onboarding,
-authenticated `/myself` identity, project-wide read sync, My-issues filtering,
+authenticated `/myself` identity, account-scoped assigned-or-watched read sync,
+user-editable cross-project JQL scope, and inferred project labels,
 SQLite caching, local update events, incremental polling, lazy issue detail,
 exact Jira-key lookup, ticket-grouped activity, confirmed comment creation,
 confirmed assignment and status-transition actions, and AppImage packaging.
@@ -23,8 +24,13 @@ milestone is an internal/local build, not a public release. See
 - Jira synchronization and detail reads are read-only.
 - Confirmed comment creation, assignment changes, and status transitions are
   the only Jira writes; each is dispatched once with no automatic retry.
-- The remote sync is project-wide, but the dashboard presents only the
-  authenticated user's issues.
+- The remote sync uses the configured scope and returns the authenticated
+  user's assigned-or-watched issues across projects.
+- Scope changes use a fingerprinted user-set/cache identity and begin with a
+  quiet baseline; desktop alerts remain assigned-only.
+- Settings persist a validated scope atomically only after Jira accepts and
+  commits the corresponding refresh; failed changes roll back the active
+  scope and leave the prior preference intact.
 - Local cache, update read state, and sync cursors may be written locally.
 - The first successful sync is quiet; later changes produce durable local
   events and best-effort desktop notifications.

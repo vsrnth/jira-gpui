@@ -8,7 +8,7 @@ use jira_domain::IssueId;
 /// caller a clear failure mode instead of relying on an endpoint-specific request-size limit.
 pub const MAX_ISSUE_IDS: usize = 1_000;
 
-const ISSUES_BASE_JQL: &str = "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()";
+pub use jira_application::{DEFAULT_JQL_SCOPE, MAX_JQL_SCOPE_LENGTH};
 
 /// A Jira Cloud account identifier safe to interpolate in a quoted JQL literal.
 ///
@@ -50,31 +50,73 @@ impl fmt::Display for AccountId {
 
 /// Builds the JQL used for the primary read-only view.
 ///
-/// The project and issue-status scope is owned by this Jira adapter. Account IDs are an optional
-/// remote restriction: an empty iterator means project-wide results. IDs are emitted as quoted
-/// literals and duplicate IDs are removed so callers can freely combine saved sets without
-/// producing unnecessarily long queries.
-pub fn assigned_issues_jql(
-    account_ids: impl IntoIterator<Item = AccountId>,
+/// Builds a Jira scope query with optional assignee and watcher restrictions. An empty pair means
+/// unrestricted results within the supplied scope. IDs are emitted as quoted literals and each
+/// collection is sorted/deduplicated independently for deterministic request bodies.
+pub fn scoped_issues_jql(
+    scope: Option<&str>,
+    assignee_ids: impl IntoIterator<Item = AccountId>,
+    watcher_ids: impl IntoIterator<Item = AccountId>,
 ) -> Result<String, JqlError> {
-    let mut account_ids = account_ids.into_iter().collect::<Vec<_>>();
-    account_ids.sort();
-    account_ids.dedup();
+    let scope = validated_scope(scope)?;
+    let mut assignee_ids = assignee_ids.into_iter().collect::<Vec<_>>();
+    let mut watcher_ids = watcher_ids.into_iter().collect::<Vec<_>>();
+    assignee_ids.sort();
+    assignee_ids.dedup();
+    watcher_ids.sort();
+    watcher_ids.dedup();
 
-    let assignee_filter = if account_ids.is_empty() {
-        String::new()
-    } else {
+    let assignee_clause = account_clause("assignee", &assignee_ids);
+    let watcher_clause = account_clause("watcher", &watcher_ids);
+    let account_clause = match (assignee_clause, watcher_clause) {
+        (Some(assignee), Some(watcher)) => Some(format!("({assignee} OR {watcher})")),
+        (Some(assignee), None) => Some(assignee),
+        (None, Some(watcher)) => Some(watcher),
+        (None, None) => None,
+    };
+
+    let mut clauses = vec![format!("({scope})")];
+    if let Some(account_clause) = account_clause {
+        clauses.push(account_clause);
+    }
+    Ok(format!("{} ORDER BY updated DESC", clauses.join(" AND ")))
+}
+
+/// Alias with product-facing terminology for callers constructing the authenticated view.
+pub fn assigned_or_watched_issues_jql(
+    assignee_ids: impl IntoIterator<Item = AccountId>,
+    watcher_ids: impl IntoIterator<Item = AccountId>,
+) -> Result<String, JqlError> {
+    scoped_issues_jql(None, assignee_ids, watcher_ids)
+}
+
+fn account_clause(field: &str, account_ids: &[AccountId]) -> Option<String> {
+    (!account_ids.is_empty()).then(|| {
         let literals = account_ids
-            .into_iter()
+            .iter()
             .map(|account_id| format!("\"{}\"", account_id.as_str()))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(" AND assignee IN ({literals})")
-    };
+        format!("{field} IN ({literals})")
+    })
+}
 
-    Ok(format!(
-        "{ISSUES_BASE_JQL}{assignee_filter} ORDER BY updated DESC"
-    ))
+fn validated_scope(scope: Option<&str>) -> Result<String, JqlError> {
+    let scope = scope.unwrap_or(DEFAULT_JQL_SCOPE).trim();
+    jira_application::validate_jql_scope(Some(scope)).map_err(|error| match error {
+        "Jira scope cannot be empty" => JqlError::EmptyScope,
+        "Jira scope is too long" => JqlError::ScopeTooLong,
+        "Jira scope must not contain ORDER BY" => JqlError::ScopeContainsOrderBy,
+        _ => JqlError::EmptyScope,
+    })?;
+    Ok(scope.to_owned())
+}
+
+/// Builds the default-scope assignee-only JQL retained for callers that do not need watchers.
+pub fn assigned_issues_jql(
+    account_ids: impl IntoIterator<Item = AccountId>,
+) -> Result<String, JqlError> {
+    scoped_issues_jql(None, account_ids, Vec::<AccountId>::new())
 }
 
 /// Builds the assigned-issues JQL directly from stable domain account IDs.
@@ -89,6 +131,29 @@ pub fn assigned_issues_for_account_ids(
         .map(|account_id| AccountId::parse(account_id.into_inner()))
         .collect::<Result<Vec<_>, _>>()
         .and_then(assigned_issues_jql)
+}
+
+pub fn scoped_issues_for_account_ids(
+    scope: Option<&str>,
+    assignee_ids: impl IntoIterator<Item = jira_domain::AccountId>,
+    watcher_ids: impl IntoIterator<Item = jira_domain::AccountId>,
+) -> Result<String, JqlError> {
+    let assignee_ids = assignee_ids
+        .into_iter()
+        .map(|account_id| AccountId::parse(account_id.into_inner()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let watcher_ids = watcher_ids
+        .into_iter()
+        .map(|account_id| AccountId::parse(account_id.into_inner()))
+        .collect::<Result<Vec<_>, _>>()?;
+    scoped_issues_jql(scope, assignee_ids, watcher_ids)
+}
+
+pub fn assigned_or_watched_issues_for_account_ids(
+    assignee_ids: impl IntoIterator<Item = jira_domain::AccountId>,
+    watcher_ids: impl IntoIterator<Item = jira_domain::AccountId>,
+) -> Result<String, JqlError> {
+    scoped_issues_for_account_ids(None, assignee_ids, watcher_ids)
 }
 
 /// Builds a read-only enhanced-search request for a known set of Jira issue IDs.
@@ -206,7 +271,11 @@ pub fn enhanced_search_request(
         return Err(JqlError::InvalidPageSize(request.page_size));
     }
 
-    let mut jql = assigned_issues_for_account_ids(request.assignees.clone().unwrap_or_default())?;
+    let mut jql = scoped_issues_for_account_ids(
+        request.jql_scope.as_deref(),
+        request.assignees.clone().unwrap_or_default(),
+        request.watchers.clone().unwrap_or_default(),
+    )?;
     if let Some(updated_since) = request.updated_since {
         // Jira Cloud accepts this explicit UTC literal for JQL date comparisons. It is generated
         // from a typed timestamp, rather than copied from any user-entered query text.
@@ -245,6 +314,12 @@ pub enum JqlError {
     UnsafeAccountId,
     #[error("Jira page size must be between 1 and 1000, received {0}")]
     InvalidPageSize(usize),
+    #[error("a Jira JQL scope cannot be empty")]
+    EmptyScope,
+    #[error("a Jira JQL scope is longer than {MAX_JQL_SCOPE_LENGTH} bytes")]
+    ScopeTooLong,
+    #[error("a Jira JQL scope must not contain ORDER BY")]
+    ScopeContainsOrderBy,
     #[error("at least one Jira issue ID is required")]
     NoIssueIds,
     #[error("a Jira issue ID cannot be empty")]
@@ -268,7 +343,7 @@ mod tests {
 
         assert_eq!(
             assigned_issues_jql([beta, alpha.clone(), alpha]).unwrap(),
-            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND assignee IN (\"557058:aaa\", \"712020:bbb\") ORDER BY updated DESC"
+            "(issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()) AND assignee IN (\"557058:aaa\", \"712020:bbb\") ORDER BY updated DESC"
         );
     }
 
@@ -276,7 +351,7 @@ mod tests {
     fn allows_project_wide_query_without_remote_assignees() {
         assert_eq!(
             assigned_issues_jql(Vec::<AccountId>::new()).unwrap(),
-            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() ORDER BY updated DESC"
+            "(issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()) ORDER BY updated DESC"
         );
     }
 
@@ -301,7 +376,7 @@ mod tests {
         let account_id = jira_domain::AccountId::new("557058:abc-123").unwrap();
         assert_eq!(
             assigned_issues_for_account_ids([account_id]).unwrap(),
-            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND assignee IN (\"557058:abc-123\") ORDER BY updated DESC"
+            "(issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()) AND assignee IN (\"557058:abc-123\") ORDER BY updated DESC"
         );
     }
 
@@ -313,6 +388,8 @@ mod tests {
         let request = IssueFetchRequest {
             site_id: jira_domain::JiraSiteId::new("site").unwrap(),
             assignees: Some(vec![jira_domain::AccountId::new("557058:abc-123").unwrap()]),
+            watchers: Some(vec![jira_domain::AccountId::new("712020:watcher").unwrap()]),
+            jql_scope: None,
             updated_since: Some(datetime!(2026-08-15 17:20 UTC)),
             page_cursor: Some(PageCursor("opaque-token".into())),
             page_size: 100,
@@ -323,7 +400,7 @@ mod tests {
         assert_eq!(enhanced.max_results, Some(100));
         assert_eq!(
             enhanced.jql,
-            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND assignee IN (\"557058:abc-123\") AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
+            "(issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()) AND (assignee IN (\"557058:abc-123\") OR watcher IN (\"712020:watcher\")) AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
         );
     }
 
@@ -335,6 +412,8 @@ mod tests {
         let request = IssueFetchRequest {
             site_id: jira_domain::JiraSiteId::new("site").unwrap(),
             assignees: None,
+            watchers: None,
+            jql_scope: None,
             updated_since: Some(datetime!(2026-08-15 17:20 UTC)),
             page_cursor: Some(PageCursor("opaque-token".into())),
             page_size: 100,
@@ -344,7 +423,7 @@ mod tests {
         assert_eq!(enhanced.next_page_token.as_deref(), Some("opaque-token"));
         assert_eq!(
             enhanced.jql,
-            "project in (\"Jira Project\") and issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear() AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
+            "(issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()) AND updated >= \"2026-08-15 17:20\" ORDER BY updated DESC"
         );
 
         let mut explicitly_empty = request.clone();
@@ -352,6 +431,48 @@ mod tests {
         assert_eq!(
             enhanced_search_request(&explicitly_empty).unwrap().jql,
             enhanced.jql
+        );
+    }
+
+    #[test]
+    fn builds_watcher_only_and_custom_scope_queries_deterministically() {
+        let first = jira_domain::AccountId::new("watcher-b").unwrap();
+        let second = jira_domain::AccountId::new("watcher-a").unwrap();
+        assert_eq!(
+            scoped_issues_for_account_ids(
+                Some("project = APP"),
+                Vec::<jira_domain::AccountId>::new(),
+                [first, second.clone(), second],
+            )
+            .unwrap(),
+            "(project = APP) AND watcher IN (\"watcher-a\", \"watcher-b\") ORDER BY updated DESC"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_scope_expressions() {
+        assert_eq!(
+            scoped_issues_jql(Some("  "), Vec::<AccountId>::new(), Vec::<AccountId>::new())
+                .unwrap_err(),
+            JqlError::EmptyScope
+        );
+        assert_eq!(
+            scoped_issues_jql(
+                Some(&"x".repeat(MAX_JQL_SCOPE_LENGTH + 1)),
+                Vec::<AccountId>::new(),
+                Vec::<AccountId>::new(),
+            )
+            .unwrap_err(),
+            JqlError::ScopeTooLong
+        );
+        assert_eq!(
+            scoped_issues_jql(
+                Some("project = APP ORDER\n BY x"),
+                Vec::<AccountId>::new(),
+                Vec::<AccountId>::new()
+            )
+            .unwrap_err(),
+            JqlError::ScopeContainsOrderBy
         );
     }
 

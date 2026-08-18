@@ -3413,6 +3413,8 @@ dependencies = [
  "jira-domain",
  "jira-http",
  "jira-storage",
+ "serde",
+ "serde_json",
  "time",
 ]
 

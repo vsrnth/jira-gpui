@@ -32,15 +32,17 @@ Synchronous environment bootstrap validates configuration, constructs the Jira
 client, and opens SQLite without claiming an authenticated user. During
 Dashboard initialization, the existing client resolves the authenticated
 `/myself` user; only then does the shell create the account-scoped workspace and
-load its scoped cache before the first project refresh. The sync coordinator
-fetches the fixed Jira Project project, while the dashboard locally scopes
-the visible list to that authenticated account. A successful first refresh is
-a quiet baseline. Later polls compare normalized snapshots and persist
-deterministic update events.
+load its account-scoped cache before the first refresh. The sync coordinator
+applies the user-editable JQL scope and a remote `(assignee OR watcher)` filter
+for the authenticated account; the dashboard trusts that user-set membership
+and infers project labels from returned issue snapshots. A successful first
+refresh is a quiet baseline. Later polls compare normalized snapshots and
+persist deterministic update events. Desktop alerts retain the narrower
+assigned-only policy.
 
 ## Dashboard behavior
 
-The dashboard has one My-issues list. Status categories and text search are
+The dashboard has one Assigned-or-watched list. Status categories and text search are
 local intersections over the retained domain issue list; they do not trigger
 Jira or SQLite requests. The status control is a multi-select: selecting any
 combination of To Do, In Progress, Done, and Uncategorized applies an OR
@@ -48,6 +50,15 @@ filter, while an empty selection means All statuses. Exact-key submission first
 selects a local match. If the key is absent, Jira Desk performs a bounded,
 cancellable lookup and shows a transient result without adding it to cache
 membership.
+
+Settings is a live-workspace-only surface for editing the JQL scope expression.
+The editor validates a nonblank expression up to 2,000 bytes and rejects
+`ORDER BY`; Jira Desk appends authenticated assigned-or-watched membership,
+incremental `updated` overlap, and stable `ORDER BY updated DESC`. Saving first
+switches to the scope-fingerprinted user set and runs a refresh. The preference
+is atomically persisted only after that refresh commits. A Jira or local-write
+failure rolls back the active scope and reloads the previous membership; the
+editor retains the attempted text for correction.
 
 Selecting an issue starts a separate cancellable detail request. The request
 loads the description, all bounded comment pages, and attachment metadata.

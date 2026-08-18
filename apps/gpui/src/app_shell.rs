@@ -207,7 +207,7 @@ impl AppShell {
                                                     .min_w_0()
                                                     .text_sm()
                                                     .text_color(cx.theme().muted_foreground)
-                                            .child("Configure an Jira Project workspace"),
+                                            .child("Configure a Jira workspace"),
                                             ),
                                     ),
                             )
@@ -216,7 +216,7 @@ impl AppShell {
                                     .min_w_0()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira Desk syncs all Jira Project issues. My issues is a local filter for your authenticated Jira account. Jira changes are limited to explicitly confirmed comments, assignee changes, and status transitions."),
+                                    .child("Jira Desk discovers the authenticated user's assigned or watched issues from Jira; no project name is required. Jira changes are limited to explicitly confirmed comments, assignee changes, and status transitions."),
                             ),
                     )
                     .when_some(error, |this, error| this.child(error))

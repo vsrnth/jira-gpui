@@ -4,6 +4,32 @@ use jira_domain::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Conservative bound for the user-editable Jira scope expression. Account filters and the
+/// adapter-owned ordering are always appended outside this expression.
+pub const MAX_JQL_SCOPE_LENGTH: usize = 2_000;
+pub const DEFAULT_JQL_SCOPE: &str = "issuetype in (Bug, Story, Task, Sub-task) and status not in (Canceled, rejected, Cancelled) and createdDate >= startOfYear()";
+
+pub fn validate_jql_scope(scope: Option<&str>) -> Result<(), &'static str> {
+    let Some(scope) = scope else {
+        return Ok(());
+    };
+    let scope = scope.trim();
+    if scope.is_empty() {
+        return Err("Jira scope cannot be empty");
+    }
+    if scope.len() > MAX_JQL_SCOPE_LENGTH {
+        return Err("Jira scope is too long");
+    }
+    let words = scope
+        .split_whitespace()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if words.windows(2).any(|window| window == ["order", "by"]) {
+        return Err("Jira scope must not contain ORDER BY");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct UserSearchRequest {
     pub site_id: JiraSiteId,
@@ -16,6 +42,12 @@ pub struct IssueFetchRequest {
     pub site_id: JiraSiteId,
     /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
     pub assignees: Option<Vec<AccountId>>,
+    /// Optional remote watcher restriction. When both restrictions are present, Jira returns
+    /// their union (issues assigned to or watched by the supplied accounts).
+    pub watchers: Option<Vec<AccountId>>,
+    /// Optional user-editable Jira scope expression. The Jira adapter validates and
+    /// parenthesizes it before adding account restrictions and stable ordering.
+    pub jql_scope: Option<String>,
     pub updated_since: Option<Timestamp>,
     pub page_cursor: Option<PageCursor>,
     pub page_size: usize,
@@ -241,6 +273,10 @@ pub struct SyncRequest {
     pub user_set_id: UserSetId,
     /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
     pub assignees: Option<Vec<AccountId>>,
+    /// Optional remote watcher restriction. When both restrictions are present, Jira returns
+    /// their union (issues assigned to or watched by the supplied accounts).
+    pub watchers: Option<Vec<AccountId>>,
+    pub jql_scope: Option<String>,
     /// Optional local notification restriction. This does not change the remote fetch or cache
     /// membership; it only allows desktop delivery for incoming issues assigned to these users.
     /// `None` preserves the generic, unfiltered notification behavior.

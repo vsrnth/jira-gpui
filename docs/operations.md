@@ -30,12 +30,26 @@ JIRA_EMAIL=you@example.com
 JIRA_API_TOKEN=your-unscoped-api-token
 ```
 
-The project is fixed to Jira Project. `JIRA_ASSIGNEE_ACCOUNT_IDS` is not
+No project is fixed during onboarding. `JIRA_ASSIGNEE_ACCOUNT_IDS` is not
 required and is not treated as authenticated identity. Environment bootstrap
 constructs the client and opens SQLite but does not set an authenticated user.
 Dashboard initialization resolves `/myself` through that client, then creates
-the authenticated workspace and loads its scoped cache before enabling the
-My-issues view.
+the authenticated assigned-or-watched workspace and loads its scoped cache
+before enabling the view. The active JQL scope defaults to Jira's generic
+issue-type/status/created-date expression and may be replaced by a validated,
+trimmed expression up to 2,000 bytes; `ORDER BY` is reserved for the adapter's
+stable pagination ordering. Scope changes use a fingerprinted user-set and
+start a quiet baseline rather than reusing another scope's cursor.
+
+The Settings surface is available only after a live Jira workspace is ready.
+It stores the exact normalized default as `null` and custom scopes as trimmed
+text in the private atomic `preferences.json` file. Missing, unreadable, or
+invalid preferences fall back to the documented default with a safe warning;
+they never block Jira startup. `Save and refresh` validates locally, switches
+to the scope-specific cache partition, waits for a successful Jira sync commit,
+then saves the preference. Jira rejection or a local persistence failure rolls
+back to the previous scope and preference without applying the new cache to the
+dashboard. The editor keeps the failed expression visible for correction.
 
 This API-token path is for internal development and local testing. Public
 distribution still needs Atlassian OAuth 2.0 3LO with scoped, revocable
@@ -62,6 +76,12 @@ successful manual refresh restarts it.
 Cancellation is propagated through Jira pagination, detail loading, and exact
 key lookup. A failed remote refresh leaves the last committed cache available.
 Mark-read operations change only local state.
+
+Remote membership uses `(assignee OR watcher)` for the authenticated account.
+The cache trusts that user-set membership so watched issues remain visible.
+Freedesktop desktop alerts intentionally remain assigned-only; watched issues
+are available in the dashboard and local update feed without silently widening
+OS alert delivery.
 
 ## Image diagnostics
 

@@ -28,8 +28,9 @@ use gpui_component::{
     v_flex,
 };
 use jira_application::{
-    ApplicationError, AttachmentDownloadRequest, CancellationToken, DefaultPollingPolicy,
-    IssueLocator, IssueTransition, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort, SyncMode,
+    ApplicationError, AttachmentDownloadRequest, CancellationToken, DEFAULT_JQL_SCOPE,
+    DefaultPollingPolicy, IssueLocator, IssueTransition, JiraCommentWritePort, JiraIssueEditPort,
+    JiraReadPort, MAX_JQL_SCOPE_LENGTH, SyncMode,
 };
 
 use jira_domain::{
@@ -43,6 +44,7 @@ use crate::{
         ImageSignature, ImageSource, ImageStateReason, ResponseMime,
     },
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
+    local_data::{LocalPreferences, load_preferences, normalize_issue_jql_scope, save_preferences},
     presentation::{
         IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
         UpdateGroupViewModel, UpdateViewModel, issue_views_for_filter, update_groups_for_events,
@@ -850,10 +852,25 @@ fn authenticated_identity(user: Option<User>) -> (Vec<User>, Option<AccountId>) 
     (user.into_iter().collect(), account)
 }
 
+fn project_label(issues: &[Issue]) -> String {
+    let mut projects = issues
+        .iter()
+        .map(|issue| issue.project.name.clone())
+        .collect::<Vec<_>>();
+    projects.sort();
+    projects.dedup();
+    match projects.as_slice() {
+        [] => "Jira projects".to_owned(),
+        [project] => project.clone(),
+        projects => format!("{} Jira projects", projects.len()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     Issues,
     Updates,
+    Settings,
 }
 
 struct RefreshNotification;
@@ -1325,6 +1342,12 @@ pub struct Dashboard {
     attachment_download_generation: u64,
     attachment_download_cancellation: Option<CancellationToken>,
     attachment_download_task: Option<gpui::Task<()>>,
+    settings_input: Option<Entity<TextareaState>>,
+    settings_subscriptions: Vec<Subscription>,
+    settings_scope_text: String,
+    settings_warning: Option<String>,
+    settings_feedback: Option<String>,
+    settings_task: Option<gpui::Task<()>>,
 }
 
 impl Dashboard {
@@ -1403,6 +1426,12 @@ impl Dashboard {
             attachment_download_generation: 0,
             attachment_download_cancellation: None,
             attachment_download_task: None,
+            settings_input: None,
+            settings_subscriptions: Vec::new(),
+            settings_scope_text: DEFAULT_JQL_SCOPE.to_owned(),
+            settings_warning: None,
+            settings_feedback: None,
+            settings_task: None,
         }
     }
 
@@ -1427,11 +1456,11 @@ impl Dashboard {
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
             users,
-            workspace_name: "Jira Project".to_owned(),
+            workspace_name: "Jira projects".to_owned(),
             workspace_members: if initial_authenticated_account.is_some() {
                 "Authenticated Jira account".to_owned()
             } else {
-                "Environment bootstrap · My issues unavailable".to_owned()
+                "Environment bootstrap · Assigned or watched view unavailable".to_owned()
             },
             site_label: session.site_label,
             mode_label:
@@ -1482,6 +1511,12 @@ impl Dashboard {
             attachment_download_generation: 0,
             attachment_download_cancellation: None,
             attachment_download_task: None,
+            settings_input: None,
+            settings_subscriptions: Vec::new(),
+            settings_scope_text: DEFAULT_JQL_SCOPE.to_owned(),
+            settings_warning: None,
+            settings_feedback: None,
+            settings_task: None,
         };
 
         let site_id = session.site_id;
@@ -1497,17 +1532,39 @@ impl Dashboard {
             .await
             {
                 Ok(authenticated_user) => {
+                    let (saved_scope, preference_warning) = match load_preferences() {
+                        Ok(preferences) => {
+                            match normalize_issue_jql_scope(preferences.issue_jql_scope) {
+                                Ok(scope) => (scope, None),
+                                Err(_) => (
+                                    None,
+                                    Some(
+                                        "Saved Jira scope was invalid; using the default scope"
+                                            .to_owned(),
+                                    ),
+                                ),
+                            }
+                        }
+                        Err(_) => (
+                            None,
+                            Some(
+                                "Saved Jira settings could not be read; using the default scope"
+                                    .to_owned(),
+                            ),
+                        ),
+                    };
                     let authenticated_account = authenticated_user.account_id.clone();
                     let jira_read: Arc<dyn JiraReadPort> = jira.clone();
                     let jira_comment_write: Arc<dyn JiraCommentWritePort> = jira.clone();
                     let jira_issue_edit: Arc<dyn JiraIssueEditPort> = jira.clone();
-                    match LiveWorkspace::initialize_with_writers(
+                    match LiveWorkspace::initialize_with_writers_and_scope(
                         site_id,
                         Some(authenticated_account),
                         jira_read,
                         jira_comment_write,
                         jira_issue_edit,
                         cache,
+                        saved_scope,
                     )
                     .await
                     {
@@ -1516,7 +1573,9 @@ impl Dashboard {
                             workspace
                                 .load_cached_for_authenticated_account()
                                 .await
-                                .map(|cached| (workspace, cached, authenticated_user))
+                                .map(|cached| {
+                                    (workspace, cached, authenticated_user, preference_warning)
+                                })
                                 .map_err(|error| safe_sync_error(&error).to_owned())
                         }
                         Err(error) => Err(safe_sync_error(&error).to_owned()),
@@ -1524,14 +1583,23 @@ impl Dashboard {
                 }
                 Err(error) => Err(error.to_string()),
             };
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.operation_in_progress = false;
                 match result {
-                    Ok((workspace, cached, authenticated_user)) => {
+                    Ok((workspace, cached, authenticated_user, preference_warning)) => {
                         let issue_count = cached.issues.len();
                         let update_count = cached.events.len();
                         this.users = vec![authenticated_user.clone()];
                         this.authenticated_account = Some(authenticated_user.account_id.clone());
+                        this.settings_scope_text = workspace
+                            .jql_scope()
+                            .unwrap_or_else(|| DEFAULT_JQL_SCOPE.to_owned());
+                        if let Some(input) = this.settings_input.clone() {
+                            input.update(cx, |input, cx| {
+                                input.set_value(&this.settings_scope_text, window, cx)
+                            });
+                        }
+                        this.settings_warning = preference_warning;
                         this.workspace_members = "Authenticated Jira account".to_owned();
                         this.workspace = Some(workspace);
                         this.apply_cached(cached, cx);
@@ -1633,7 +1701,7 @@ impl Dashboard {
         dashboard.selected_issue = None;
         dashboard.invalidate_detail_selection();
         dashboard.users.clear();
-        dashboard.workspace_name = "Jira Project".to_owned();
+        dashboard.workspace_name = "Jira projects".to_owned();
         dashboard.workspace_members = "Connect Jira to load this view".to_owned();
         dashboard.site_label = "Jira site unavailable".to_owned();
         dashboard.mode_label = "Startup configuration error".to_owned();
@@ -1648,6 +1716,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.domain_issues = issues;
+        self.workspace_name = project_label(&self.domain_issues);
         self.rebuild_issue_views(refresh_detail, cx);
     }
 
@@ -3165,7 +3234,7 @@ impl Dashboard {
                     })
                     .child(self.nav_item(
                         "Issues",
-                        self.issues.len(),
+                        Some(self.issues.len()),
                         self.section == Section::Issues,
                         Section::Issues,
                         rail,
@@ -3173,9 +3242,17 @@ impl Dashboard {
                     ))
                     .child(self.nav_item(
                         "Local updates",
-                        self.unread_count(),
+                        Some(self.unread_count()),
                         self.section == Section::Updates,
                         Section::Updates,
+                        rail,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        "Settings",
+                        None,
+                        self.section == Section::Settings,
+                        Section::Settings,
                         rail,
                         cx,
                     ))
@@ -3189,7 +3266,7 @@ impl Dashboard {
                                 .text_xs()
                                 .font_semibold()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Jira Project VIEW"),
+                                .child("JIRA ACCOUNT VIEW"),
                         )
                     })
                     .when(!rail, |this| {
@@ -3243,7 +3320,7 @@ impl Dashboard {
     fn nav_item(
         &self,
         label: &'static str,
-        count: usize,
+        count: Option<usize>,
         selected: bool,
         section: Section,
         rail: bool,
@@ -3252,6 +3329,7 @@ impl Dashboard {
         let icon = match section {
             Section::Issues => IconName::LayoutDashboard,
             Section::Updates => IconName::Inbox,
+            Section::Settings => IconName::Settings,
         };
         let visual = if rail {
             Icon::new(icon).into_any_element()
@@ -3284,7 +3362,7 @@ impl Dashboard {
                 cx.notify();
             }))
             .child(visual)
-            .when(!rail, |this| {
+            .when(!rail && count.is_some(), |this| {
                 this.child(
                     div()
                         .min_w(px(26.))
@@ -3294,7 +3372,7 @@ impl Dashboard {
                         .bg(cx.theme().muted)
                         .text_center()
                         .text_xs()
-                        .child(count.to_string()),
+                        .child(count.unwrap_or_default().to_string()),
                 )
             })
     }
@@ -3314,24 +3392,27 @@ impl Dashboard {
                     .justify_between()
                     .child(div().min_w_0().truncate().text_lg().font_semibold().child(
                         match self.section {
-                            Section::Issues => "Jira Project issues",
+                            Section::Issues => "Jira issues",
                             Section::Updates => "Local updates",
+                            Section::Settings => "Settings",
                         },
                     ))
-                    .child(
-                        Button::new("refresh")
-                            .compact()
-                            .primary()
-                            .label(if self.operation_in_progress {
-                                "Refreshing…"
-                            } else {
-                                "Refresh"
-                            })
-                            .loading(self.operation_in_progress)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.begin_refresh(window, cx)),
-                            ),
-                    ),
+                    .when(self.section != Section::Settings, |this| {
+                        this.child(
+                            Button::new("refresh")
+                                .compact()
+                                .primary()
+                                .label(if self.operation_in_progress {
+                                    "Refreshing…"
+                                } else {
+                                    "Refresh"
+                                })
+                                .loading(self.operation_in_progress)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.begin_refresh(window, cx)
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -3362,7 +3443,7 @@ impl Dashboard {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(div().min_w_0().truncate().child(format!(
-                        "{} matching Jira Project issues · My issues",
+                        "{} matching Jira issues · Assigned or watched",
                         self.issues.len(),
                     )))
                     .into_any_element()
@@ -3377,7 +3458,7 @@ impl Dashboard {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(div().min_w_0().truncate().child(format!(
-                        "{} matching Jira Project issues · My issues",
+                        "{} matching Jira issues · Assigned or watched",
                         self.issues.len(),
                     )))
                     .child(div().flex_shrink_0().child("Updated newest first"))
@@ -4919,6 +5000,218 @@ impl Dashboard {
             )
     }
 
+    fn ensure_settings_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(7)
+                .placeholder("project = YOUR_PROJECT")
+        });
+        input.update(cx, |input, cx| {
+            input.set_value(&self.settings_scope_text, window, cx)
+        });
+        self.settings_subscriptions.push(cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.settings_scope_text = input.read(cx).value().to_string();
+                    this.settings_feedback = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.settings_input = Some(input);
+    }
+
+    fn reset_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_scope_text = DEFAULT_JQL_SCOPE.to_owned();
+        self.settings_feedback = None;
+        if let Some(input) = self.settings_input.clone() {
+            input.update(cx, |input, cx| {
+                input.set_value(DEFAULT_JQL_SCOPE, window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    fn begin_save_settings(&mut self, cx: &mut Context<Self>) {
+        if self.operation_in_progress {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.settings_feedback = Some("Connect Jira before applying a scope".to_owned());
+            cx.notify();
+            return;
+        };
+        let entered = self.settings_scope_text.clone();
+        let previous_scope = workspace.jql_scope();
+        self.operation_in_progress = true;
+        self.settings_feedback = Some("Applying scope and refreshing Jira…".to_owned());
+        cx.notify();
+
+        let task = cx.spawn(async move |this, cx| {
+            let normalized = normalize_issue_jql_scope(Some(entered.clone()));
+            let result = async {
+                let normalized = normalized
+                    .map_err(|_| "Scope is invalid; check the expression and ORDER BY rule")?;
+                workspace
+                    .set_jql_scope(normalized.clone())
+                    .await
+                    .map_err(|_| "Scope could not be prepared locally")?;
+                let refreshed = match workspace.refresh(&CancellationToken::new()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if workspace.set_jql_scope(previous_scope.clone()).await.is_err() {
+                            return Err("Jira rejected the scope and the previous scope could not be restored");
+                        }
+                        let _ = workspace.load_cached_for_authenticated_account().await;
+                        return Err("Jira rejected the scope; the previous scope remains active");
+                    }
+                };
+                if save_preferences(&LocalPreferences {
+                    issue_jql_scope: normalized.clone(),
+                })
+                .is_err()
+                {
+                    if workspace.set_jql_scope(previous_scope.clone()).await.is_err() {
+                        return Err("Settings could not be saved and the previous scope could not be restored");
+                    }
+                    let _ = workspace.load_cached_for_authenticated_account().await;
+                    return Err("Scope applied remotely, but settings could not be saved locally");
+                }
+                Ok((refreshed, normalized))
+            }
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.operation_in_progress = false;
+                match result {
+                    Ok((refreshed, normalized)) => {
+                        this.settings_scope_text = normalized
+                            .clone()
+                            .unwrap_or_else(|| DEFAULT_JQL_SCOPE.to_owned());
+                        this.settings_warning = None;
+                        this.settings_feedback = Some("Scope saved and Jira refreshed".to_owned());
+                        this.sync_message = refresh_complete_message(&refreshed);
+                        this.apply_cached(refreshed.cached, cx);
+                        this.start_automatic_polling(cx);
+                    }
+                    Err(message) => {
+                        if message.contains("could not be restored") {
+                            // Never leave the old cache paired with an unknown active scope.
+                            this.workspace = None;
+                            this.polling_task.take();
+                            this.automatic_polling_paused = true;
+                            this.domain_issues.clear();
+                            this.issues.clear();
+                            this.update_groups.clear();
+                            this.selected_issue = None;
+                        }
+                        this.settings_feedback = Some(message.to_owned());
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.settings_task = Some(task);
+    }
+
+    fn render_settings(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+        let input = self.settings_input.clone();
+        let text = self.settings_scope_text.clone();
+        let chars = text.chars().count();
+        let bytes = text.len();
+        let validation = normalize_issue_jql_scope(Some(text.clone())).err();
+        let live = self.workspace.is_some();
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .justify_center()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(820.))
+                            .p(px(layout.list_padding()))
+                            .gap_3()
+                            .child(div().text_xl().font_semibold().child("Jira settings"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Choose the Jira scope used for your assigned or watched account view."),
+                            )
+                            .when_some(input, |this, input| {
+                                this.child(
+                                    Textarea::new(&input)
+                                        .w_full()
+                                        .aria_label("JQL scope")
+                                        .disabled(!live || self.operation_in_progress),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if validation.is_some() {
+                                        cx.theme().danger
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .child(format!("{chars} characters · {bytes} bytes · maximum {MAX_JQL_SCOPE_LENGTH} bytes")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("This is a scope expression. Jira Desk appends assigned-or-watched account membership, incremental updated overlap, and ORDER BY updated DESC. Do not include ORDER BY."),
+                            )
+                            .when(!live, |this| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().warning)
+                                        .child("Settings become available after a live Jira workspace is connected."),
+                                )
+                            })
+                            .when_some(self.settings_warning.clone(), |this, warning| {
+                                this.child(div().text_sm().text_color(cx.theme().warning).child(warning))
+                            })
+                            .when_some(validation.map(|_| format!("Scope is invalid: it must be non-empty, within {MAX_JQL_SCOPE_LENGTH} bytes, and contain no ORDER BY")), |this, message| {
+                                this.child(div().text_sm().text_color(cx.theme().danger).child(message))
+                            })
+                            .when_some(self.settings_feedback.clone(), |this, feedback| {
+                                this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(feedback))
+                            })
+                            .child(
+                                h_flex()
+                                    .when(layout.is_mobile(), |this| this.flex_col())
+                                    .gap_2()
+                                    .child(
+                                        Button::new("save-settings")
+                                            .primary()
+                                            .label("Save and refresh")
+                                            .disabled(!live || self.operation_in_progress || validation.is_some())
+                                            .on_click(cx.listener(|this, _, _, cx| this.begin_save_settings(cx))),
+                                    )
+                                    .child(
+                                        Button::new("reset-settings")
+                                            .ghost()
+                                            .label("Use default scope")
+                                            .disabled(!live || self.operation_in_progress)
+                                            .on_click(cx.listener(|this, _, window, cx| this.reset_settings_editor(window, cx))),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
     fn update_group_card(
         &self,
         index: usize,
@@ -5112,6 +5405,17 @@ impl Dashboard {
                         cx.notify();
                     })),
             )
+            .child(
+                Button::new("mobile-settings")
+                    .compact()
+                    .when(self.section == Section::Settings, |this| this.primary())
+                    .label("Settings")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.section = Section::Settings;
+                        this.mobile_detail_open = false;
+                        cx.notify();
+                    })),
+            )
     }
 }
 
@@ -5120,10 +5424,12 @@ impl Render for Dashboard {
         self.ensure_status_combobox(window, cx);
         self.ensure_search_input(window, cx);
         self.ensure_comment_input(window, cx);
+        self.ensure_settings_input(window, cx);
         let layout = layout_for_width(f32::from(window.viewport_size().width));
         let content = match self.section {
             Section::Issues => self.render_issues(layout, cx).into_any_element(),
             Section::Updates => self.render_updates(layout, cx).into_any_element(),
+            Section::Settings => self.render_settings(layout, cx).into_any_element(),
         };
 
         let main = v_flex()
@@ -5207,6 +5513,18 @@ mod tests {
 
         groups[0].unread = false;
         assert!(filtered_update_group_indices(&groups, UpdateFilter::Unread).is_empty());
+    }
+
+    #[test]
+    fn live_project_label_is_inferred_from_unique_projects() {
+        assert_eq!(project_label(&[]), "Jira projects");
+        let mut issues = sample_issues();
+        issues.truncate(1);
+        assert_eq!(project_label(&issues), issues[0].project.name);
+        let mut second = issues[0].clone();
+        second.project.name = "Another project".to_owned();
+        issues.push(second);
+        assert_eq!(project_label(&issues), "2 Jira projects");
     }
 
     #[test]

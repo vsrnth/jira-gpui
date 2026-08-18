@@ -7,7 +7,7 @@ use crate::{
     ApplicationError, ApplicationEvent, ApplicationEventSink, CancellationToken, ChangeSet, Clock,
     IssueCachePort, IssueDiffer, IssueFetchRequest, JiraReadPort, NotificationPolicy,
     NotificationPort, NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest,
-    SyncState, enrich_with_changelog,
+    SyncState, enrich_with_changelog, validate_jql_scope,
 };
 
 const MAX_CHANGELOG_ISSUES_PER_REQUEST: usize = 1_000;
@@ -141,6 +141,8 @@ impl SyncService {
                     &IssueFetchRequest {
                         site_id: request.site_id.clone(),
                         assignees: request.assignees.clone(),
+                        watchers: request.watchers.clone(),
+                        jql_scope: request.jql_scope.clone(),
                         updated_since,
                         page_cursor,
                         page_size: self.config.page_size,
@@ -330,11 +332,20 @@ impl SyncService {
     }
 
     fn validate(&self, request: &SyncRequest) -> Result<(), ApplicationError> {
+        validate_jql_scope(request.jql_scope.as_deref())
+            .map_err(ApplicationError::invalid_input)?;
         if let Some(assignees) = &request.assignees
             && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
         {
             return Err(ApplicationError::invalid_input(
                 "sync assignees must be unique",
+            ));
+        }
+        if let Some(watchers) = &request.watchers
+            && watchers.iter().collect::<HashSet<_>>().len() != watchers.len()
+        {
+            return Err(ApplicationError::invalid_input(
+                "sync watchers must be unique",
             ));
         }
         if let Some(assignees) = &request.notification_assignees
@@ -723,6 +734,8 @@ mod tests {
                 site_id,
                 user_set_id,
                 assignees: None,
+                watchers: None,
+                jql_scope: None,
                 notification_assignees: None,
                 mode: SyncMode::Baseline,
             },
@@ -803,6 +816,8 @@ mod tests {
                 site_id,
                 user_set_id,
                 assignees: Some(vec![account_id.clone()]),
+                watchers: Some(vec![account_id.clone()]),
+                jql_scope: None,
                 notification_assignees: None,
                 mode: SyncMode::Incremental,
             },
@@ -818,7 +833,8 @@ mod tests {
             requests[0].updated_since,
             Some(datetime!(2026-08-16 11:55 UTC))
         );
-        assert_eq!(requests[0].assignees, Some(vec![account_id]));
+        assert_eq!(requests[0].assignees, Some(vec![account_id.clone()]));
+        assert_eq!(requests[0].watchers, Some(vec![account_id.clone()]));
         assert_eq!(
             cache.deliveries.lock().expect("deliveries lock").as_slice(),
             &[(
@@ -869,6 +885,8 @@ mod tests {
                 site_id,
                 user_set_id,
                 assignees: None,
+                watchers: None,
+                jql_scope: None,
                 notification_assignees: Some(vec![account_id]),
                 mode: SyncMode::Incremental,
             },
@@ -943,6 +961,8 @@ mod tests {
                 site_id,
                 user_set_id,
                 assignees: None,
+                watchers: None,
+                jql_scope: None,
                 notification_assignees: Some(vec![account_id]),
                 mode: SyncMode::Incremental,
             },

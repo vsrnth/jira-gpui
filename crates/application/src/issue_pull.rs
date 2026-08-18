@@ -5,7 +5,10 @@ use std::{
 
 use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp};
 
-use crate::{ApplicationError, CancellationToken, IssueFetchRequest, JiraReadPort, PageCursor};
+use crate::{
+    ApplicationError, CancellationToken, IssueFetchRequest, JiraReadPort, PageCursor,
+    validate_jql_scope,
+};
 
 /// Safety limits for a manual issue pull.
 ///
@@ -27,12 +30,15 @@ impl Default for IssuePullConfig {
     }
 }
 
-/// A read-only issue pull for one Jira site with an optional remote assignee restriction.
+/// A read-only issue pull for one Jira site with optional remote assignee and watcher
+/// restrictions. When both are present, Jira returns their union.
 #[derive(Clone, Debug)]
 pub struct IssuePullRequest {
     pub site_id: JiraSiteId,
     /// Optional remote restriction. `None` fetches all issues in the configured Jira scope.
     pub assignees: Option<Vec<AccountId>>,
+    pub watchers: Option<Vec<AccountId>>,
+    pub jql_scope: Option<String>,
     pub updated_since: Option<Timestamp>,
 }
 
@@ -105,6 +111,8 @@ impl IssuePullService {
                     &IssueFetchRequest {
                         site_id: request.site_id.clone(),
                         assignees: request.assignees.clone(),
+                        watchers: request.watchers.clone(),
+                        jql_scope: request.jql_scope.clone(),
                         updated_since: request.updated_since,
                         page_cursor: page_cursor.clone(),
                         page_size: self.config.page_size,
@@ -133,11 +141,20 @@ impl IssuePullService {
     }
 
     fn validate(&self, request: &IssuePullRequest) -> Result<(), ApplicationError> {
+        validate_jql_scope(request.jql_scope.as_deref())
+            .map_err(ApplicationError::invalid_input)?;
         if let Some(assignees) = &request.assignees
             && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
         {
             return Err(ApplicationError::invalid_input(
                 "issue pull assignees must be unique",
+            ));
+        }
+        if let Some(watchers) = &request.watchers
+            && watchers.iter().collect::<HashSet<_>>().len() != watchers.len()
+        {
+            return Err(ApplicationError::invalid_input(
+                "issue pull watchers must be unique",
             ));
         }
         if !(1..=1_000).contains(&self.config.page_size) || self.config.max_pages == 0 {
@@ -275,6 +292,8 @@ mod tests {
         IssuePullRequest {
             site_id: site(),
             assignees: Some(vec![assignee()]),
+            watchers: None,
+            jql_scope: None,
             updated_since: Some(datetime!(2026-08-16 10:00 UTC)),
         }
     }
@@ -384,6 +403,7 @@ mod tests {
         assert_eq!(requests[1].page_cursor, Some(PageCursor("next".into())));
         assert_eq!(requests[0].updated_since, request().updated_since);
         assert_eq!(requests[0].assignees, Some(vec![assignee()]));
+        assert_eq!(requests[0].watchers, None);
     }
 
     #[test]
@@ -400,6 +420,7 @@ mod tests {
 
         let mut explicitly_empty = request();
         explicitly_empty.assignees = Some(Vec::new());
+        explicitly_empty.watchers = Some(Vec::new());
         assert!(block_on(service.pull(explicitly_empty, &CancellationToken::new())).is_ok());
 
         let mut duplicate = request();
@@ -411,6 +432,15 @@ mod tests {
         assert_eq!(
             block_on(service.pull(duplicate, &CancellationToken::new()))
                 .expect_err("duplicate assignees")
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+
+        let mut duplicate_watchers = request();
+        duplicate_watchers.watchers = Some(vec![assignee(), assignee()]);
+        assert_eq!(
+            block_on(service.pull(duplicate_watchers, &CancellationToken::new()))
+                .expect_err("duplicate watchers")
                 .kind(),
             ErrorKind::InvalidInput
         );

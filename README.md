@@ -1,7 +1,7 @@
 # Jira Desk
 
 Jira Desk is a focused Jira Cloud desktop client for keeping an authenticated
-user's assigned issues visible. It keeps a local cache, detects changes, and
+user's assigned or watched issues visible. It keeps a local cache, detects changes, and
 shows a local update feed without turning Jira into a second system of record.
 
 Phase 1 targets Linux on native Wayland and ships as an x86_64 AppImage.
@@ -11,8 +11,10 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
 
 - Authenticates with a Jira Cloud site and derives the user from Jira's
   `/myself` endpoint; onboarding never asks for an account ID.
-- Synchronizes the Jira Project project, then shows only the authenticated
-  user's issues in the dashboard.
+- Synchronizes the configured Jira scope across projects, returning issues
+  assigned to or watched by the authenticated user.
+- Infers the project label from returned issues; onboarding does not contain
+  project-specific choices.
 - Adapts from a mobile single-pane view to compact and full desktop layouts.
 - Filters one or more status categories, searches issue keys/summaries locally,
   and can perform a cancellable exact-key Jira lookup for an issue outside the
@@ -32,6 +34,8 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
 - Keeps a durable local update feed grouped by ticket, with local per-ticket
   and global mark-read actions, in-app operation feedback, and best-effort OS
   desktop notifications.
+- Desktop alerts remain limited to assigned issues; watched issues appear in
+  the list and local feed without expanding OS alerts.
 - Lets the user explicitly choose and confirm an assignee change or one of the
   issue's currently available workflow transitions.
 - Provides client-side Wayland title-bar controls and a local SQLite cache.

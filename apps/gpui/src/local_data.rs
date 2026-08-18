@@ -2,20 +2,54 @@
 
 use std::{
     env, fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use jira_application::{DEFAULT_JQL_SCOPE, validate_jql_scope};
 use jira_storage::SqliteStore;
 
 const APP_DIRECTORY: &str = "jira-desk";
 const DATABASE_FILENAME: &str = "jira-desk.sqlite3";
+const PREFERENCES_FILENAME: &str = "preferences.json";
+const MAX_PREFERENCES_BYTES: usize = 64 * 1024;
 const ENV_XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 const ENV_XDG_STATE_HOME: &str = "XDG_STATE_HOME";
 const ENV_HOME: &str = "HOME";
+static PREFERENCES_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LocalDataError;
+
+/// User-controlled local settings. Credentials and other connection state do
+/// not belong in this file; those remain session-only and are never persisted.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct LocalPreferences {
+    #[serde(default)]
+    pub(crate) issue_jql_scope: Option<String>,
+}
+
+/// Normalize the persisted scope into the representation used by the session and user-set key.
+/// The exact default is stored as `None`, while custom scopes retain trimmed text.
+pub(crate) fn normalize_issue_jql_scope(
+    scope: Option<String>,
+) -> Result<Option<String>, LocalDataError> {
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    validate_jql_scope(Some(&scope)).map_err(|_| LocalDataError)?;
+    let scope = scope.trim().to_owned();
+    if scope == DEFAULT_JQL_SCOPE {
+        Ok(None)
+    } else {
+        Ok(Some(scope))
+    }
+}
 
 pub(crate) fn open_store() -> Result<Arc<SqliteStore>, LocalDataError> {
     let xdg_data_home = env::var_os(ENV_XDG_DATA_HOME).map(PathBuf::from);
@@ -24,6 +58,144 @@ pub(crate) fn open_store() -> Result<Arc<SqliteStore>, LocalDataError> {
     SqliteStore::open(app_directory.join(DATABASE_FILENAME))
         .map(Arc::new)
         .map_err(|_| LocalDataError)
+}
+
+/// Load local preferences from the private Jira Desk data directory.
+pub(crate) fn load_preferences() -> Result<LocalPreferences, LocalDataError> {
+    let xdg_data_home = env::var_os(ENV_XDG_DATA_HOME).map(PathBuf::from);
+    let home = env::var_os(ENV_HOME).map(PathBuf::from);
+    let app_directory = prepare_app_directory(xdg_data_home.as_deref(), home.as_deref())?;
+    load_preferences_from_directory(&app_directory)
+}
+
+/// Save local preferences atomically in the private Jira Desk data directory.
+pub(crate) fn save_preferences(preferences: &LocalPreferences) -> Result<(), LocalDataError> {
+    let xdg_data_home = env::var_os(ENV_XDG_DATA_HOME).map(PathBuf::from);
+    let home = env::var_os(ENV_HOME).map(PathBuf::from);
+    let app_directory = prepare_app_directory(xdg_data_home.as_deref(), home.as_deref())?;
+    save_preferences_in_directory(&app_directory, preferences)
+}
+
+fn preferences_path(directory: &Path) -> PathBuf {
+    directory.join(PREFERENCES_FILENAME)
+}
+
+fn load_preferences_from_directory(directory: &Path) -> Result<LocalPreferences, LocalDataError> {
+    let path = preferences_path(directory);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LocalPreferences::default());
+        }
+        Err(_) => return Err(LocalDataError),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(LocalDataError);
+    }
+    if metadata.len() > MAX_PREFERENCES_BYTES as u64 {
+        return Err(LocalDataError);
+    }
+
+    let file = fs::File::open(&path).map_err(|_| LocalDataError)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_PREFERENCES_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocalDataError)?;
+    if bytes.len() > MAX_PREFERENCES_BYTES {
+        return Err(LocalDataError);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| LocalDataError)
+}
+
+fn save_preferences_in_directory(
+    directory: &Path,
+    preferences: &LocalPreferences,
+) -> Result<(), LocalDataError> {
+    let bytes = serde_json::to_vec(preferences).map_err(|_| LocalDataError)?;
+    if bytes.len() > MAX_PREFERENCES_BYTES {
+        return Err(LocalDataError);
+    }
+
+    let path = preferences_path(directory);
+    reject_non_regular_destination(&path)?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| LocalDataError)?
+        .as_nanos();
+    let process_id = std::process::id();
+    let mut temporary_path = None;
+    let mut temporary_file = None;
+    for attempt in 0..8u8 {
+        let counter = PREFERENCES_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = directory.join(format!(
+            ".{PREFERENCES_FILENAME}.{process_id}-{timestamp}-{counter}-{attempt}.tmp"
+        ));
+        match restricted_create_options().open(&candidate) {
+            Ok(file) => {
+                temporary_path = Some(candidate);
+                temporary_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(LocalDataError),
+        }
+    }
+    let (temporary_path, mut temporary_file) = match (temporary_path, temporary_file) {
+        (Some(path), Some(file)) => (path, file),
+        (path, _) => {
+            if let Some(path) = path {
+                let _ = fs::remove_file(path);
+            }
+            return Err(LocalDataError);
+        }
+    };
+    let result = (|| {
+        temporary_file
+            .write_all(&bytes)
+            .map_err(|_| LocalDataError)?;
+        temporary_file.flush().map_err(|_| LocalDataError)?;
+        temporary_file.sync_all().map_err(|_| LocalDataError)?;
+        drop(temporary_file);
+
+        // Re-check immediately before replacement. On Unix rename replaces the
+        // directory entry itself, so a symlink can never be followed here.
+        reject_non_regular_destination(&path)?;
+        fs::rename(&temporary_path, &path).map_err(|_| LocalDataError)?;
+        sync_directory(directory)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn reject_non_regular_destination(path: &Path) -> Result<(), LocalDataError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(LocalDataError)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(LocalDataError),
+    }
+}
+
+fn sync_directory(directory: &Path) -> Result<(), LocalDataError> {
+    fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| LocalDataError)
+}
+
+fn restricted_create_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
 }
 
 pub(crate) fn resolve_app_directory(
@@ -241,5 +413,110 @@ mod tests {
             fs::remove_file(state).expect("remove symlink");
             fs::remove_dir_all(root).expect("cleanup");
         }
+    }
+
+    #[test]
+    fn missing_preferences_use_safe_defaults() {
+        let root = temporary_root("preferences-default");
+        let app = prepare_app_directory(Some(&root), None).expect("app directory");
+        assert_eq!(
+            load_preferences_from_directory(&app).expect("preferences"),
+            LocalPreferences::default()
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn preference_scope_normalization_stores_default_as_none() {
+        assert_eq!(normalize_issue_jql_scope(None).unwrap(), None);
+        assert_eq!(
+            normalize_issue_jql_scope(Some(format!("  {DEFAULT_JQL_SCOPE}  "))).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_issue_jql_scope(Some(" project = APP ".to_owned())).unwrap(),
+            Some("project = APP".to_owned())
+        );
+        assert!(
+            normalize_issue_jql_scope(Some("project = APP ORDER BY updated".to_owned())).is_err()
+        );
+    }
+
+    #[test]
+    fn preferences_round_trip_through_json() {
+        let root = temporary_root("preferences-round-trip");
+        let app = prepare_app_directory(Some(&root), None).expect("app directory");
+        let expected = LocalPreferences {
+            issue_jql_scope: Some("project = DEMO ORDER BY updated DESC".to_owned()),
+        };
+        save_preferences_in_directory(&app, &expected).expect("save preferences");
+        assert_eq!(
+            load_preferences_from_directory(&app).expect("load preferences"),
+            expected
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn malformed_preferences_are_rejected() {
+        let root = temporary_root("preferences-malformed");
+        let app = prepare_app_directory(Some(&root), None).expect("app directory");
+        fs::write(preferences_path(&app), b"{not-json").expect("write malformed preferences");
+        assert!(load_preferences_from_directory(&app).is_err());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn oversized_preferences_are_rejected() {
+        let root = temporary_root("preferences-oversized");
+        let app = prepare_app_directory(Some(&root), None).expect("app directory");
+        fs::write(
+            preferences_path(&app),
+            vec![b'x'; MAX_PREFERENCES_BYTES + 1],
+        )
+        .expect("write oversized preferences");
+        assert!(load_preferences_from_directory(&app).is_err());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preference_symlinks_are_rejected_without_replacing_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_root("preferences-symlink");
+        let app = prepare_app_directory(Some(&root), None).expect("app directory");
+        let target = root.join("target.json");
+        let expected = LocalPreferences {
+            issue_jql_scope: Some("project = TARGET".to_owned()),
+        };
+        let target_bytes = serde_json::to_vec(&expected).expect("serialize target");
+        fs::write(&target, &target_bytes).expect("write target");
+        symlink(&target, preferences_path(&app)).expect("symlink");
+
+        assert!(load_preferences_from_directory(&app).is_err());
+        assert!(save_preferences_in_directory(&app, &LocalPreferences::default()).is_err());
+        assert_eq!(fs::read(&target).expect("read target"), target_bytes);
+        fs::remove_file(preferences_path(&app)).expect("remove symlink");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_preferences_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temporary_root("preferences-permissions");
+        let app = prepare_app_directory(Some(&root), None).expect("app directory");
+        save_preferences_in_directory(&app, &LocalPreferences::default()).expect("save");
+        assert_eq!(
+            fs::metadata(preferences_path(&app))
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }
