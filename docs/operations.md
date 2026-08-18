@@ -79,9 +79,16 @@ Mark-read operations change only local state.
 
 Remote membership uses `(assignee OR watcher)` for the authenticated account.
 The cache trusts that user-set membership so watched issues remain visible.
-Freedesktop desktop alerts intentionally remain assigned-only; watched issues
-are available in the dashboard and local update feed without silently widening
-OS alert delivery.
+The issue list is ordered by Jira `updated_at` newest first, and issue-detail
+comments are displayed newest first. Freedesktop alerts for ordinary issue
+activity intentionally remain assigned-only; watched issues are available in
+the dashboard and local update feed without silently widening OS alert delivery.
+On later update-emitting syncs, direct ADF mentions of the authenticated account
+also create stable, locally deduplicated comment/update events and desktop
+alerts on watcher-only tickets. Mention detection is read-only, examines only
+the newest 100 comments for snapshots whose `updated_at` changed, and does not
+add Jira writes. Local update metadata contains only a bounded excerpt; full
+comment bodies remain memory-only.
 
 ## Image diagnostics
 
@@ -195,6 +202,17 @@ The local update feed groups detected events by Jira issue. Marking one ticket
 read updates all event IDs in that group in SQLite only; Mark all read applies
 the same local operation to the entire displayed feed. Neither action contacts
 Jira.
+
+The first successful refresh is a quiet baseline. Mention detection starts on
+later syncs that emit updates, so the baseline does not produce comment alerts.
+Desktop delivery counts mean notifications accepted by the desktop notification
+API; they do not guarantee a GNOME or other shell banner.
+
+Settings provides a test desktop notification. It makes no Jira call and writes
+no database event, uses the production Freedesktop app identity, and displays
+the daemon-assigned ID or error category with a timestamp. It writes only
+privacy-safe fixed-schema start/result entries to bounded `diagnostics.jsonl`.
+API acceptance does not prove that GNOME or another shell rendered a banner.
 
 ## Jira write policy
 

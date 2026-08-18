@@ -25,15 +25,26 @@ milestone is an internal/local build, not a public release. See
 - Confirmed comment creation, assignment changes, and status transitions are
   the only Jira writes; each is dispatched once with no automatic retry.
 - The remote sync uses the configured scope and returns the authenticated
-  user's assigned-or-watched issues across projects.
+  user's assigned-or-watched issues across projects, ordered by Jira
+  `updated_at` newest first; issue-detail comments render newest first.
 - Scope changes use a fingerprinted user-set/cache identity and begin with a
-  quiet baseline; desktop alerts remain assigned-only.
+  quiet baseline; ordinary desktop alerts remain assigned-only. Direct ADF
+  mentions of the authenticated account are local comment updates and alerts,
+  including on watcher-only tickets.
 - Settings persist a validated scope atomically only after Jira accepts and
   commits the corresponding refresh; failed changes roll back the active
   scope and leave the prior preference intact.
 - Local cache, update read state, and sync cursors may be written locally.
-- The first successful sync is quiet; later changes produce durable local
-  events and best-effort desktop notifications.
+- The first successful sync is quiet; later update-emitting syncs inspect only
+  the newest 100 comments for direct ADF mentions. Mention events use stable
+  local identity/deduplication, bounded local excerpts, memory-only full
+  bodies, and no Jira writes; desktop delivery counts mean accepted by the
+  desktop notification API, not guaranteed banner display.
+- Settings provides a test desktop notification that makes no Jira call or
+  database event. It uses the production Freedesktop app identity, reports the
+  daemon-assigned ID/error category and timestamp, and writes privacy-safe
+  fixed-schema start/result entries to bounded `diagnostics.jsonl`; API
+  acceptance does not prove GNOME rendered a banner.
 - Credentials are session-only in the current API-token path. Public OAuth and
   secret-store integration remain release work.
 

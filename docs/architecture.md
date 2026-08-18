@@ -38,7 +38,10 @@ for the authenticated account; the dashboard trusts that user-set membership
 and infers project labels from returned issue snapshots. A successful first
 refresh is a quiet baseline. Later polls compare normalized snapshots and
 persist deterministic update events. Desktop alerts retain the narrower
-assigned-only policy.
+assigned-only policy. The issue list follows Jira `updated_at` newest first,
+while issue-detail comments render newest first. A direct ADF mention of the
+authenticated account also emits a local comment update and alert for a
+watcher-only ticket.
 
 ## Dashboard behavior
 
@@ -62,6 +65,8 @@ editor retains the attempted text for correction.
 
 Selecting an issue starts a separate cancellable detail request. The request
 loads the description, all bounded comment pages, and attachment metadata.
+Comments are ordered newest first for display. Full comment bodies remain in
+memory only; local update metadata stores only a bounded display excerpt.
 Description media is resolved conservatively: only a unique alt/filename
 match, or the one-media/one-image case, can trigger an authenticated Jira
 thumbnail read. Jira's documented REST surface does not provide a supported
@@ -109,6 +114,18 @@ snapshot status/assignee/priority/due-date/summary/parent events are
 deduplicated per issue. Changelog failures or unsupported gateways are
 best-effort: the sync still succeeds with one honest generic `IssueUpdated`
 fallback for that issue.
+
+For those same update-emitting snapshots, mention detection is read-only and
+examines only the newest 100 comments. A direct ADF mention of the authenticated
+account creates a stable, locally deduplicated `CommentAdded`/update event and
+desktop alert, including when the issue is watcher-only. Mention detection
+begins on later syncs after the quiet baseline; it adds no Jira writes.
+
+Settings also exposes a test desktop notification. It makes no Jira call or
+database event, uses the production Freedesktop app identity, and reports the
+daemon-assigned ID or error category with a timestamp. Fixed-schema, privacy-safe
+start/result records go to bounded `diagnostics.jsonl`; API acceptance is not
+proof that GNOME rendered a banner.
 
 The local update feed is derived from cache transitions. It is Jira Desk's
 view of detected changes, not Jira's bell or inbox notification stream. Events

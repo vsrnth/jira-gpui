@@ -20,7 +20,8 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   and can perform a cancellable exact-key Jira lookup for an issue outside the
   local cache.
 - Loads selected-issue descriptions, paginated comments, and attachment
-  metadata lazily. Rich Jira text is displayed through a safe subset. A
+  metadata lazily; issue comments are shown newest first. Rich Jira text is
+  displayed through a safe subset. A
   description image is fetched only when its attachment reference resolves
   unambiguously (a unique alt/filename, or the one-media/one-image case), as a
   bounded authenticated thumbnail held in memory. If an ADF Media Services UUID
@@ -35,7 +36,9 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   and global mark-read actions, in-app operation feedback, and best-effort OS
   desktop notifications.
 - Desktop alerts remain limited to assigned issues; watched issues appear in
-  the list and local feed without expanding OS alerts.
+  the list and local feed without expanding ordinary OS alerts. Direct ADF
+  mentions of the authenticated account also create local comment updates and
+  desktop alerts on watcher-only tickets.
 - Lets the user explicitly choose and confirm an assignee change or one of the
   issue's currently available workflow transitions.
 - Provides client-side Wayland title-bar controls and a local SQLite cache.
@@ -71,6 +74,12 @@ remain unchanged and independent of in-app notifications. Image diagnostics use
 only safe structured enums and integers, rotate within 256 KiB plus one backup,
 and exclude credentials, URLs, Jira identifiers, user content, payloads, and
 raw errors.
+
+Settings can send a test desktop notification without making a Jira call or
+creating a database event. The diagnostic uses the production Freedesktop app
+identity, shows the daemon-assigned ID/error category and timestamp, and writes
+privacy-safe fixed-schema start/result entries to bounded `diagnostics.jsonl`.
+API acceptance does not prove that GNOME or another shell rendered a banner.
 
 ## Prerequisites
 
