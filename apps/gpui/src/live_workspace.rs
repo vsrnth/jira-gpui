@@ -62,6 +62,7 @@ pub struct LiveWorkspace {
     issue_editor: IssueEditService,
     cache: Arc<SqliteStore>,
     sync: SyncService,
+    notification_port: Arc<FreedesktopNotificationPort>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,7 +77,7 @@ impl LiveWorkspace {
     pub async fn test_desktop_notification(
         &self,
     ) -> Result<jira_desktop_notifications::DesktopNotificationReceipt, ApplicationError> {
-        FreedesktopNotificationPort.test_notification().await
+        self.notification_port.test_notification().await
     }
 
     /// Open the configured workspace, reusing its local user set when present.
@@ -196,11 +197,12 @@ impl LiveWorkspace {
             cache.clone() as Arc<dyn jira_application::UpdateFeedPort>,
             events.clone(),
         );
+        let notification_port = Arc::new(FreedesktopNotificationPort::new());
         let sync = SyncService::new(
             jira,
             cache_port,
             Arc::new(DefaultIssueDiffer),
-            Arc::new(FreedesktopNotificationPort),
+            notification_port.clone() as Arc<dyn jira_application::NotificationPort>,
             Arc::new(DefaultDesktopNotificationPolicy),
             Arc::new(SystemClock),
             events,
@@ -222,6 +224,7 @@ impl LiveWorkspace {
             issue_editor,
             cache,
             sync,
+            notification_port,
         })
     }
 
