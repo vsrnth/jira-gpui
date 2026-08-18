@@ -5,12 +5,13 @@
 //! turns that safe projection into ordinary GPUI elements; links remain visibly
 //! styled but inert.
 
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{collections::HashMap, ops::Range, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ElementId, Hsla, Image, ImageSource as GpuiImageSource,
-    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
+    AnyElement, App, ElementId, FontStyle, FontWeight, HighlightStyle, Hsla, Image,
+    ImageSource as GpuiImageSource, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, StrikethroughStyle,
+    Styled as _, StyledImage as _, StyledText, UnderlineStyle, Window, div, img, px,
 };
 use gpui_component::{
     Icon, IconName, StyledExt as _, button::Button, h_flex, scroll::ScrollableElement as _,
@@ -162,7 +163,7 @@ impl<const N: usize> From<[(String, RichImageRenderState); N]> for RichImageRend
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RichTextPalette {
     pub foreground: Hsla,
     pub muted: Hsla,
@@ -640,35 +641,202 @@ fn render_inlines(
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
-    let mut lines: Vec<Vec<AnyElement>> =
-        Vec::with_capacity(inline_line_count(content).min(MAX_RENDER_CHILDREN + 1));
-    lines.push(Vec::new());
-    for inline in content.iter().take(MAX_RENDER_CHILDREN) {
+    let (content, content_was_capped) = bounded_inline_content(content);
+    let rendered = if !content
+        .iter()
+        .any(|inline| matches!(inline, RichInline::AttachmentCard(_)))
+    {
+        let flow = inline_text_flow(content, context.palette, depth, budget)
+            .expect("text-only inline content should produce a text flow");
+        render_inline_text_flow(flow)
+    } else {
+        // Attachment cards are real GPUI elements, so keep them as flex children while
+        // grouping all surrounding text into a single wrapping surface. This preserves
+        // inline text flow without making cards part of StyledText's text runs.
+        let mut children = Vec::new();
+        let mut text_start = 0;
+        for (index, inline) in content.iter().enumerate() {
+            if !matches!(inline, RichInline::AttachmentCard(_)) {
+                continue;
+            }
+            if text_start < index
+                && let Some(flow) =
+                    inline_text_flow(&content[text_start..index], context.palette, depth, budget)
+            {
+                children.push(render_inline_text_flow(flow));
+            }
+            if !budget.enter(depth.saturating_add(1)) {
+                break;
+            }
+            children.push(render_inline(inline, context, budget));
+            text_start = index.saturating_add(1);
+        }
+        if !budget.omitted
+            && text_start < content.len()
+            && let Some(flow) =
+                inline_text_flow(&content[text_start..], context.palette, depth, budget)
+        {
+            children.push(render_inline_text_flow(flow));
+        }
+
+        h_flex()
+            .min_w_0()
+            .flex_wrap()
+            .gap_0()
+            .children(children)
+            .into_any_element()
+    };
+    if content_was_capped {
+        budget.omitted = true;
+    }
+    rendered
+}
+
+fn bounded_inline_content(content: &[RichInline]) -> (&[RichInline], bool) {
+    let bounded_len = content.len().min(MAX_RENDER_CHILDREN);
+    (&content[..bounded_len], content.len() > bounded_len)
+}
+
+struct InlineTextFlow {
+    text: String,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    font_family_overrides: Vec<(Range<usize>, SharedString)>,
+}
+
+fn inline_text_flow(
+    content: &[RichInline],
+    palette: RichTextPalette,
+    depth: usize,
+    budget: &mut RenderBudget,
+) -> Option<InlineTextFlow> {
+    let mut flow = InlineTextFlow {
+        text: String::new(),
+        highlights: Vec::new(),
+        font_family_overrides: Vec::new(),
+    };
+
+    for inline in content {
         if !budget.enter(depth.saturating_add(1)) {
             break;
         }
-        if matches!(inline, RichInline::HardBreak) {
-            lines.push(Vec::new());
-        } else if let Some(line) = lines.last_mut() {
-            line.push(render_inline(inline, context, budget));
+        match inline {
+            RichInline::Text { text, marks } => {
+                append_inline_text(
+                    &mut flow,
+                    &budget.text(text),
+                    inline_mark_style(marks, palette),
+                    marks.iter().any(|mark| matches!(mark, RichMark::Code)),
+                );
+            }
+            RichInline::Mention { label, .. } => {
+                let label = if label.trim().is_empty() {
+                    "Mention".to_owned()
+                } else {
+                    budget.text(label)
+                };
+                append_inline_text(
+                    &mut flow,
+                    &label,
+                    HighlightStyle {
+                        color: Some(palette.info),
+                        ..Default::default()
+                    },
+                    false,
+                );
+            }
+            RichInline::Placeholder { label } => append_inline_text(
+                &mut flow,
+                &budget.text(label),
+                HighlightStyle {
+                    color: Some(palette.muted),
+                    font_style: Some(FontStyle::Italic),
+                    ..Default::default()
+                },
+                false,
+            ),
+            RichInline::HardBreak => flow.text.push('\n'),
+            RichInline::AttachmentCard(_) => return None,
         }
         if budget.omitted {
             break;
         }
     }
-    if content.len() > MAX_RENDER_CHILDREN {
-        budget.omitted = true;
+
+    Some(flow)
+}
+
+fn append_inline_text(
+    flow: &mut InlineTextFlow,
+    text: &str,
+    style: HighlightStyle,
+    monospace: bool,
+) {
+    if text.is_empty() {
+        return;
     }
-    v_flex()
+    let start = flow.text.len();
+    flow.text.push_str(text);
+    let end = flow.text.len();
+    if style != HighlightStyle::default() {
+        flow.highlights.push((start..end, style));
+    }
+    if monospace {
+        flow.font_family_overrides
+            .push((start..end, "monospace".into()));
+    }
+}
+
+fn inline_mark_style(marks: &[RichMark], palette: RichTextPalette) -> HighlightStyle {
+    let mut style = HighlightStyle::default();
+    for mark in marks {
+        style = style.highlight(match mark {
+            RichMark::Code => HighlightStyle {
+                background_color: Some(palette.code_surface),
+                ..Default::default()
+            },
+            RichMark::Emphasis => HighlightStyle {
+                font_style: Some(FontStyle::Italic),
+                ..Default::default()
+            },
+            RichMark::Strong => HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+            RichMark::Strike => HighlightStyle {
+                strikethrough: Some(StrikethroughStyle::default()),
+                ..Default::default()
+            },
+            RichMark::Link { .. } => HighlightStyle {
+                color: Some(palette.link),
+                underline: Some(UnderlineStyle {
+                    color: Some(palette.link),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        });
+    }
+    style
+}
+
+fn render_inline_text_flow(flow: InlineTextFlow) -> AnyElement {
+    let mut text = StyledText::new(flow.text);
+    if !flow.highlights.is_empty() {
+        text = text.with_highlights(flow.highlights);
+    }
+    if !flow.font_family_overrides.is_empty() {
+        text = text.with_font_family_overrides(flow.font_family_overrides);
+    }
+    // StyledText performs wrapping in the enclosing constrained block, so a
+    // marked/unmarked ADF run cannot become an independently shrinking flex item.
+    div()
         .min_w_0()
-        .children(
-            lines
-                .into_iter()
-                .map(|line| h_flex().min_w_0().flex_wrap().gap_0().children(line)),
-        )
+        .whitespace_normal()
+        .child(text)
         .into_any_element()
 }
 
+#[cfg(test)]
 fn inline_line_count(content: &[RichInline]) -> usize {
     content
         .iter()
@@ -956,13 +1124,16 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use jira_domain::{RichAttachmentCard, RichBlock, RichImage, RichInline, RichTextDocument};
+    use jira_domain::{
+        RichAttachmentCard, RichBlock, RichImage, RichInline, RichMark, RichTextDocument,
+    };
 
     use super::{
-        HeadingSize, MAX_RENDER_DEPTH, MAX_RENDER_NODES, MAX_RENDER_TEXT_BYTES, RenderBudget,
-        RichAttachmentCardAction, RichImageRenderState, RichImageRenderStates, RichTextPalette,
-        bounded_attachment_filename, heading_size, image_render_state, inline_line_count,
-        normalize_attachment_filename, render_element_ordinal, render_rich_text,
+        HeadingSize, MAX_RENDER_CHILDREN, MAX_RENDER_DEPTH, MAX_RENDER_NODES,
+        MAX_RENDER_TEXT_BYTES, RenderBudget, RichAttachmentCardAction, RichImageRenderState,
+        RichImageRenderStates, RichTextPalette, bounded_attachment_filename,
+        bounded_inline_content, heading_size, image_render_state, inline_line_count,
+        inline_text_flow, normalize_attachment_filename, render_element_ordinal, render_rich_text,
         render_rich_text_with_actions, rich_image_name,
     };
     use crate::diagnostics::{
@@ -1005,6 +1176,79 @@ mod tests {
             },
         ];
         assert_eq!(inline_line_count(&content), 2);
+    }
+
+    #[test]
+    fn text_runs_keep_marked_adf_children_on_one_wrapping_surface() {
+        let content = [
+            RichInline::Text {
+                text: "Ticket: ".to_owned(),
+                marks: Vec::new(),
+            },
+            RichInline::Text {
+                text: "IX-2247 (Task)".to_owned(),
+                marks: vec![RichMark::Strong],
+            },
+            RichInline::Text {
+                text: "  Epic: IX-898 — IX Platform - Triage".to_owned(),
+                marks: vec![RichMark::Link {
+                    href: "https://example.invalid/epic".to_owned(),
+                    title: None,
+                }],
+            },
+            RichInline::HardBreak,
+            RichInline::Text {
+                text: "Agency FMO upline and downline (existing orgs).".to_owned(),
+                marks: Vec::new(),
+            },
+        ];
+
+        let mut budget = RenderBudget::default();
+        let flow = inline_text_flow(&content, RichTextPalette::default(), 0, &mut budget)
+            .expect("text-only ADF paragraph should use one text flow");
+
+        assert_eq!(
+            flow.text,
+            "Ticket: IX-2247 (Task)  Epic: IX-898 — IX Platform - Triage\nAgency FMO upline and downline (existing orgs)."
+        );
+        assert_eq!(flow.highlights.len(), 2);
+        assert_eq!(flow.font_family_overrides.len(), 0);
+    }
+
+    #[test]
+    fn inline_content_caps_work_and_omits_tail_nodes() {
+        let content = (0..=MAX_RENDER_CHILDREN)
+            .map(|index| RichInline::Text {
+                text: if index == MAX_RENDER_CHILDREN {
+                    "tail-must-not-render".to_owned()
+                } else {
+                    "x".to_owned()
+                },
+                marks: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut budget = RenderBudget::default();
+        let (bounded, capped) = bounded_inline_content(&content);
+        let flow = inline_text_flow(bounded, RichTextPalette::default(), 0, &mut budget)
+            .expect("bounded text content should produce a flow");
+
+        assert_eq!(bounded.len(), MAX_RENDER_CHILDREN);
+        assert!(capped);
+        assert!(!budget.omitted);
+        assert_eq!(flow.text.len(), MAX_RENDER_CHILDREN);
+        assert!(!flow.text.contains("tail-must-not-render"));
+
+        let image_states = RichImageRenderStates::default();
+        let context = super::RenderContext {
+            palette: RichTextPalette::default(),
+            image_states: &image_states,
+            surface_ordinal: 0,
+            source: ImageSource::ResolvedAdf,
+            attachment_action: None,
+        };
+        let mut render_budget = RenderBudget::default();
+        let _ = super::render_inlines(&content, &context, 0, &mut render_budget);
+        assert!(render_budget.omitted);
     }
 
     #[test]
