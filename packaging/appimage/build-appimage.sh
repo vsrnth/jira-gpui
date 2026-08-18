@@ -131,7 +131,8 @@ if ! command -v magick >/dev/null 2>&1; then
     printf '%s\n' "ImageMagick's magick command is required to render the AppImage root PNG icon" >&2
     exit 1
 fi
-magick -background none "$icon_source" -resize 256x256! "$icon"
+magick -background none "$icon_source" -resize 256x256! -strip \
+    -define png:exclude-chunk=date,time "$icon"
 icon_format=$(magick identify -format '%m' "$icon") || {
     printf '%s\n' "Could not inspect rendered icon: $icon" >&2
     exit 1
