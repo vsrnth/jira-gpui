@@ -79,13 +79,39 @@ retried automatically, and does not mutate Jira. Comment creation, assignment,
 and status transition each use a dedicated confirmed request path and do not
 share retry behavior with reads.
 
+Issue-scoped edit metadata is persisted in SQLite per site and stable issue
+locator. Available transitions and the bounded assignable-user candidate set
+are fresh for 24 hours according to the injected application clock. The first
+assignable-user read populates that cache through one bounded empty Jira query;
+subsequent non-empty searches filter the cached candidates locally by display
+name (and stable account ID for matching). A definite successful transition
+invalidates the transition choices before the next picker read, while the
+confirmed Jira write remains exactly-once and is never automatically retried.
+
+When a sync has both cached and incoming snapshots for an issue whose
+`updated_at` changed, it makes a bounded Jira Cloud bulk-changelog read (at
+most 1,000 issue IDs per request). Each request is capped at eight cancellable
+pages (at most 8,000 histories per issue-ID chunk) and bounded response bytes;
+histories are restricted to `(old.updated_at, new.updated_at]`. Usable items
+become bounded `FieldChanged` events with display-safe values, and corresponding
+snapshot status/assignee/priority/due-date/summary/parent events are
+deduplicated per issue. Changelog failures or unsupported gateways are
+best-effort: the sync still succeeds with one honest generic `IssueUpdated`
+fallback for that issue.
+
 The local update feed is derived from cache transitions. It is Jira Desk's
 view of detected changes, not Jira's bell or inbox notification stream. Events
 for the same issue are grouped into one ticket card; marking that card read
 updates every event in the group in local storage only. The shell also shows
 component-level in-app notifications for refresh and explicit write outcomes.
-These are additive feedback: the Freedesktop desktop notification adapter
-remains enabled for update alerts, and desktop delivery is best effort and
+Manual refresh always produces one in-app summary, including when no new
+updates were found. Feed navigation offers Unread and All filters. Generic
+activity without an exact field uses compact fallback wording and progressive
+disclosure rather than exposing raw internal event names. Event timestamps are
+rendered in the system's local timezone with an explicit UTC offset. These are
+additive feedback: the Freedesktop desktop notification adapter remains
+enabled for update alerts; its counts mean notifications accepted by the
+desktop service, not guaranteed shell display, and delivery is best effort and
 never makes a sync fail.
 
 ## Dashboard components
@@ -162,9 +188,9 @@ serialized as one safe Jira ADF paragraph and sent once through the dedicated
 comment-write port. Rich authored marks, lists, mentions, and attachments are
 not implied by the Textarea.
 
-Assignee and status controls are issue-scoped. The shell reads assignable users
-and currently available workflow transitions from Jira, presents the exact
-target, and requires a separate confirmation before calling the dedicated
+Assignee and status controls are issue-scoped. The shell reads the cached
+assignable users and currently available workflow transitions, presents the
+exact target, and requires a separate confirmation before calling the dedicated
 issue-edit port. A confirmed write is dispatched once. Definite rejection is
 safe to correct; an unknown outcome requires a Jira refresh before another
 attempt.

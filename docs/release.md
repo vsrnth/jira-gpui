@@ -31,10 +31,11 @@ window; registration failures are best-effort and do not block startup.
 Extracted AppDir smoke runs should verify that registration is skipped when
 `APPIMAGE` is absent. The embedded desktop template retains the named
 `Icon=dev.jiradesk.JiraDesk`; a stable PNG remains available for named
-notification lookup, while the generated per-user entry uses an absolute
-`dev.jiradesk.JiraDesk-<fingerprint>.png` path. Icon-content changes therefore
-change GNOME Shell's cache key; old managed variants are not automatically
-deleted, and no desktop-cache updater is assumed.
+notification lookup and desktop-entry association, while the generated
+per-user entry uses an absolute `dev.jiradesk.JiraDesk-<fingerprint>.png`
+path. Icon-content changes therefore change GNOME Shell's cache key; old
+managed variants are not automatically deleted, and no desktop-cache updater
+is assumed.
 
 The icon build invokes ImageMagick's `magick` command. Ubuntu 22.04 ships
 ImageMagick 6, so CI must install the compatibility launcher described in
@@ -84,21 +85,37 @@ Linux build.
 The release smoke should also exercise the responsive dashboard at narrow and
 wide window sizes, drag the desktop list/detail divider, select multiple status
 categories and clear them back to All, verify the issue-list scrollbar and
-refresh spinner, and confirm that in-app notifications appear. Verify that OS
-Freedesktop desktop alerts are still delivered independently of the in-app
-notification layer. Verify display-name-only identity labels, confirm that
-title-bar minimize, maximize, and close controls are clearly discoverable with
-the window idle (hover should not be required), and confirm that the registered
-component asset bundle renders title-bar and semantic icons. Rich-text
-placeholders and inert links must remain safe.
+refresh spinner, and confirm that every manual refresh raises one in-app
+summary even when there are no new updates. Verify update timestamps use the
+system local timezone with an explicit offset, exercise the Unread and All
+feed filters, and confirm generic activity uses compact fallback wording with
+progressive disclosure. The refresh summary's desktop counts must be checked
+as notifications accepted by the desktop service, not as a guarantee that the
+shell displayed them. Verify that OS Freedesktop desktop alerts are still
+delivered independently of the in-app notification layer. Verify
+display-name-only identity labels, confirm that title-bar minimize, maximize,
+and close controls are clearly discoverable with the window idle (hover should
+not be required), and confirm that the registered component asset bundle
+renders title-bar and semantic icons. Rich-text placeholders and inert links
+must remain safe.
 
 Update-feed smoke must create multiple detected events for one issue, verify
 that they render in one ticket group in newest-first order, and verify the
 group's Mark as read action persists every contained event locally without a
-Jira request. Jira-write smoke must verify assignable-user and available-
-transition loading, the separate confirmation step, exactly one assignment or
-transition request, safe definite failures, and refresh-required handling for
-unknown outcomes.
+Jira request. Jira-edit smoke must verify that the first assignable-user read
+uses one bounded empty query, later searches filter the persisted candidate
+set locally, and fresh transition choices are reused for 24 hours. It must
+also verify that a successful transition invalidates those choices before the
+next read, while the separate confirmation step dispatches exactly one
+assignment or transition request. Safe definite failures and
+refresh-required handling for unknown outcomes remain required.
+
+Update-feed smoke should also verify that changed cached/incoming snapshots
+use the bounded bulk-changelog read, that history timestamps are filtered to
+the snapshot window, and that safe field changes render directly as
+`Field: old → new`. A changelog failure or unsupported gateway must leave the
+sync successful and show only the generic fallback for the affected issue;
+pagination, cancellation, and the eight-page safety cap remain bounded.
 
 Media and attachment smoke must cover:
 
