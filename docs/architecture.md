@@ -23,7 +23,7 @@ Tokio, or SQLite.
 ```text
 GPUI shell
   -> application services and ports
-      -> Jira HTTP adapter       (remote read/media, plus confirmed comment creation)
+      -> Jira HTTP adapter       (remote reads/media plus confirmed bounded writes)
       -> SQLite storage adapter  (local cache and update state)
       -> desktop notification adapter (best effort)
 ```
@@ -75,15 +75,18 @@ An explicit attachment download is a separate user action. It reads the
 configured Jira origin with authentication, caps the response at 64 MiB, and
 writes only to the destination selected through the XDG portal. The local
 write runs in the background after selection; it is not automatic, is not
-retried automatically, and does not mutate Jira. Comment creation uses a
-separate confirmed request path and does not share retry behavior with reads.
+retried automatically, and does not mutate Jira. Comment creation, assignment,
+and status transition each use a dedicated confirmed request path and do not
+share retry behavior with reads.
 
 The local update feed is derived from cache transitions. It is Jira Desk's
-view of detected changes, not Jira's bell or inbox notification stream. The
-shell also shows component-level in-app notifications for refresh and comment
-outcomes. These are additive feedback: the Freedesktop desktop notification
-adapter remains enabled for update alerts, and desktop delivery is best effort
-and never makes a sync fail.
+view of detected changes, not Jira's bell or inbox notification stream. Events
+for the same issue are grouped into one ticket card; marking that card read
+updates every event in the group in local storage only. The shell also shows
+component-level in-app notifications for refresh and explicit write outcomes.
+These are additive feedback: the Freedesktop desktop notification adapter
+remains enabled for update alerts, and desktop delivery is best effort and
+never makes a sync fail.
 
 ## Dashboard components
 
@@ -159,6 +162,13 @@ serialized as one safe Jira ADF paragraph and sent once through the dedicated
 comment-write port. Rich authored marks, lists, mentions, and attachments are
 not implied by the Textarea.
 
+Assignee and status controls are issue-scoped. The shell reads assignable users
+and currently available workflow transitions from Jira, presents the exact
+target, and requires a separate confirmation before calling the dedicated
+issue-edit port. A confirmed write is dispatched once. Definite rejection is
+safe to correct; an unknown outcome requires a Jira refresh before another
+attempt.
+
 Descriptions and received comments are rendered from the bounded, supported ADF
 subset described above. Empty ADF documents fall back to the normal empty-state
 copy, and unsupported or unresolved media-only content remains visible through
@@ -171,10 +181,11 @@ implicit attachment download.
 - HTTP status and transport details are mapped before reaching presentation.
 - SQLite schema and migrations stay behind storage ports.
 - UI state owns cancellation and stale-result guards, not transport code.
-- The only Jira write port is dedicated to explicitly confirmed comment
-  creation; issue edits, transitions, assignments, attachment mutations, and
-  automatic writes remain prohibited. Attachment reads are authenticated and
-  bounded; local download destinations are selected explicitly by the user.
+- Dedicated Jira write ports accept only explicitly confirmed comment,
+  assignment, and status-transition requests. Automatic writes and retries,
+  arbitrary issue edits, deletions, and attachment mutations remain
+  prohibited. Attachment reads are authenticated and bounded; local download
+  destinations are selected explicitly by the user.
 
 For the component inventory and upgrade decisions, see
 [`ui-component-audit.md`](ui-component-audit.md).

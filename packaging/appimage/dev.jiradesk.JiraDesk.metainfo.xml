@@ -2,12 +2,12 @@
 <component type="desktop-application">
   <id>dev.jiradesk.JiraDesk</id>
   <name>Jira Desk</name>
-  <summary>Read-only Jira workspace for Linux</summary>
+  <summary>Focused Jira workspace for Linux</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
   <description>
     <p>Jira Desk presents issues and local update notifications for selected Jira users.</p>
-    <p>Jira Desk is read-only with respect to Jira and stores local cache and notification state on the device.</p>
+    <p>Jira Desk limits writes to explicitly confirmed comments, assignee changes, and status transitions, and stores local cache and notification state on the device.</p>
   </description>
   <launchable type="desktop-id">dev.jiradesk.JiraDesk.desktop</launchable>
   <provides>

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Jira Desk
-Comment=Read-only Jira workspace for Linux
+Comment=Focused Jira workspace for Linux
 Exec=jira-gpui
 Icon=dev.jiradesk.JiraDesk
 Terminal=false

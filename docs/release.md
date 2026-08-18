@@ -79,6 +79,14 @@ the window idle (hover should not be required), and confirm that the registered
 component asset bundle renders title-bar and semantic icons. Rich-text
 placeholders and inert links must remain safe.
 
+Update-feed smoke must create multiple detected events for one issue, verify
+that they render in one ticket group in newest-first order, and verify the
+group's Mark as read action persists every contained event locally without a
+Jira request. Jira-write smoke must verify assignable-user and available-
+transition loading, the separate confirmation step, exactly one assignment or
+transition request, safe definite failures, and refresh-required handling for
+unknown outcomes.
+
 Media and attachment smoke must cover:
 
 - an unambiguous description image loading as an authenticated Jira thumbnail;

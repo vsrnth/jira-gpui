@@ -143,16 +143,22 @@ selected categories means All statuses. The issue list has its own component
 scrollbar so long result sets do not expand the surrounding layout.
 
 Refresh uses a loading spinner in the button while work is in progress. Refresh
-and comment outcomes also appear as in-app notifications. These in-app
+and confirmed-write outcomes also appear as in-app notifications. These in-app
 notifications are additive and do not disable or replace the existing
 Freedesktop OS desktop alerts for update delivery.
 
-## Comment policy
+The local update feed groups detected events by Jira issue. Marking one ticket
+read updates all event IDs in that group in SQLite only; Mark all read applies
+the same local operation to the entire displayed feed. Neither action contacts
+Jira.
 
-Creating a comment is the sole Jira write. The composer is memory-only and
-validates a nonblank body of at most 10,000 Unicode scalar characters and 64
-KiB UTF-8. The user must confirm the exact issue, body, and sizes before the
-single dispatch. A confirmed request is never automatically retried. If the
+## Jira write policy
+
+Creating a comment is one of three allowed Jira writes. The composer is
+memory-only and validates a nonblank body of at most 10,000 Unicode scalar
+characters and 64 KiB UTF-8. The user must confirm the exact issue, body, and
+sizes before the single dispatch. A confirmed request is never automatically
+retried. If the
 outcome is unknown, the draft is retained and the UI asks the user to refresh
 comments before deciding whether to retry.
 
@@ -161,10 +167,16 @@ confirmed plain text in a safe Jira ADF paragraph before sending it. Received
 descriptions and comments use the bounded read-only ADF renderer; unsupported
 nodes and empty documents use safe fallbacks.
 
-No Jira issue edits, deletions, transitions, assignments, worklogs, attachment
-uploads, or background Jira writes are supported. A local attachment download
-is the sole exception to the “no background write” wording: it is a user-
-selected local file write, never a Jira mutation or an automatic action.
+Assignment changes and status transitions follow the same safety boundary. The
+UI first reads users assignable to the selected issue or its currently
+available transitions, then shows the exact target for a separate confirmation.
+Each confirmed request is sent once without automatic retry. An unknown outcome
+must be reconciled by refreshing Jira before another attempt.
+
+No other Jira issue edits, deletions, worklogs, attachment uploads, or
+background Jira writes are supported. A local attachment download is the sole
+exception to the “no background write” wording: it is a user-selected local
+file write, never a Jira mutation or an automatic action.
 
 Freedesktop OS alerts remain enabled for update delivery independently of the
 in-app notification layer. Media loading, local download cancellation, and

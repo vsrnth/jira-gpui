@@ -2,14 +2,15 @@
 
 This is the current, concise roadmap. It replaces the former root-level
 `IMPLEMENTATION_PLAN.md`, whose early design notes described superseded
-assignee-set onboarding and a read-only-only Jira policy.
+assignee-set onboarding and a fully read-only Jira policy.
 
 ## Current milestone
 
 The durable Linux Wayland vertical slice is implemented: GPUI onboarding,
 authenticated `/myself` identity, project-wide read sync, My-issues filtering,
 SQLite caching, local update events, incremental polling, lazy issue detail,
-exact Jira-key lookup, confirmed comment creation, and AppImage packaging.
+exact Jira-key lookup, ticket-grouped activity, confirmed comment creation,
+confirmed assignment and status-transition actions, and AppImage packaging.
 
 The application core remains independent of GPUI, HTTP, and SQLite. The current
 milestone is an internal/local build, not a public release. See
@@ -20,8 +21,8 @@ milestone is an internal/local build, not a public release. See
 
 - Linux Wayland is the only Phase 1 runtime; macOS is Phase 2.
 - Jira synchronization and detail reads are read-only.
-- Confirmed comment creation is the sole Jira write and has no automatic
-  retry.
+- Confirmed comment creation, assignment changes, and status transitions are
+  the only Jira writes; each is dispatched once with no automatic retry.
 - The remote sync is project-wide, but the dashboard presents only the
   authenticated user's issues.
 - Local cache, update read state, and sync cursors may be written locally.

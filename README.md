@@ -29,17 +29,21 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   destination and are separate from description rendering.
 - Shows user display names in the interface while retaining stable Jira
   account IDs only for matching and local application state.
-- Keeps a durable local update feed, in-app refresh/comment feedback, and
-  best-effort OS desktop notifications.
+- Keeps a durable local update feed grouped by ticket, with local per-ticket
+  and global mark-read actions, in-app operation feedback, and best-effort OS
+  desktop notifications.
+- Lets the user explicitly choose and confirm an assignee change or one of the
+  issue's currently available workflow transitions.
 - Provides client-side Wayland title-bar controls and a local SQLite cache.
 - Keeps bounded, privacy-safe image diagnostics in the local state directory;
   diagnostic setup and write failures never prevent startup, and logging is
   best-effort.
 
-Jira operations are read-only except for one deliberate action: creating a
-comment after the user explicitly confirms the exact issue and body. Comment
-creation is sent once, with no automatic retry; an uncertain result requires
-refreshing comments before retrying.
+Jira writes are limited to three deliberate actions: creating a comment,
+changing an assignee, and applying an available status transition. Each action
+shows the exact issue and target for explicit confirmation, is sent once with
+no automatic retry, and requires a refresh before retrying an uncertain result.
+All other issue edits and attachment mutations remain unsupported.
 
 Media reads do not mutate Jira. Description thumbnails are limited to 8 MiB
 each, 16 references, and 32 MiB aggregate, with no arbitrary Media Services
