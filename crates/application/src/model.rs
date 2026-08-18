@@ -185,6 +185,16 @@ pub struct IssueCommentsPageRequest {
     pub page_size: usize,
 }
 
+/// Request for the newest bounded comments used by sync-time notification
+/// enrichment. The Jira adapter owns the transport-specific pagination and
+/// ordering; callers must provide a positive limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentIssueCommentsRequest {
+    pub site_id: JiraSiteId,
+    pub issue_id: IssueId,
+    pub limit: usize,
+}
+
 /// A transport-neutral page of comments with explicit cursor/startAt progression.
 #[derive(Clone, Debug)]
 pub struct IssueCommentsPage {

@@ -59,6 +59,16 @@ impl RichTextDocument {
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty() && self.fallback_images.is_empty() && !self.truncated
     }
+
+    /// Returns whether this document contains a direct mention of the account.
+    ///
+    /// Mention nodes can occur below list items, block quotes, panels, and other
+    /// nested ADF blocks, so callers must not inspect only the top-level blocks.
+    pub fn mentions_account(&self, account_id: &AccountId) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| block_mentions_account(block, account_id))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,9 +337,45 @@ fn normalize_plain_text(value: String) -> String {
     normalized.trim().to_owned()
 }
 
+fn block_mentions_account(block: &RichBlock, account_id: &AccountId) -> bool {
+    match block {
+        RichBlock::Paragraph(content) | RichBlock::Heading { content, .. } => {
+            inline_mentions_account(content, account_id)
+        }
+        RichBlock::BulletList(items) => items.iter().any(|item| {
+            item.blocks
+                .iter()
+                .any(|block| block_mentions_account(block, account_id))
+        }),
+        RichBlock::OrderedList { items, .. } => items.iter().any(|item| {
+            item.blocks
+                .iter()
+                .any(|block| block_mentions_account(block, account_id))
+        }),
+        RichBlock::BlockQuote(content) | RichBlock::Panel { content, .. } => content
+            .iter()
+            .any(|block| block_mentions_account(block, account_id)),
+        RichBlock::CodeBlock { .. } | RichBlock::Image(_) | RichBlock::Placeholder { .. } => false,
+    }
+}
+
+fn inline_mentions_account(content: &[RichInline], account_id: &AccountId) -> bool {
+    content.iter().any(|inline| {
+        matches!(
+            inline,
+            RichInline::Mention {
+                account_id: Some(mentioned),
+                ..
+            } if mentioned == account_id
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RichBlock, RichImage, RichInline, RichTextDocument};
+    use crate::AccountId;
+
+    use super::{PanelKind, RichBlock, RichImage, RichInline, RichListItem, RichTextDocument};
 
     #[test]
     fn plain_text_is_bounded_for_deserialized_models() {
@@ -467,5 +513,52 @@ mod tests {
             document.plain_text(),
             "[attachment: partner-enrollment.csv]"
         );
+    }
+
+    #[test]
+    fn mentions_account_traverses_nested_blocks_and_lists() {
+        let account = AccountId::new("account-1").expect("account");
+        let document = RichTextDocument::new(
+            vec![RichBlock::Panel {
+                kind: PanelKind::Info,
+                content: vec![RichBlock::BulletList(vec![RichListItem {
+                    blocks: vec![RichBlock::BlockQuote(vec![RichBlock::Paragraph(vec![
+                        RichInline::Mention {
+                            account_id: Some(account.clone()),
+                            label: "@Asha".to_owned(),
+                        },
+                    ])])],
+                }])],
+            }],
+            false,
+        );
+
+        assert!(document.mentions_account(&account));
+    }
+
+    #[test]
+    fn mentions_account_ignores_missing_or_unrelated_ids() {
+        let account = AccountId::new("account-1").expect("account");
+        let other = AccountId::new("account-2").expect("account");
+        let document = RichTextDocument::new(
+            vec![RichBlock::OrderedList {
+                order: 1,
+                items: vec![RichListItem {
+                    blocks: vec![RichBlock::Paragraph(vec![
+                        RichInline::Mention {
+                            account_id: None,
+                            label: "@unknown".to_owned(),
+                        },
+                        RichInline::Mention {
+                            account_id: Some(other),
+                            label: "@Other".to_owned(),
+                        },
+                    ])],
+                }],
+            }],
+            false,
+        );
+
+        assert!(!document.mentions_account(&account));
     }
 }

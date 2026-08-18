@@ -26,6 +26,8 @@ impl NotificationPort for FreedesktopNotificationPort {
 fn notification_content(event: &UpdateEvent) -> (String, String) {
     let body = match &event.kind {
         UpdateKind::FieldChanged { field, .. } => format!("Field changed: {field}"),
+        UpdateKind::AssigneeChanged { .. } => "Ticket assigned to you".to_owned(),
+        UpdateKind::CommentAdded { .. } => "You were mentioned in a comment".to_owned(),
         _ => event_kind_label(&event.kind).to_owned(),
     };
     (event.issue_key.to_string(), body)
@@ -110,7 +112,7 @@ mod tests {
                     old: change.clone(),
                     new: change.clone(),
                 },
-                "Assignee changed",
+                "Ticket assigned to you",
             ),
             (
                 UpdateKind::PriorityChanged {
@@ -146,7 +148,7 @@ mod tests {
                     author: Some(AccountId::new("author-secret").unwrap()),
                     excerpt: "comment-secret <img>".into(),
                 },
-                "Comment added",
+                "You were mentioned in a comment",
             ),
         ];
         for (kind, expected) in cases {

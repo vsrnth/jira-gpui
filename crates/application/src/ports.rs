@@ -11,8 +11,9 @@ use crate::{
     AttachmentImageRequest, CachedAssignableUsers, CachedIssueTransitions, CancellationToken,
     ChangeSet, CommitOutcome, IssueChangelog, IssueChangelogRequest, IssueCommentsPage,
     IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueListQuery, IssuePage,
-    IssueTransition, IssueTransitionsRequest, NotificationRequest, SyncCommit, SyncState,
-    TransitionIssueRequest, UpdateFeedQuery, UserSearchRequest, UserSetDraft,
+    IssueTransition, IssueTransitionsRequest, NotificationRequest, RecentIssueCommentsRequest,
+    SyncCommit, SyncState, TransitionIssueRequest, UpdateFeedQuery, UserSearchRequest,
+    UserSetDraft,
 };
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationError>> + Send + 'a>>;
@@ -82,6 +83,20 @@ pub trait JiraReadPort: Send + Sync {
         Box::pin(std::future::ready(Err(ApplicationError::new(
             crate::ErrorKind::Internal,
             "issue comments are not supported by this Jira gateway",
+        ))))
+    }
+
+    /// Fetches the newest bounded comments for sync-time mention enrichment.
+    /// Older gateways may leave this unsupported; sync treats unsupported
+    /// enrichment as a best-effort miss.
+    fn fetch_recent_issue_comments<'a>(
+        &'a self,
+        _request: &'a RecentIssueCommentsRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<jira_domain::IssueComment>> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "recent issue comments are not supported by this Jira gateway",
         ))))
     }
 

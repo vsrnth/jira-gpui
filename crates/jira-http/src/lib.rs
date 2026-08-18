@@ -25,7 +25,7 @@ use jira_application::{
     IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
     IssueLocator, IssuePage, IssueTransition, IssueTransitionsRequest, JiraCommentWritePort,
     JiraIssueEditPort, JiraReadPort, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture,
-    TransitionIssueRequest, UserSearchRequest,
+    RecentIssueCommentsRequest, TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, Status, User};
 use reqwest::{Client, Response, StatusCode, header};
@@ -758,7 +758,7 @@ impl JiraHttpClient {
         url.query_pairs_mut()
             .append_pair("startAt", &request.start_at.to_string())
             .append_pair("maxResults", &limit.to_string())
-            .append_pair("orderBy", "created");
+            .append_pair("orderBy", "-created");
         let response = client
             .get(url)
             .basic_auth(credentials.email, Some(credentials.token))
@@ -770,6 +770,30 @@ impl JiraHttpClient {
         IssueMapper.map_comment_page(page).map_err(|_| {
             ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid comment data")
         })
+    }
+
+    async fn recent_issue_comments_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        request: RecentIssueCommentsRequest,
+        max_response_bytes: usize,
+    ) -> Result<Vec<IssueComment>, ApplicationError> {
+        let url = recent_issue_comments_url(url, request.limit)?;
+        let response = client
+            .get(url)
+            .basic_auth(credentials.email, Some(credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let page: JiraCommentPage = read_json(response, max_response_bytes).await?;
+        IssueMapper
+            .map_comment_page(page)
+            .map(|page| page.comments)
+            .map_err(|_| {
+                ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid comment data")
+            })
     }
 
     fn attachment_request_builder(
@@ -1100,6 +1124,31 @@ impl JiraReadPort for JiraHttpClient {
         let max = self.config.max_response_bytes;
         self.submit(cancellation, async move {
             Self::issue_comments_page_request(client, url, credentials, request, max).await
+        })
+    }
+
+    fn fetch_recent_issue_comments<'a>(
+        &'a self,
+        request: &'a RecentIssueCommentsRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueComment>> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let locator = IssueLocator::Id(request.issue_id.clone());
+        let url = match self.issue_endpoint(&locator, Some("comment")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let request = request.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::recent_issue_comments_request(client, url, credentials, request, max).await
         })
     }
 
@@ -1809,6 +1858,23 @@ fn map_created_comment_body(body: &[u8]) -> Result<IssueComment, ApplicationErro
         .map_err(|_| write_unknown_outcome())
 }
 
+fn recent_issue_comments_url(
+    mut url: Url,
+    requested_limit: usize,
+) -> Result<Url, ApplicationError> {
+    let limit = requested_limit.min(100);
+    if limit == 0 {
+        return Err(ApplicationError::invalid_input(
+            "recent comment limit must be positive",
+        ));
+    }
+    url.query_pairs_mut()
+        .append_pair("startAt", "0")
+        .append_pair("maxResults", &limit.to_string())
+        .append_pair("orderBy", "-created");
+    Ok(url)
+}
+
 async fn read_json<T: DeserializeOwned>(
     response: Response,
     max_bytes: usize,
@@ -2086,15 +2152,35 @@ mod tests {
             .query_pairs_mut()
             .append_pair("startAt", "20")
             .append_pair("maxResults", "50")
-            .append_pair("orderBy", "created");
+            .append_pair("orderBy", "-created");
         assert_eq!(
             comments.path(),
             "/rest/api/3/issue/ENG%2F42%3Fprivate/comment"
         );
         assert_eq!(
             comments.query(),
-            Some("startAt=20&maxResults=50&orderBy=created")
+            Some("startAt=20&maxResults=50&orderBy=-created")
         );
+    }
+
+    #[test]
+    fn recent_comment_url_requests_newest_comments_with_a_bounded_limit() {
+        let url = recent_issue_comments_url(
+            Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/comment").unwrap(),
+            250,
+        )
+        .unwrap();
+        assert_eq!(
+            url.query(),
+            Some("startAt=0&maxResults=100&orderBy=-created")
+        );
+
+        let error = recent_issue_comments_url(
+            Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/comment").unwrap(),
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use jira_domain::{Issue, NotificationDelivery};
+use jira_domain::{Issue, IssueComment, NotificationDelivery, Timestamp, UpdateEvent, UpdateKind};
 use time::Duration;
 
 use crate::{
@@ -11,6 +11,8 @@ use crate::{
 };
 
 const MAX_CHANGELOG_ISSUES_PER_REQUEST: usize = 1_000;
+const MAX_RECENT_ISSUE_COMMENTS: usize = 100;
+const MAX_COMMENT_EXCERPT_BYTES: usize = 280;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SyncConfig {
@@ -232,6 +234,21 @@ impl SyncService {
                     }
                 }
             }
+            let mention_events = self
+                .mention_events(&existing_for_enrichment, &issues, request, cancellation)
+                .await?;
+            let mentioned_issue_ids = mention_events
+                .iter()
+                .map(|event| event.issue_id.clone())
+                .collect::<HashSet<_>>();
+            // A generic snapshot fallback represents the same activity as a
+            // direct mention. Remove only that fallback for the affected issue;
+            // specific field/changelog events remain independently useful.
+            update_events.retain(|event| {
+                !(mentioned_issue_ids.contains(&event.issue_id)
+                    && matches!(event.kind, UpdateKind::IssueUpdated))
+            });
+            update_events.extend(mention_events);
             update_events
         } else {
             Vec::new()
@@ -262,9 +279,10 @@ impl SyncService {
         let mut notification_failures = 0;
         if request.mode.emits_updates() {
             for event in &committed.inserted_events {
-                if notification_issue_ids
-                    .as_ref()
-                    .is_some_and(|issue_ids| !issue_ids.contains(&event.issue_id))
+                if !matches!(event.kind, UpdateKind::CommentAdded { .. })
+                    && notification_issue_ids
+                        .as_ref()
+                        .is_some_and(|issue_ids| !issue_ids.contains(&event.issue_id))
                 {
                     let _ = self
                         .cache
@@ -331,6 +349,98 @@ impl SyncService {
         })
     }
 
+    async fn mention_events(
+        &self,
+        existing: &[Issue],
+        incoming: &[Issue],
+        request: &SyncRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<UpdateEvent>, ApplicationError> {
+        let Some(notification_assignees) = request.notification_assignees.as_deref() else {
+            return Ok(Vec::new());
+        };
+        if notification_assignees.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut events = Vec::new();
+        for (old_issue, new_issue) in changed_issue_pairs(existing, incoming) {
+            cancellation.check()?;
+            let comments = match self
+                .jira
+                .fetch_recent_issue_comments(
+                    &crate::RecentIssueCommentsRequest {
+                        site_id: request.site_id.clone(),
+                        issue_id: new_issue.id.clone(),
+                        limit: MAX_RECENT_ISSUE_COMMENTS,
+                    },
+                    cancellation,
+                )
+                .await
+            {
+                Ok(comments) => comments,
+                Err(error) if error.kind() == crate::ErrorKind::Cancelled => {
+                    return Err(error);
+                }
+                // A gateway that predates the optional read, or a restricted/deleted
+                // issue, must not prevent the rest of the sync from committing.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        crate::ErrorKind::Authorization
+                            | crate::ErrorKind::NotFound
+                            | crate::ErrorKind::Internal
+                    ) =>
+                {
+                    continue;
+                }
+                // Authentication, transport, rate-limit, and upstream failures are
+                // retryable. Do not advance the sync cursor after one of these.
+                Err(error) => return Err(error),
+            };
+
+            let mut seen_comments = HashSet::new();
+            for comment in comments {
+                cancellation.check()?;
+                if !seen_comments.insert(comment.id.clone()) {
+                    continue;
+                }
+                let Some(activity_at) =
+                    comment_activity(&comment, old_issue.updated_at, new_issue.updated_at)
+                else {
+                    continue;
+                };
+                let Some(rich_body) = comment.rich_body.as_ref() else {
+                    continue;
+                };
+                if !notification_assignees
+                    .iter()
+                    .any(|account| rich_body.mentions_account(account))
+                {
+                    continue;
+                }
+                let kind = UpdateKind::CommentAdded {
+                    comment_id: comment.id.clone(),
+                    author: comment
+                        .author
+                        .as_ref()
+                        .map(|author| author.account_id.clone()),
+                    excerpt: comment_excerpt(&comment),
+                };
+                events.push(UpdateEvent::new(
+                    comment_event_id(&request.site_id, new_issue, &comment, activity_at),
+                    request.site_id.clone(),
+                    new_issue.id.clone(),
+                    new_issue.key.clone(),
+                    kind,
+                    activity_at,
+                    vec![request.user_set_id.clone()],
+                ));
+            }
+        }
+        Ok(events)
+    }
+
     fn validate(&self, request: &SyncRequest) -> Result<(), ApplicationError> {
         validate_jql_scope(request.jql_scope.as_deref())
             .map_err(ApplicationError::invalid_input)?;
@@ -366,23 +476,106 @@ impl SyncService {
 }
 
 fn changed_issue_ids(existing: &[Issue], incoming: &[Issue]) -> Vec<jira_domain::IssueId> {
-    let old = existing
-        .iter()
-        .map(|issue| (&issue.id, issue))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut ids = incoming
-        .iter()
-        .filter_map(|issue| {
-            let previous = old.get(&issue.id)?;
-            (previous.lifecycle == jira_domain::IssueLifecycle::Present
-                && issue.lifecycle == jira_domain::IssueLifecycle::Present
-                && previous.updated_at != issue.updated_at)
-                .then(|| issue.id.clone())
-        })
+    let mut ids = changed_issue_pairs(existing, incoming)
+        .into_iter()
+        .map(|(_, issue)| issue.id.clone())
         .collect::<Vec<_>>();
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn changed_issue_pairs<'a>(
+    existing: &'a [Issue],
+    incoming: &'a [Issue],
+) -> Vec<(&'a Issue, &'a Issue)> {
+    let old = existing
+        .iter()
+        .map(|issue| (&issue.id, issue))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut pairs = incoming
+        .iter()
+        .filter_map(|issue| {
+            let previous = old.get(&issue.id).copied()?;
+            (previous.lifecycle == jira_domain::IssueLifecycle::Present
+                && issue.lifecycle == jira_domain::IssueLifecycle::Present
+                && previous.updated_at != issue.updated_at)
+                .then_some((previous, issue))
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_by(|(_, left), (_, right)| left.id.cmp(&right.id));
+    pairs
+}
+
+fn comment_activity(
+    comment: &IssueComment,
+    old_updated_at: Timestamp,
+    new_updated_at: Timestamp,
+) -> Option<Timestamp> {
+    let in_window =
+        |timestamp: Timestamp| timestamp > old_updated_at && timestamp <= new_updated_at;
+    comment
+        .updated_at
+        .filter(|timestamp| in_window(*timestamp))
+        .or_else(|| in_window(comment.created_at).then_some(comment.created_at))
+}
+
+fn comment_excerpt(comment: &IssueComment) -> String {
+    let source = comment
+        .rich_body
+        .as_ref()
+        .map(|body| body.plain_text())
+        .unwrap_or_else(|| comment.body.clone());
+    let mut excerpt = String::with_capacity(source.len().min(MAX_COMMENT_EXCERPT_BYTES));
+    for character in source.chars() {
+        if character.is_control() {
+            if (character == '\n' || character == '\r' || character == '\t')
+                && !excerpt.ends_with(' ')
+            {
+                excerpt.push(' ');
+            }
+        } else {
+            excerpt.push(character);
+        }
+        if excerpt.len() >= MAX_COMMENT_EXCERPT_BYTES {
+            break;
+        }
+    }
+    excerpt.truncate(excerpt.floor_char_boundary(MAX_COMMENT_EXCERPT_BYTES));
+    excerpt.trim().to_owned()
+}
+
+fn comment_event_id(
+    site_id: &jira_domain::JiraSiteId,
+    issue: &Issue,
+    comment: &IssueComment,
+    activity_at: Timestamp,
+) -> jira_domain::EventId {
+    let activity = activity_at.unix_timestamp_nanos().to_string();
+    let parts = [
+        site_id.as_str(),
+        issue.id.as_str(),
+        comment.id.as_str(),
+        &activity,
+    ];
+    let left = stable_digest(&parts, 0xcbf29ce484222325);
+    let right = stable_digest(&parts, 0x84222325cbf29ce4);
+    jira_domain::EventId::new(format!("v1-comment-{left:016x}{right:016x}"))
+        .expect("event ID length")
+}
+
+fn stable_digest(parts: &[&str], mut hash: u64) -> u64 {
+    for part in parts {
+        for byte in (part.len() as u64)
+            .to_le_bytes()
+            .into_iter()
+            .chain(part.as_bytes().iter().copied())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
 }
 
 fn deduplicate_issues(issues: Vec<Issue>) -> Vec<Issue> {
@@ -413,7 +606,8 @@ mod tests {
 
     use jira_domain::{
         AccountId, EventId, IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery,
-        Priority, Project, Status, UpdateEvent, UpdateKind, User, UserSetId,
+        Priority, Project, RichBlock, RichInline, RichTextDocument, Status, UpdateEvent,
+        UpdateKind, User, UserSetId,
     };
     use time::macros::datetime;
 
@@ -427,6 +621,8 @@ mod tests {
     struct FakeJira {
         pages: Mutex<VecDeque<IssuePage>>,
         requests: Mutex<Vec<IssueFetchRequest>>,
+        recent_comments: Mutex<VecDeque<Result<Vec<jira_domain::IssueComment>, ApplicationError>>>,
+        comment_requests: Mutex<Vec<crate::RecentIssueCommentsRequest>>,
     }
 
     impl JiraReadPort for FakeJira {
@@ -477,6 +673,29 @@ mod tests {
         ) -> PortFuture<'a, Vec<Issue>> {
             Box::pin(async { Ok(Vec::new()) })
         }
+
+        fn fetch_recent_issue_comments<'a>(
+            &'a self,
+            request: &'a crate::RecentIssueCommentsRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<jira_domain::IssueComment>> {
+            self.comment_requests
+                .lock()
+                .expect("comment requests lock")
+                .push(request.clone());
+            let result = self
+                .recent_comments
+                .lock()
+                .expect("recent comments lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(ApplicationError::new(
+                        ErrorKind::Internal,
+                        "missing fake comments",
+                    ))
+                });
+            Box::pin(async move { result })
+        }
     }
 
     #[derive(Default)]
@@ -521,12 +740,16 @@ mod tests {
         }
 
         fn commit_sync<'a>(&'a self, commit: SyncCommit) -> PortFuture<'a, CommitOutcome> {
+            let committed_events = commit.update_events.clone();
             self.commits.lock().expect("commits lock").push(commit);
-            let events = self
-                .inserted_events
-                .lock()
-                .expect("inserted events lock")
-                .clone();
+            let events = if committed_events.is_empty() {
+                self.inserted_events
+                    .lock()
+                    .expect("inserted events lock")
+                    .clone()
+            } else {
+                committed_events
+            };
             Box::pin(async move {
                 Ok(CommitOutcome {
                     inserted_events: events,
@@ -667,6 +890,33 @@ mod tests {
         )
     }
 
+    fn mention_comment(
+        id: &str,
+        account_id: &AccountId,
+        created_at: jira_domain::Timestamp,
+        updated_at: Option<jira_domain::Timestamp>,
+    ) -> jira_domain::IssueComment {
+        let mut comment = jira_domain::IssueComment::new(
+            id,
+            None,
+            "@Asha was mentioned",
+            created_at,
+            updated_at,
+            Vec::new(),
+        )
+        .expect("comment");
+        comment.rich_body = Some(RichTextDocument::new(
+            vec![RichBlock::BulletList(vec![jira_domain::RichListItem {
+                blocks: vec![RichBlock::Paragraph(vec![RichInline::Mention {
+                    account_id: Some(account_id.clone()),
+                    label: "@Asha".into(),
+                }])],
+            }])],
+            false,
+        ));
+        comment
+    }
+
     fn service(
         jira: Arc<FakeJira>,
         cache: Arc<FakeCache>,
@@ -765,6 +1015,379 @@ mod tests {
             jira.requests.lock().expect("requests lock")[0].assignees,
             None
         );
+        assert!(
+            jira.comment_requests
+                .lock()
+                .expect("comment requests lock")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn direct_mention_delivers_for_watcher_only_changed_ticket_and_filters_activity() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let old_updated_at = datetime!(2026-08-16 10:00 UTC);
+        let new_updated_at = datetime!(2026-08-16 12:00 UTC);
+        let mut old_issue = fixture_issue(site_id.clone());
+        old_issue.updated_at = old_updated_at;
+        let mut incoming_issue = old_issue.clone();
+        incoming_issue.updated_at = new_updated_at;
+        let unrelated_account = AccountId::new("account-2").expect("account");
+        let direct = mention_comment(
+            "comment-1",
+            &account_id,
+            datetime!(2026-08-16 11:00 UTC),
+            None,
+        );
+        let unrelated = mention_comment(
+            "comment-2",
+            &unrelated_account,
+            datetime!(2026-08-16 11:10 UTC),
+            None,
+        );
+        let outside_window = mention_comment(
+            "comment-3",
+            &account_id,
+            datetime!(2026-08-16 09:00 UTC),
+            Some(datetime!(2026-08-16 09:30 UTC)),
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![incoming_issue],
+                next_cursor: None,
+                server_time: Some(new_updated_at),
+            }])),
+            recent_comments: Mutex::new(VecDeque::from([Ok(vec![
+                direct.clone(),
+                direct,
+                unrelated,
+                outside_window,
+            ])])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.existing.lock().expect("existing lock") = vec![old_issue];
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service(
+            jira.clone(),
+            cache.clone(),
+            Arc::new(FakeDiffer::default()),
+            notifications.clone(),
+            datetime!(2026-08-16 12:01 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: Some(vec![account_id.clone()]),
+                jql_scope: None,
+                notification_assignees: Some(vec![account_id]),
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("mention sync");
+
+        assert_eq!(outcome.events_inserted, 1);
+        assert_eq!(outcome.notifications_delivered, 1);
+        assert_eq!(*notifications.calls.lock().expect("notification calls"), 1);
+        let commits = cache.commits.lock().expect("commits lock");
+        assert_eq!(commits[0].update_events.len(), 1);
+        assert!(matches!(
+            commits[0].update_events[0].kind,
+            UpdateKind::CommentAdded { .. }
+        ));
+        let requests = jira.comment_requests.lock().expect("comment requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].limit, MAX_RECENT_ISSUE_COMMENTS);
+    }
+
+    #[test]
+    fn direct_mention_replaces_only_generic_fallback_for_assigned_issue() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let mut old_issue = fixture_issue(site_id.clone());
+        old_issue.assignee = Some(account_id.clone());
+        old_issue.updated_at = datetime!(2026-08-16 10:00 UTC);
+        let mut incoming_issue = old_issue.clone();
+        incoming_issue.updated_at = datetime!(2026-08-16 12:00 UTC);
+        let fallback = UpdateEvent::new(
+            EventId::new("generic-fallback").expect("event id"),
+            site_id.clone(),
+            incoming_issue.id.clone(),
+            incoming_issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            incoming_issue.updated_at,
+            vec![user_set_id.clone()],
+        );
+        let comment = mention_comment(
+            "comment-1",
+            &account_id,
+            datetime!(2026-08-16 11:00 UTC),
+            None,
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![incoming_issue],
+                next_cursor: None,
+                server_time: Some(datetime!(2026-08-16 12:00 UTC)),
+            }])),
+            recent_comments: Mutex::new(VecDeque::from([Ok(vec![comment])])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.existing.lock().expect("existing lock") = vec![old_issue];
+        let differ = Arc::new(FakeDiffer::default());
+        *differ.events.lock().expect("differ events lock") = vec![fallback];
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service(
+            jira,
+            cache.clone(),
+            differ,
+            notifications.clone(),
+            datetime!(2026-08-16 12:01 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: None,
+                jql_scope: None,
+                notification_assignees: Some(vec![account_id]),
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("mention sync");
+
+        assert_eq!(outcome.events_inserted, 1);
+        assert_eq!(outcome.notifications_delivered, 1);
+        assert_eq!(*notifications.calls.lock().expect("notification calls"), 1);
+        let commits = cache.commits.lock().expect("commits lock");
+        assert_eq!(commits[0].update_events.len(), 1);
+        assert!(matches!(
+            &commits[0].update_events[0].kind,
+            UpdateKind::CommentAdded { .. }
+        ));
+    }
+
+    #[test]
+    fn assignment_to_authenticated_account_is_delivered() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let old_issue = fixture_issue(site_id.clone());
+        let mut incoming_issue = old_issue.clone();
+        incoming_issue.assignee = Some(account_id.clone());
+        incoming_issue.updated_at = datetime!(2026-08-16 12:00 UTC);
+        let event = UpdateEvent::new(
+            EventId::new("assigned-to-me").expect("event id"),
+            site_id.clone(),
+            incoming_issue.id.clone(),
+            incoming_issue.key.clone(),
+            UpdateKind::AssigneeChanged {
+                old: jira_domain::ChangeValue::Empty,
+                new: jira_domain::ChangeValue::Account(account_id.clone()),
+            },
+            incoming_issue.updated_at,
+            vec![user_set_id.clone()],
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![incoming_issue],
+                next_cursor: None,
+                server_time: Some(datetime!(2026-08-16 12:00 UTC)),
+            }])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.existing.lock().expect("existing lock") = vec![old_issue];
+        let differ = Arc::new(FakeDiffer::default());
+        *differ.events.lock().expect("differ events lock") = vec![event.clone()];
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service(
+            jira,
+            cache.clone(),
+            differ,
+            notifications.clone(),
+            datetime!(2026-08-16 12:01 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: None,
+                jql_scope: None,
+                notification_assignees: Some(vec![account_id]),
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("assignment sync");
+
+        assert_eq!(outcome.notifications_delivered, 1);
+        assert_eq!(
+            cache.deliveries.lock().expect("deliveries lock").as_slice(),
+            &[(event.id, NotificationDelivery::Delivered)]
+        );
+    }
+
+    #[test]
+    fn assignment_away_from_watcher_only_ticket_is_suppressed() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let mut old_issue = fixture_issue(site_id.clone());
+        old_issue.assignee = Some(account_id.clone());
+        let mut incoming_issue = old_issue.clone();
+        incoming_issue.assignee = None;
+        incoming_issue.updated_at = datetime!(2026-08-16 12:00 UTC);
+        let event = UpdateEvent::new(
+            EventId::new("assigned-away").expect("event id"),
+            site_id.clone(),
+            incoming_issue.id.clone(),
+            incoming_issue.key.clone(),
+            UpdateKind::AssigneeChanged {
+                old: jira_domain::ChangeValue::Account(account_id.clone()),
+                new: jira_domain::ChangeValue::Empty,
+            },
+            incoming_issue.updated_at,
+            vec![user_set_id.clone()],
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![incoming_issue],
+                next_cursor: None,
+                server_time: Some(datetime!(2026-08-16 12:00 UTC)),
+            }])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.existing.lock().expect("existing lock") = vec![old_issue];
+        let differ = Arc::new(FakeDiffer::default());
+        *differ.events.lock().expect("differ events lock") = vec![event.clone()];
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service(
+            jira,
+            cache.clone(),
+            differ,
+            notifications.clone(),
+            datetime!(2026-08-16 12:01 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: Some(vec![account_id.clone()]),
+                jql_scope: None,
+                notification_assignees: Some(vec![account_id]),
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("assignment sync");
+
+        assert_eq!(outcome.notifications_delivered, 0);
+        assert_eq!(*notifications.calls.lock().expect("notification calls"), 0);
+        assert_eq!(
+            cache.deliveries.lock().expect("deliveries lock").as_slice(),
+            &[(event.id, NotificationDelivery::SuppressedByPolicy)]
+        );
+    }
+
+    #[test]
+    fn transient_recent_comment_error_aborts_before_commit_and_retry_reuses_cursor() {
+        let (site_id, user_set_id, account_id) = fixture_ids();
+        let mut old_issue = fixture_issue(site_id.clone());
+        old_issue.updated_at = datetime!(2026-08-16 10:00 UTC);
+        let mut incoming_issue = old_issue.clone();
+        incoming_issue.updated_at = datetime!(2026-08-16 12:00 UTC);
+        let previous_cursor = datetime!(2026-08-16 10:00 UTC);
+        let next_page = || IssuePage {
+            issues: vec![incoming_issue.clone()],
+            next_cursor: None,
+            server_time: Some(datetime!(2026-08-16 12:00 UTC)),
+        };
+        let comment = mention_comment(
+            "comment-1",
+            &account_id,
+            datetime!(2026-08-16 11:00 UTC),
+            None,
+        );
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([next_page(), next_page()])),
+            recent_comments: Mutex::new(VecDeque::from([
+                Err(ApplicationError::new(ErrorKind::Offline, "offline")),
+                Ok(vec![comment]),
+            ])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        *cache.existing.lock().expect("existing lock") = vec![old_issue];
+        *cache.state.lock().expect("state lock") = Some(SyncState {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            last_incremental_started_at: None,
+            last_incremental_succeeded_at: Some(previous_cursor),
+            last_full_sync_at: None,
+            consecutive_failures: 0,
+            last_error_kind: None,
+        });
+        let notifications = Arc::new(FakeNotifications::default());
+        let service = service(
+            jira.clone(),
+            cache.clone(),
+            Arc::new(FakeDiffer::default()),
+            notifications,
+            datetime!(2026-08-16 12:01 UTC),
+        );
+        let request = SyncRequest {
+            site_id,
+            user_set_id,
+            assignees: None,
+            watchers: None,
+            jql_scope: None,
+            notification_assignees: Some(vec![account_id]),
+            mode: SyncMode::Incremental,
+        };
+
+        let first = block_on(service.run(request.clone(), &CancellationToken::new()))
+            .expect_err("offline comment read must abort before commit");
+        assert_eq!(first.kind(), ErrorKind::Offline);
+        assert!(cache.commits.lock().expect("commits lock").is_empty());
+
+        let second = block_on(service.run(request, &CancellationToken::new()))
+            .expect("retry after comment read recovers");
+        assert_eq!(second.notifications_delivered, 1);
+        assert_eq!(cache.commits.lock().expect("commits lock").len(), 1);
+        let requests = jira.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].updated_since,
+            Some(previous_cursor - Duration::minutes(5))
+        );
+        assert_eq!(requests[0].updated_since, requests[1].updated_since);
+    }
+
+    #[test]
+    fn comment_event_id_is_stable_for_retries() {
+        let (site_id, _user_set_id, _account_id) = fixture_ids();
+        let issue = fixture_issue(site_id.clone());
+        let comment = jira_domain::IssueComment::new(
+            "comment-1",
+            None,
+            "body",
+            datetime!(2026-08-16 11:00 UTC),
+            None,
+            Vec::new(),
+        )
+        .expect("comment");
+        let first = comment_event_id(&site_id, &issue, &comment, comment.created_at);
+        let retry = comment_event_id(&site_id, &issue, &comment, comment.created_at);
+        assert_eq!(first, retry);
     }
 
     #[test]
