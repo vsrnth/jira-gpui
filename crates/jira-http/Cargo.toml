@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Read-only Jira Cloud HTTP adapter with an owned Tokio runtime"
+description = "Jira Cloud HTTP adapter with an owned Tokio runtime"
 
 [dependencies]
 jira-adapter = { path = "../jira" }

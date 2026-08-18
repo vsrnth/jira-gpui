@@ -6,11 +6,12 @@ use jira_domain::{
 };
 
 use crate::{
-    AddCommentRequest, ApplicationError, ApplicationEvent, AttachmentContent,
-    AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest, CancellationToken,
-    ChangeSet, CommitOutcome, IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest,
-    IssueFetchRequest, IssueListQuery, IssuePage, NotificationRequest, SyncCommit, SyncState,
-    UpdateFeedQuery, UserSearchRequest, UserSetDraft,
+    AddCommentRequest, ApplicationError, ApplicationEvent, AssignIssueRequest,
+    AssignableUserSearchRequest, AttachmentContent, AttachmentDownloadRequest, AttachmentImage,
+    AttachmentImageRequest, CancellationToken, ChangeSet, CommitOutcome, IssueCommentsPage,
+    IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueListQuery, IssuePage,
+    IssueTransition, IssueTransitionsRequest, NotificationRequest, SyncCommit, SyncState,
+    TransitionIssueRequest, UpdateFeedQuery, UserSearchRequest, UserSetDraft,
 };
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationError>> + Send + 'a>>;
@@ -95,14 +96,48 @@ pub trait JiraReadPort: Send + Sync {
     ) -> PortFuture<'a, Vec<Issue>>;
 }
 
-/// The sole Jira write boundary. Implementations must issue exactly one
-/// explicit comment creation request and must not retry it automatically.
+/// Dedicated confirmed Jira comment-write boundary. Implementations must issue
+/// exactly one explicit comment creation request and must not retry it
+/// automatically.
 pub trait JiraCommentWritePort: Send + Sync {
     fn create_comment<'a>(
         &'a self,
         request: &'a AddCommentRequest,
         cancellation: &'a CancellationToken,
     ) -> PortFuture<'a, jira_domain::IssueComment>;
+}
+
+/// Explicit issue-edit boundary. Every write method represents one already
+/// confirmed user action and must dispatch exactly once; implementations must
+/// not retry after handing a request to Jira.
+pub trait JiraIssueEditPort: Send + Sync {
+    fn search_assignable_users<'a>(
+        &'a self,
+        request: &'a AssignableUserSearchRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<jira_domain::User>>;
+
+    fn fetch_issue_transitions<'a>(
+        &'a self,
+        request: &'a IssueTransitionsRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueTransition>>;
+
+    /// Dispatch one confirmed assignment exactly once. An `UnknownOutcome`
+    /// error must be returned unchanged when Jira's response is uncertain.
+    fn assign_issue<'a>(
+        &'a self,
+        request: &'a AssignIssueRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()>;
+
+    /// Dispatch one confirmed transition exactly once. An `UnknownOutcome`
+    /// error must be returned unchanged when Jira's response is uncertain.
+    fn transition_issue<'a>(
+        &'a self,
+        request: &'a TransitionIssueRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()>;
 }
 
 /// Cache operations required by issue browsing and synchronization.

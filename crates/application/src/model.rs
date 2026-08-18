@@ -1,5 +1,5 @@
 use jira_domain::{
-    AccountId, Issue, IssueComment, IssueId, IssueKey, JiraSiteId, Timestamp, UpdateEvent,
+    AccountId, Issue, IssueComment, IssueId, IssueKey, JiraSiteId, Status, Timestamp, UpdateEvent,
     UpdateKind, UserSetId,
 };
 
@@ -27,6 +27,49 @@ pub struct AddCommentRequest {
     pub site_id: JiraSiteId,
     pub locator: IssueLocator,
     pub body: String,
+}
+
+/// A bounded search for users that Jira permits as assignees on an issue.
+///
+/// An empty query is intentional: Jira can use it to return the initial set of
+/// candidates before a user has typed a filter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignableUserSearchRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+    pub query: String,
+    pub limit: usize,
+}
+
+/// A request for the transitions currently available for an issue.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueTransitionsRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+}
+
+/// A transition exposed by Jira's issue workflow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueTransition {
+    pub id: String,
+    pub name: String,
+    pub to: Status,
+}
+
+/// A user-confirmed assignment request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignIssueRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+    pub assignee: Option<AccountId>,
+}
+
+/// A user-confirmed workflow transition request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionIssueRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+    pub transition_id: String,
 }
 
 /// Typed request for the core issue-detail payload.

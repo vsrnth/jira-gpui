@@ -1,4 +1,5 @@
-//! Read-only Jira Cloud HTTP transport.
+//! Jira Cloud HTTP transport for remote reads and explicitly confirmed comment, assignment, and
+//! workflow-status writes. Writes are dispatched once without automatic retries.
 //!
 //! The adapter owns a small Tokio runtime on a worker thread. This is intentional: GPUI and a
 //! future Tauri shell can poll the application ports without having to install or drive a Tokio
@@ -12,22 +13,24 @@ use std::{
 
 use jira_adapter::{EnhancedSearchPage, IssueMapper, JiraCommentPage, JiraIssue, JiraUser};
 use jira_application::{
-    AddCommentRequest, ApplicationError, AttachmentBodyClass, AttachmentContent,
-    AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest, AttachmentMimeClass,
-    AttachmentReadAttempt, AttachmentReadDiagnostic, AttachmentTransportClass, CancellationToken,
-    DEFAULT_ATTACHMENT_IMAGE_HEIGHT, DEFAULT_ATTACHMENT_IMAGE_WIDTH,
-    DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind,
-    IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
-    IssueLocator, IssuePage, JiraCommentWritePort, JiraReadPort, PageCursor, PortFuture,
+    AddCommentRequest, ApplicationError, AssignIssueRequest, AssignableUserSearchRequest,
+    AttachmentBodyClass, AttachmentContent, AttachmentDownloadRequest, AttachmentImage,
+    AttachmentImageRequest, AttachmentMimeClass, AttachmentReadAttempt, AttachmentReadDiagnostic,
+    AttachmentTransportClass, CancellationToken, DEFAULT_ATTACHMENT_IMAGE_HEIGHT,
+    DEFAULT_ATTACHMENT_IMAGE_WIDTH, DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
+    DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind, IssueCommentsPage, IssueCommentsPageRequest,
+    IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, IssueTransition,
+    IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort,
+    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture, TransitionIssueRequest,
     UserSearchRequest,
 };
-use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, User};
+use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, Status, User};
 use reqwest::{Client, Response, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{runtime::Builder, sync::oneshot};
 use url::Url;
 
-const DEFAULT_USER_AGENT: &str = "jira-gpui/0.1 (read-only client)";
+const DEFAULT_USER_AGENT: &str = "jira-gpui/0.1 (Jira Cloud client)";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -72,6 +75,53 @@ struct JiraAdfText {
     #[serde(rename = "type")]
     kind: &'static str,
     text: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JiraTransitionsResponse {
+    transitions: Vec<JiraTransitionResponse>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct JiraTransitionResponse {
+    id: String,
+    name: String,
+    to: JiraTransitionStatusResponse,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JiraTransitionStatusResponse {
+    id: String,
+    name: String,
+    #[serde(default)]
+    status_category: Option<JiraStatusCategoryResponse>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JiraStatusCategoryResponse {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraAssigneeRequest {
+    #[serde(rename = "accountId")]
+    account_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraTransitionRequest {
+    transition: JiraTransitionIdRequest,
+}
+
+#[derive(Debug, Serialize)]
+struct JiraTransitionIdRequest {
+    id: String,
 }
 
 fn jira_comment_create_body(text: &str) -> JiraCommentCreateRequest {
@@ -198,7 +248,7 @@ impl JiraHttpConfig {
     }
 }
 
-/// Read-only Jira Cloud client implementing the application boundary.
+/// Jira Cloud client implementing the application read and explicit-write boundaries.
 pub struct JiraHttpClient {
     site_id: JiraSiteId,
     base_url: JiraBaseUrl,
@@ -387,6 +437,123 @@ impl JiraHttpClient {
                     })
             })
             .collect()
+    }
+
+    async fn search_assignable_users_request(
+        client: Client,
+        mut url: Url,
+        credentials: ApiTokenCredentials,
+        request: AssignableUserSearchRequest,
+        max_response_bytes: usize,
+    ) -> Result<Vec<User>, ApplicationError> {
+        let limit = validate_user_limit(request.limit)?;
+        validate_user_query(&request.query)?;
+        url.query_pairs_mut().append_pair("query", &request.query);
+        append_issue_locator_query(&mut url, &request.locator)?;
+        url.query_pairs_mut()
+            .append_pair("maxResults", &limit.to_string());
+        let response = client
+            .get(url)
+            .basic_auth(credentials.email, Some(credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let users: Vec<JiraUser> = read_json(response, max_response_bytes).await?;
+        users
+            .into_iter()
+            .map(|user| {
+                IssueMapper
+                    .map_user(request.site_id.clone(), user)
+                    .map_err(|_| {
+                        ApplicationError::new(
+                            ErrorKind::Upstream,
+                            "Jira returned invalid assignable user data",
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    async fn fetch_issue_transitions_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        max_response_bytes: usize,
+    ) -> Result<Vec<IssueTransition>, ApplicationError> {
+        let response = client
+            .get(url)
+            .basic_auth(credentials.email, Some(credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let payload: JiraTransitionsResponse = read_json(response, max_response_bytes).await?;
+        payload
+            .transitions
+            .into_iter()
+            .map(map_transition)
+            .collect()
+    }
+
+    async fn assign_issue_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        assignee: Option<jira_domain::AccountId>,
+    ) -> Result<(), ApplicationError> {
+        let body = JiraAssigneeRequest {
+            account_id: assignee.map(jira_domain::AccountId::into_inner),
+        };
+        let response = Self::assign_issue_request_builder(&client, url, &credentials, body)
+            .send()
+            .await
+            .map_err(write_transport_error)?;
+        read_write_response(response).await
+    }
+
+    fn assign_issue_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+        body: JiraAssigneeRequest,
+    ) -> reqwest::RequestBuilder {
+        client
+            .put(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .json(&body)
+    }
+
+    async fn transition_issue_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        transition_id: String,
+    ) -> Result<(), ApplicationError> {
+        let body = JiraTransitionRequest {
+            transition: JiraTransitionIdRequest { id: transition_id },
+        };
+        let response = Self::transition_issue_request_builder(&client, url, &credentials, body)
+            .send()
+            .await
+            .map_err(write_transport_error)?;
+        read_write_response(response).await
+    }
+
+    fn transition_issue_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+        body: JiraTransitionRequest,
+    ) -> reqwest::RequestBuilder {
+        client
+            .post(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .json(&body)
     }
 
     async fn current_user_request(
@@ -991,6 +1158,127 @@ impl JiraCommentWritePort for JiraHttpClient {
     }
 }
 
+impl JiraIssueEditPort for JiraHttpClient {
+    fn search_assignable_users<'a>(
+        &'a self,
+        request: &'a AssignableUserSearchRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<User>> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_user_limit(request.limit) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_user_query(&request.query) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_issue_locator(&request.locator) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.endpoint("rest/api/3/user/assignable/search") {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let request = request.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::search_assignable_users_request(client, url, credentials, request, max).await
+        })
+    }
+
+    fn fetch_issue_transitions<'a>(
+        &'a self,
+        request: &'a IssueTransitionsRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueTransition>> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_issue_locator(&request.locator) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.locator, Some("transitions")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::fetch_issue_transitions_request(client, url, credentials, max).await
+        })
+    }
+
+    fn assign_issue<'a>(
+        &'a self,
+        request: &'a AssignIssueRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_issue_locator(&request.locator) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Some(account_id) = request.assignee.as_ref()
+            && let Err(error) = validate_string_id(account_id.as_str(), "assignee account ID")
+        {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.locator, Some("assignee")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let assignee = request.assignee.clone();
+        self.submit_write(cancellation, async move {
+            Self::assign_issue_request(client, url, credentials, assignee).await
+        })
+    }
+
+    fn transition_issue<'a>(
+        &'a self,
+        request: &'a TransitionIssueRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_issue_locator(&request.locator) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_string_id(&request.transition_id, "transition ID") {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.locator, Some("transitions")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let transition_id = request.transition_id.clone();
+        self.submit_write(cancellation, async move {
+            Self::transition_issue_request(client, url, credentials, transition_id).await
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
     #[error("Jira base URL must be a valid HTTPS Atlassian Cloud URL")]
@@ -1032,6 +1320,104 @@ fn validate_base_url(url: &Url, require_atlassian: bool) -> Result<JiraBaseUrl, 
         }
     }
     Ok(JiraBaseUrl(url.clone()))
+}
+
+fn validate_string_id(value: &str, field: &'static str) -> Result<(), ApplicationError> {
+    if value.trim().is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+        return Err(ApplicationError::invalid_input(format!(
+            "{field} is invalid"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_issue_locator(locator: &IssueLocator) -> Result<(), ApplicationError> {
+    let value = match locator {
+        IssueLocator::Id(issue_id) => issue_id.as_str(),
+        IssueLocator::Key(issue_key) => issue_key.as_str(),
+    };
+    validate_string_id(value, "issue locator")
+}
+
+fn validate_user_limit(limit: usize) -> Result<usize, ApplicationError> {
+    if limit == 0 || limit > MAX_ASSIGNABLE_USER_SEARCH_LIMIT {
+        return Err(ApplicationError::invalid_input(
+            "assignable user search limit is invalid",
+        ));
+    }
+    Ok(limit)
+}
+
+fn validate_user_query(query: &str) -> Result<(), ApplicationError> {
+    if query.chars().count() > 255 || query.chars().any(char::is_control) {
+        return Err(ApplicationError::invalid_input(
+            "assignable user search query is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn append_issue_locator_query(
+    url: &mut Url,
+    locator: &IssueLocator,
+) -> Result<(), ApplicationError> {
+    validate_issue_locator(locator)?;
+    match locator {
+        IssueLocator::Id(issue_id) => {
+            url.query_pairs_mut()
+                .append_pair("issueId", issue_id.as_str());
+        }
+        IssueLocator::Key(issue_key) => {
+            url.query_pairs_mut()
+                .append_pair("issueKey", issue_key.as_str());
+        }
+    }
+    Ok(())
+}
+
+fn map_transition(transition: JiraTransitionResponse) -> Result<IssueTransition, ApplicationError> {
+    validate_string_id(&transition.id, "transition ID")
+        .map_err(|_| invalid_transition_response())?;
+    validate_string_id(&transition.name, "transition name")
+        .map_err(|_| invalid_transition_response())?;
+    validate_string_id(&transition.to.id, "transition status ID")
+        .map_err(|_| invalid_transition_response())?;
+    validate_string_id(&transition.to.name, "transition status name")
+        .map_err(|_| invalid_transition_response())?;
+    let category = transition.to.status_category.and_then(|category| {
+        category
+            .name
+            .filter(|value| !value.trim().is_empty())
+            .or(category.key.filter(|value| !value.trim().is_empty()))
+    });
+    if category
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 255 || value.chars().any(char::is_control))
+    {
+        return Err(invalid_transition_response());
+    }
+    Ok(IssueTransition {
+        id: transition.id,
+        name: transition.name,
+        to: Status {
+            id: transition.to.id,
+            name: transition.to.name,
+            category,
+        },
+    })
+}
+
+fn invalid_transition_response() -> ApplicationError {
+    ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid transition data")
+}
+
+async fn read_write_response(response: Response) -> Result<(), ApplicationError> {
+    let status = response.status();
+    if status == StatusCode::NO_CONTENT {
+        Ok(())
+    } else {
+        Err(write_status_error(status, response.headers()))
+    }
 }
 
 fn transport_error(error: reqwest::Error) -> ApplicationError {
@@ -1248,21 +1634,35 @@ fn finish_attachment_body(
 }
 
 fn comment_transport_error(error: reqwest::Error) -> ApplicationError {
-    if error.is_connect() {
-        ApplicationError::new(ErrorKind::Offline, "could not connect to Jira")
-    } else {
-        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
-    }
+    write_transport_error(error)
 }
 
 fn write_dispatch_error(_error: ApplicationError) -> ApplicationError {
-    ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
+    write_unknown_outcome()
 }
 
 fn comment_status_error(status: StatusCode, headers: &header::HeaderMap) -> ApplicationError {
+    write_status_error(status, headers)
+}
+
+fn write_transport_error(error: reqwest::Error) -> ApplicationError {
+    if error.is_connect() && !error.is_timeout() {
+        ApplicationError::new(ErrorKind::Offline, "could not connect to Jira")
+    } else {
+        write_unknown_outcome()
+    }
+}
+
+fn write_unknown_outcome() -> ApplicationError {
+    ApplicationError::new(ErrorKind::UnknownOutcome, "Jira write outcome is unknown")
+}
+
+fn write_status_error(status: StatusCode, headers: &header::HeaderMap) -> ApplicationError {
     match status {
-        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE => {
-            ApplicationError::invalid_input("Jira rejected the comment request")
+        StatusCode::BAD_REQUEST
+        | StatusCode::PAYLOAD_TOO_LARGE
+        | StatusCode::UNPROCESSABLE_ENTITY => {
+            ApplicationError::invalid_input("Jira rejected the write request")
         }
         StatusCode::UNAUTHORIZED => {
             ApplicationError::new(ErrorKind::Authentication, "Jira authentication failed")
@@ -1273,10 +1673,14 @@ fn comment_status_error(status: StatusCode, headers: &header::HeaderMap) -> Appl
         StatusCode::NOT_FOUND => {
             ApplicationError::new(ErrorKind::NotFound, "Jira issue was not found")
         }
+        StatusCode::CONFLICT => ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira rejected the write due to a conflict",
+        ),
         StatusCode::TOO_MANY_REQUESTS => {
             ApplicationError::rate_limited("Jira rate limit exceeded", retry_after(headers))
         }
-        _ => ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown"),
+        _ => write_unknown_outcome(),
     }
 }
 
@@ -1293,20 +1697,16 @@ async fn read_created_comment(
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err(ApplicationError::new(
-            ErrorKind::UnknownOutcome,
-            "Jira comment outcome is unknown",
-        ));
+        return Err(write_unknown_outcome());
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| {
-        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
-    })? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| write_unknown_outcome())?
+    {
         if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(ApplicationError::new(
-                ErrorKind::UnknownOutcome,
-                "Jira comment outcome is unknown",
-            ));
+            return Err(write_unknown_outcome());
         }
         body.extend_from_slice(&chunk);
     }
@@ -1314,12 +1714,11 @@ async fn read_created_comment(
 }
 
 fn map_created_comment_body(body: &[u8]) -> Result<IssueComment, ApplicationError> {
-    let comment: jira_adapter::JiraComment = serde_json::from_slice(body).map_err(|_| {
-        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
-    })?;
-    IssueMapper.map_comment(comment).map_err(|_| {
-        ApplicationError::new(ErrorKind::UnknownOutcome, "Jira comment outcome is unknown")
-    })
+    let comment: jira_adapter::JiraComment =
+        serde_json::from_slice(body).map_err(|_| write_unknown_outcome())?;
+    IssueMapper
+        .map_comment(comment)
+        .map_err(|_| write_unknown_outcome())
 }
 
 async fn read_json<T: DeserializeOwned>(
@@ -1628,6 +2027,291 @@ mod tests {
 
         assert_eq!(url.path(), "/rest/api/3/issue/ENG-42");
         assert_eq!(url.query(), None);
+    }
+
+    #[test]
+    fn assignable_user_query_uses_typed_locator_params_and_encodes_untrusted_values() {
+        let mut url =
+            Url::parse("https://example.atlassian.net/rest/api/3/user/assignable/search").unwrap();
+        let locator = IssueLocator::Id(IssueId::new("ENG/42?private#fragment").unwrap());
+        url.query_pairs_mut()
+            .append_pair("query", "ada+lovelace & admin");
+        append_issue_locator_query(&mut url, &locator).unwrap();
+        url.query_pairs_mut().append_pair("maxResults", "25");
+
+        assert_eq!(
+            url.query(),
+            Some(
+                "query=ada%2Blovelace+%26+admin&issueId=ENG%2F42%3Fprivate%23fragment&maxResults=25"
+            )
+        );
+
+        let mut key_url =
+            Url::parse("https://example.atlassian.net/rest/api/3/user/assignable/search").unwrap();
+        append_issue_locator_query(
+            &mut key_url,
+            &IssueLocator::Key(jira_domain::IssueKey::new("ENG-42").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(key_url.query(), Some("issueKey=ENG-42"));
+    }
+
+    #[test]
+    fn issue_edit_request_builders_use_expected_methods_headers_and_json_shapes() {
+        let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
+        let assign_url =
+            Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/assignee").unwrap();
+        let assigned = JiraHttpClient::assign_issue_request_builder(
+            &Client::new(),
+            assign_url,
+            &credentials,
+            JiraAssigneeRequest {
+                account_id: Some("557058:abc-123".to_owned()),
+            },
+        )
+        .build()
+        .unwrap();
+        assert_eq!(assigned.method(), reqwest::Method::PUT);
+        assert_eq!(
+            assigned.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                assigned.body().and_then(reqwest::Body::as_bytes).unwrap(),
+            )
+            .unwrap(),
+            serde_json::json!({"accountId": "557058:abc-123"})
+        );
+
+        let unassigned = JiraHttpClient::assign_issue_request_builder(
+            &Client::new(),
+            Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/assignee").unwrap(),
+            &credentials,
+            JiraAssigneeRequest { account_id: None },
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                unassigned.body().and_then(reqwest::Body::as_bytes).unwrap(),
+            )
+            .unwrap(),
+            serde_json::json!({"accountId": null})
+        );
+
+        let transitioned = JiraHttpClient::transition_issue_request_builder(
+            &Client::new(),
+            Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/transitions")
+                .unwrap(),
+            &credentials,
+            JiraTransitionRequest {
+                transition: JiraTransitionIdRequest {
+                    id: "31".to_owned(),
+                },
+            },
+        )
+        .build()
+        .unwrap();
+        assert_eq!(transitioned.method(), reqwest::Method::POST);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                transitioned
+                    .body()
+                    .and_then(reqwest::Body::as_bytes)
+                    .unwrap(),
+            )
+            .unwrap(),
+            serde_json::json!({"transition": {"id": "31"}})
+        );
+    }
+
+    #[test]
+    fn transition_response_maps_to_transport_neutral_status_and_rejects_invalid_values() {
+        let payload: JiraTransitionsResponse = serde_json::from_value(serde_json::json!({
+            "transitions": [{
+                "id": "31",
+                "name": "In progress",
+                "to": {
+                    "id": "3",
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"}
+                }
+            }]
+        }))
+        .unwrap();
+        let transitions = payload
+            .transitions
+            .into_iter()
+            .map(map_transition)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(transitions[0].id, "31");
+        assert_eq!(transitions[0].name, "In progress");
+        assert_eq!(transitions[0].to.id, "3");
+        assert_eq!(transitions[0].to.name, "In Progress");
+        assert_eq!(transitions[0].to.category.as_deref(), Some("indeterminate"));
+
+        let invalid = map_transition(JiraTransitionResponse {
+            id: String::new(),
+            name: "In progress".to_owned(),
+            to: JiraTransitionStatusResponse {
+                id: "3".to_owned(),
+                name: "In Progress".to_owned(),
+                status_category: None,
+            },
+        })
+        .unwrap_err();
+        assert_eq!(invalid.kind(), ErrorKind::Upstream);
+        assert_eq!(invalid.message(), "Jira returned invalid transition data");
+
+        let invalid_category = map_transition(JiraTransitionResponse {
+            id: "31".to_owned(),
+            name: "In progress".to_owned(),
+            to: JiraTransitionStatusResponse {
+                id: "3".to_owned(),
+                name: "In Progress".to_owned(),
+                status_category: Some(JiraStatusCategoryResponse {
+                    name: Some("bad\ncategory".to_owned()),
+                    key: Some("indeterminate".to_owned()),
+                }),
+            },
+        })
+        .unwrap_err();
+        assert_eq!(invalid_category.kind(), ErrorKind::Upstream);
+    }
+
+    #[test]
+    fn write_statuses_have_definite_safe_categories_and_unexpected_statuses_are_unknown() {
+        let headers = header::HeaderMap::new();
+        for (status, kind) in [
+            (StatusCode::BAD_REQUEST, ErrorKind::InvalidInput),
+            (StatusCode::UNAUTHORIZED, ErrorKind::Authentication),
+            (StatusCode::FORBIDDEN, ErrorKind::Authorization),
+            (StatusCode::NOT_FOUND, ErrorKind::NotFound),
+            (StatusCode::CONFLICT, ErrorKind::Upstream),
+            (StatusCode::PAYLOAD_TOO_LARGE, ErrorKind::InvalidInput),
+            (StatusCode::UNPROCESSABLE_ENTITY, ErrorKind::InvalidInput),
+            (StatusCode::TOO_MANY_REQUESTS, ErrorKind::RateLimited),
+        ] {
+            assert_eq!(write_status_error(status, &headers).kind(), kind);
+        }
+        for status in [
+            StatusCode::OK,
+            StatusCode::CREATED,
+            StatusCode::FOUND,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(
+                write_status_error(status, &headers).kind(),
+                ErrorKind::UnknownOutcome
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_dispatches_one_http_request_without_retrying_an_unknown_result() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let responder = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            });
+            let credentials = ApiTokenCredentials::new("person@example.com", "token").unwrap();
+            let account_id = jira_domain::AccountId::new("557058:abc-123").unwrap();
+            let error = JiraHttpClient::assign_issue_request(
+                Client::new(),
+                Url::parse(&format!("http://{address}/rest/api/3/issue/ENG-42/assignee"))
+                    .unwrap(),
+                credentials,
+                Some(account_id),
+            )
+            .await
+            .unwrap_err();
+            assert!(responder.await.unwrap(), "assignment was retried");
+            assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
+        });
+    }
+
+    #[test]
+    fn cancelled_issue_edits_are_rejected_before_dispatch() {
+        let site = JiraSiteId::new("configured-site").unwrap();
+        let client = JiraHttpClient::new(
+            site.clone(),
+            "https://example.atlassian.net",
+            ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
+        )
+        .unwrap();
+        let locator = IssueLocator::Key(jira_domain::IssueKey::new("ENG-42").unwrap());
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let assign = AssignIssueRequest {
+            site_id: site.clone(),
+            locator: locator.clone(),
+            assignee: None,
+        };
+        let transition = TransitionIssueRequest {
+            site_id: site.clone(),
+            locator: locator.clone(),
+            transition_id: "31".to_owned(),
+        };
+        let search = AssignableUserSearchRequest {
+            site_id: site,
+            locator,
+            query: String::new(),
+            limit: 25,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(JiraIssueEditPort::assign_issue(
+                    &client,
+                    &assign,
+                    &cancellation,
+                ))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Cancelled
+        );
+        assert_eq!(
+            runtime
+                .block_on(JiraIssueEditPort::transition_issue(
+                    &client,
+                    &transition,
+                    &cancellation,
+                ))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Cancelled
+        );
+        assert_eq!(
+            runtime
+                .block_on(JiraIssueEditPort::search_assignable_users(
+                    &client,
+                    &search,
+                    &cancellation,
+                ))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Cancelled
+        );
     }
 
     #[test]
@@ -2214,7 +2898,7 @@ mod tests {
         ));
 
         assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
-        assert_eq!(error.message(), "Jira comment outcome is unknown");
+        assert_eq!(error.message(), "Jira write outcome is unknown");
         assert!(!error.message().contains("secret-token"));
     }
 
@@ -2223,7 +2907,7 @@ mod tests {
         let error = map_created_comment_body(br#"{"id":"secret-token"}"#).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
-        assert_eq!(error.message(), "Jira comment outcome is unknown");
+        assert_eq!(error.message(), "Jira write outcome is unknown");
         assert!(!error.message().contains("secret-token"));
     }
 

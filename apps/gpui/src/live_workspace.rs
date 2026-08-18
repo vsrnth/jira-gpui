@@ -7,13 +7,14 @@
 use std::sync::Arc;
 
 use jira_application::{
-    AddCommentRequest, ApplicationError, AttachmentContent, AttachmentDownloadRequest,
-    AttachmentImage, AttachmentImageRequest, CancellationToken, Clock, CommentService,
-    DefaultDesktopNotificationPolicy, DefaultIssueDiffer, IssueCachePort, IssueCatalogService,
-    IssueDetailConfig, IssueDetailRequest, IssueDetailService, IssueListQuery, IssueLocator,
-    IssueMediaConfig, IssueMediaService, JiraCommentWritePort, JiraReadPort, NoopEventSink,
-    SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService, UpdateFeedQuery,
-    UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
+    AddCommentRequest, ApplicationError, AssignIssueRequest, AssignableUserSearchRequest,
+    AttachmentContent, AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest,
+    CancellationToken, Clock, CommentService, DefaultDesktopNotificationPolicy, DefaultIssueDiffer,
+    IssueCachePort, IssueCatalogService, IssueDetailConfig, IssueDetailRequest, IssueDetailService,
+    IssueEditService, IssueListQuery, IssueLocator, IssueMediaConfig, IssueMediaService,
+    IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort, NoopEventSink,
+    SyncConfig, SyncMode, SyncOutcome, SyncRequest, SyncService, TransitionIssueRequest,
+    UpdateFeedQuery, UpdateFeedService, UserSetDraft, UserSetPort, UserSetService,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
@@ -57,6 +58,7 @@ pub struct LiveWorkspace {
     detail: IssueDetailService,
     media: IssueMediaService,
     comments: CommentService,
+    issue_editor: IssueEditService,
     cache: Arc<SqliteStore>,
     sync: SyncService,
 }
@@ -84,6 +86,25 @@ impl LiveWorkspace {
         authenticated_account: Option<AccountId>,
         jira: Arc<dyn JiraReadPort>,
         comment_writer: Arc<dyn JiraCommentWritePort>,
+        cache: Arc<SqliteStore>,
+    ) -> Result<Self, ApplicationError> {
+        Self::initialize_with_writers(
+            site_id,
+            authenticated_account,
+            jira,
+            comment_writer,
+            Arc::new(UnsupportedIssueEditor),
+            cache,
+        )
+        .await
+    }
+
+    pub async fn initialize_with_writers(
+        site_id: JiraSiteId,
+        authenticated_account: Option<AccountId>,
+        jira: Arc<dyn JiraReadPort>,
+        comment_writer: Arc<dyn JiraCommentWritePort>,
+        issue_editor: Arc<dyn JiraIssueEditPort>,
         cache: Arc<SqliteStore>,
     ) -> Result<Self, ApplicationError> {
         let members = authenticated_account.iter().cloned().collect::<Vec<_>>();
@@ -130,6 +151,7 @@ impl LiveWorkspace {
         let detail = IssueDetailService::new(jira.clone(), IssueDetailConfig::default());
         let media = IssueMediaService::new(jira.clone(), IssueMediaConfig::default());
         let comments = CommentService::new(comment_writer);
+        let issue_editor = IssueEditService::new(issue_editor);
         let events = Arc::new(NoopEventSink);
         let feed = UpdateFeedService::new(
             cache.clone() as Arc<dyn jira_application::UpdateFeedPort>,
@@ -155,6 +177,7 @@ impl LiveWorkspace {
             detail,
             media,
             comments,
+            issue_editor,
             cache,
             sync,
         })
@@ -222,6 +245,87 @@ impl LiveWorkspace {
                     site_id: self.site_id.clone(),
                     locator,
                     body,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Search the bounded set of users that Jira permits for assignment. An
+    /// empty query is allowed for initial picker candidates.
+    pub async fn search_assignable_users(
+        &self,
+        locator: IssueLocator,
+        query: String,
+        limit: usize,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<jira_domain::User>, ApplicationError> {
+        self.issue_editor
+            .search_assignable_users(
+                AssignableUserSearchRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                    query,
+                    limit,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Load the workflow transitions currently available for an issue.
+    pub async fn available_transitions(
+        &self,
+        locator: IssueLocator,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<jira_application::IssueTransition>, ApplicationError> {
+        self.issue_editor
+            .available_transitions(
+                IssueTransitionsRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Dispatch one assignment after the presentation layer has obtained
+    /// explicit user confirmation. The application service dispatches once and
+    /// never retries an uncertain Jira response.
+    pub async fn assign_issue(
+        &self,
+        locator: IssueLocator,
+        assignee: Option<AccountId>,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ApplicationError> {
+        self.issue_editor
+            .assign(
+                AssignIssueRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                    assignee,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Dispatch one workflow transition after the presentation layer has
+    /// obtained explicit user confirmation. The application service dispatches
+    /// once and never retries an uncertain Jira response.
+    pub async fn transition_issue(
+        &self,
+        locator: IssueLocator,
+        transition_id: String,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ApplicationError> {
+        self.issue_editor
+            .transition(
+                TransitionIssueRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                    transition_id,
                 },
                 cancellation,
             )
@@ -431,6 +535,55 @@ impl JiraCommentWritePort for UnsupportedCommentWriter {
         Box::pin(std::future::ready(Err(ApplicationError::new(
             jira_application::ErrorKind::Internal,
             "comment creation is unavailable in this workspace",
+        ))))
+    }
+}
+
+#[derive(Debug)]
+struct UnsupportedIssueEditor;
+
+impl JiraIssueEditPort for UnsupportedIssueEditor {
+    fn search_assignable_users<'a>(
+        &'a self,
+        _request: &'a AssignableUserSearchRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> jira_application::PortFuture<'a, Vec<jira_domain::User>> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            jira_application::ErrorKind::Internal,
+            "issue assignment is unavailable in this workspace",
+        ))))
+    }
+
+    fn fetch_issue_transitions<'a>(
+        &'a self,
+        _request: &'a IssueTransitionsRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> jira_application::PortFuture<'a, Vec<jira_application::IssueTransition>> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            jira_application::ErrorKind::Internal,
+            "issue transitions are unavailable in this workspace",
+        ))))
+    }
+
+    fn assign_issue<'a>(
+        &'a self,
+        _request: &'a AssignIssueRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> jira_application::PortFuture<'a, ()> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            jira_application::ErrorKind::Internal,
+            "issue assignment is unavailable in this workspace",
+        ))))
+    }
+
+    fn transition_issue<'a>(
+        &'a self,
+        _request: &'a TransitionIssueRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> jira_application::PortFuture<'a, ()> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            jira_application::ErrorKind::Internal,
+            "issue transitions are unavailable in this workspace",
         ))))
     }
 }
