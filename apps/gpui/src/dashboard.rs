@@ -5152,6 +5152,7 @@ impl Dashboard {
                                 this.child(
                                     Textarea::new(&input)
                                         .w_full()
+                                        .h(px(if layout.is_mobile() { 128. } else { 160. }))
                                         .aria_label("JQL scope")
                                         .disabled(!live || self.operation_in_progress),
                                 )
@@ -5577,6 +5578,13 @@ mod tests {
 
         assert_eq!(dashboard.update_filter, UpdateFilter::All);
         assert!(dashboard.expanded_update_groups.is_empty());
+    }
+
+    #[test]
+    fn settings_editor_starts_with_the_default_scope() {
+        let dashboard = Dashboard::from_sample_data();
+
+        assert_eq!(dashboard.settings_scope_text, DEFAULT_JQL_SCOPE);
     }
 
     fn refresh_result_with_inserted_events(events_inserted: usize) -> RefreshResult {
