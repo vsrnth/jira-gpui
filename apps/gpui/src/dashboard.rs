@@ -931,6 +931,40 @@ fn team_identifier_lines(value: &str) -> Result<Vec<String>, &'static str> {
     Ok(lines)
 }
 
+fn team_issue_counts(issues: &[Issue]) -> (usize, usize) {
+    let displayed = issues
+        .iter()
+        .filter(|issue| {
+            issue
+                .status
+                .category
+                .as_deref()
+                .is_some_and(|category| category.trim().eq_ignore_ascii_case("in progress"))
+        })
+        .count();
+    (issues.len(), displayed)
+}
+
+fn team_refresh_feedback(prefix: &str, issues: &[Issue]) -> String {
+    let (fetched, displayed) = team_issue_counts(issues);
+    format!(
+        "{prefix} · fetched {fetched} · displaying {displayed} in-progress {}",
+        if displayed == 1 { "ticket" } else { "tickets" }
+    )
+}
+
+fn team_summary(displayed: usize, configured_members: usize) -> String {
+    format!(
+        "{displayed} in-progress {} displayed · {configured_members} configured team {} · cached updates remain isolated from Jira issues",
+        if displayed == 1 { "ticket" } else { "tickets" },
+        if configured_members == 1 {
+            "member"
+        } else {
+            "members"
+        },
+    )
+}
+
 fn team_email_resolution_message(candidate_count: usize) -> Option<&'static str> {
     match candidate_count {
         1 => None,
@@ -1930,7 +1964,11 @@ impl Dashboard {
                             if let Some(team_result) = team_result {
                                 match team_result {
                                     Ok(team_result) => {
-                                        this.apply_team_cached(team_result.cached, cx)
+                                        this.apply_team_cached(team_result.cached, cx);
+                                        this.team_feedback = Some(team_refresh_feedback(
+                                            "Team tracker refreshed",
+                                            &this.team_issues,
+                                        ));
                                     }
                                     Err(error) => {
                                         this.team_feedback =
@@ -3327,7 +3365,10 @@ impl Dashboard {
                 match result {
                     Ok(result) => {
                         this.apply_team_cached(result.cached, cx);
-                        this.team_feedback = Some("Team tracker refreshed".to_owned());
+                        this.team_feedback = Some(team_refresh_feedback(
+                            "Team tracker refreshed",
+                            &this.team_issues,
+                        ));
                     }
                     Err(error) => this.team_feedback = Some(safe_sync_error(&error).to_owned()),
                 }
@@ -3374,7 +3415,13 @@ impl Dashboard {
                         this.sync_message = refresh_complete_message(&outcome);
                         this.apply_cached(outcome.cached, cx);
                         match team_result {
-                            Ok(team) => this.apply_team_cached(team.cached, cx),
+                            Ok(team) => {
+                                this.apply_team_cached(team.cached, cx);
+                                this.team_feedback = Some(team_refresh_feedback(
+                                    "Team tracker refreshed",
+                                    &this.team_issues,
+                                ));
+                            }
                             Err(error) => {
                                 this.team_feedback = Some(safe_sync_error(&error).to_owned())
                             }
@@ -3402,6 +3449,18 @@ impl Dashboard {
                         } else {
                             message.to_owned()
                         };
+                        match team_result {
+                            Ok(team) => {
+                                this.apply_team_cached(team.cached, cx);
+                                this.team_feedback = Some(team_refresh_feedback(
+                                    "Team tracker refreshed",
+                                    &this.team_issues,
+                                ));
+                            }
+                            Err(error) => {
+                                this.team_feedback = Some(safe_sync_error(&error).to_owned())
+                            }
+                        }
                     }
                 }
                 cx.notify();
@@ -3796,6 +3855,8 @@ impl Dashboard {
     fn render_header(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         let mobile = layout.is_mobile();
         v_flex()
+            .id("header")
+            .debug_selector(|| "header".to_owned())
             .h(px(if mobile { 84. } else { 72. }))
             .px(px(if mobile { 12. } else { 20. }))
             .py(px(if mobile { 10. } else { 12. }))
@@ -4021,6 +4082,7 @@ impl Dashboard {
         let configured = !self.team_members.is_empty();
         let show_mobile_detail = mobile && self.mobile_detail_open;
         let table = self.team_table.clone();
+        let (_, displayed_team_count) = team_issue_counts(&self.team_issues);
         v_flex()
             .size_full()
             .min_w_0()
@@ -4028,23 +4090,36 @@ impl Dashboard {
             .gap_3()
             .child(
                 v_flex()
+                    .min_w_0()
                     .gap_1()
                     .child(div().text_base().font_semibold().child("In-progress team tickets"))
-                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
+                    .child(div().min_w_0().whitespace_normal().text_sm().text_color(cx.theme().muted_foreground).child(
                         "All visible Jira issues whose status category is In Progress and whose assignee is one of the configured accounts. Jira permissions still apply.",
                     ))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
-                        if configured { format!("{} configured team members · cached updates remain isolated from Jira issues", self.team_members.len()) } else { "No team members configured · no Jira request will be made".to_owned() },
-                    )),
+                    .child(div().min_w_0().whitespace_normal().text_xs().text_color(cx.theme().muted_foreground).child(
+                        if configured { team_summary(displayed_team_count, self.team_members.len()) } else { "No team members configured · no Jira request will be made".to_owned() },
+                    ))
+                    .when_some(self.team_feedback.clone(), |this, feedback| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(feedback),
+                        )
+                    }),
             )
             .child(
                 h_flex()
+                    .h_full()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .when(mobile, |this| this.flex_col())
                     .child(if show_mobile_detail {
                         v_flex()
+                            .h_full()
                             .flex_1()
                             .min_h_0()
                             .p_3()
@@ -4062,6 +4137,9 @@ impl Dashboard {
                             .into_any_element()
                     } else {
                         v_flex()
+                            .id("team-table")
+                            .h_full()
+                            .debug_selector(|| "team-table".to_owned())
                             .flex_1()
                             .min_h_0()
                             .min_w_0()
@@ -4084,10 +4162,17 @@ impl Dashboard {
                     .when(!mobile, |this| {
                         this.child(
                             v_flex()
+                                .id("team-detail")
+                                .h_full()
+                                .min_h_0()
+                                .min_w_0()
+                                .debug_selector(|| "team-detail".to_owned())
                                 .w(px(320.))
                                 .ml_3()
                                 .p_4()
                                 .gap_2()
+                                .overflow_y_scrollbar()
+                                .overflow_x_hidden()
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .child(div().text_base().font_semibold().child("Issue detail"))
@@ -5830,7 +5915,10 @@ impl Dashboard {
                                     })
                             }));
                         this.apply_team_cached(refreshed.cached, cx);
-                        this.team_feedback = Some("Team tracker saved and refreshed".to_owned());
+                        this.team_feedback = Some(team_refresh_feedback(
+                            "Team tracker saved and refreshed",
+                            &this.team_issues,
+                        ));
                     }
                     Err(message) => {
                         this.team_members = previous_members;
@@ -7011,6 +7099,69 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.section = Section::Team;
+        dashboard.team_members = vec![PersistedTeamMember {
+            identifier: "amina".to_owned(),
+            account_id: "amina".to_owned(),
+            display_name: "Amina Yusuf".to_owned(),
+        }];
+        dashboard.team_issues = sample_issues();
+        dashboard.team_feedback =
+            Some("Team tracker refreshed · fetched 5 · displaying 3".to_owned());
+
+        let window = cx.open_window(gpui::size(px(1370.), px(900.)), |_, _| dashboard);
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let table_bounds = visual
+            .debug_bounds("team-table")
+            .expect("team table should be laid out");
+        let detail_bounds = visual
+            .debug_bounds("team-detail")
+            .expect("team detail should be laid out");
+        let header_bounds = visual
+            .debug_bounds("header")
+            .expect("dashboard header should be laid out");
+        assert!(
+            table_bounds.size.height > px(300.),
+            "team table body collapsed to header: {table_bounds:?}"
+        );
+        assert!(
+            detail_bounds.origin.y >= header_bounds.origin.y + header_bounds.size.height,
+            "team detail overlaps dashboard header: detail={detail_bounds:?}, header={header_bounds:?}"
+        );
+        assert!(
+            detail_bounds.origin.y + detail_bounds.size.height <= px(900.) + px(1.),
+            "team detail escapes the desktop content region: {detail_bounds:?}"
+        );
+        assert!(
+            table_bounds.origin.x + table_bounds.size.width <= detail_bounds.origin.x,
+            "team detail overlaps the team table: table={table_bounds:?}, detail={detail_bounds:?}"
+        );
+        assert!(
+            detail_bounds.origin.x + detail_bounds.size.width <= px(1370.) + px(1.),
+            "team detail escapes the desktop width: {detail_bounds:?}"
+        );
+
+        visual.simulate_resize(gpui::size(px(390.), px(800.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let mobile_table_bounds = visual
+            .debug_bounds("team-table")
+            .expect("team table should remain visible on mobile");
+        assert!(
+            mobile_table_bounds.size.height > px(300.),
+            "mobile team table body collapsed: {mobile_table_bounds:?}"
+        );
+    }
+
     #[test]
     fn filtered_selected_issue_resolves_header_from_domain_cache() {
         let domain_issues = sample_issues();
@@ -7737,5 +7888,25 @@ mod tests {
     fn team_section_is_distinct_from_primary_issue_section() {
         assert_ne!(Section::Issues, Section::Team);
         assert_ne!(Section::Team, Section::Settings);
+    }
+
+    #[test]
+    fn team_refresh_feedback_reports_fetched_and_displayed_counts() {
+        assert_eq!(
+            team_refresh_feedback("Team tracker refreshed", &sample_issues()),
+            "Team tracker refreshed · fetched 5 · displaying 3 in-progress tickets"
+        );
+    }
+
+    #[test]
+    fn team_summary_is_cache_honest_and_pluralizes_counts() {
+        assert_eq!(
+            team_summary(1, 1),
+            "1 in-progress ticket displayed · 1 configured team member · cached updates remain isolated from Jira issues"
+        );
+        assert_eq!(
+            team_summary(3, 2),
+            "3 in-progress tickets displayed · 2 configured team members · cached updates remain isolated from Jira issues"
+        );
     }
 }
