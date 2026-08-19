@@ -155,7 +155,7 @@ fn event_notification(event: &UpdateEvent) -> notify_rust::Notification {
         .hint(notify_rust::Hint::DesktopEntry(
             APP_DESKTOP_ENTRY.to_owned(),
         ))
-        .timeout(notify_rust::Timeout::Milliseconds(10_000));
+        .timeout(notify_rust::Timeout::Never);
     notification
 }
 
@@ -170,7 +170,7 @@ fn test_notification() -> notify_rust::Notification {
         .hint(notify_rust::Hint::DesktopEntry(
             APP_DESKTOP_ENTRY.to_owned(),
         ))
-        .timeout(notify_rust::Timeout::Milliseconds(10_000));
+        .timeout(notify_rust::Timeout::Never);
     notification
 }
 
@@ -344,17 +344,21 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn notification_builders_use_explicit_ten_second_timeout() {
+    fn notification_builders_are_persistent_and_not_transient() {
         let event_notification = event_notification(&event(UpdateKind::IssueUpdated));
         let test_notification = test_notification();
 
-        assert_eq!(
-            event_notification.timeout,
-            notify_rust::Timeout::Milliseconds(10_000)
+        assert_eq!(event_notification.timeout, notify_rust::Timeout::Never);
+        assert_eq!(test_notification.timeout, notify_rust::Timeout::Never);
+        assert!(
+            !event_notification
+                .hints
+                .contains(&notify_rust::Hint::Transient(true))
         );
-        assert_eq!(
-            test_notification.timeout,
-            notify_rust::Timeout::Milliseconds(10_000)
+        assert!(
+            !test_notification
+                .hints
+                .contains(&notify_rust::Hint::Transient(true))
         );
     }
 
