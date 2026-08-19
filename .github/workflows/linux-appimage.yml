@@ -143,6 +143,7 @@ jobs:
             packaging/appimage/dev.jiradesk.JiraDesk.metainfo.xml
 
       - name: Check formatting
+        if: ${{ inputs.release_tag == '' }}
         run: cargo fmt --all -- --check
 
       - name: Test workspace
