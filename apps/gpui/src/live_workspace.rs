@@ -1194,8 +1194,12 @@ mod tests {
         assert_ne!(current.user_set_id(), legacy.id);
         let sets = block_on(cache.list(&site_id)).expect("list sets");
         assert_eq!(sets.len(), 2);
-        assert!(sets.iter().all(|set| !set.name.contains("Jira Project")));
-        assert!(sets.iter().any(|set| set.name.contains("account view")));
+        let current_set = sets
+            .iter()
+            .find(|set| set.id == current.user_set_id())
+            .expect("current account-view user set persists");
+        assert_eq!(current_set.name, workspace_name(DEFAULT_JQL_SCOPE));
+        assert_eq!(current_set.members, vec![account("account-a")]);
     }
 
     #[test]
