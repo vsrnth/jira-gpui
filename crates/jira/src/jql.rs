@@ -405,6 +405,30 @@ mod tests {
     }
 
     #[test]
+    fn builds_the_team_request_scope_as_assignee_only_in_progress_jql() {
+        use jira_application::IssueFetchRequest;
+
+        let request = IssueFetchRequest {
+            site_id: jira_domain::JiraSiteId::new("site").unwrap(),
+            assignees: Some(vec![
+                jira_domain::AccountId::new("team-b").unwrap(),
+                jira_domain::AccountId::new("team-a").unwrap(),
+                jira_domain::AccountId::new("team-a").unwrap(),
+            ]),
+            watchers: None,
+            jql_scope: Some("statusCategory = \"In Progress\"".into()),
+            updated_since: None,
+            page_cursor: None,
+            page_size: 100,
+        };
+
+        assert_eq!(
+            enhanced_search_request(&request).unwrap().jql,
+            "(statusCategory = \"In Progress\") AND assignee IN (\"team-a\", \"team-b\") ORDER BY updated DESC"
+        );
+    }
+
+    #[test]
     fn incremental_project_wide_query_keeps_updated_clause_and_cursor() {
         use jira_application::{IssueFetchRequest, PageCursor};
         use time::macros::datetime;

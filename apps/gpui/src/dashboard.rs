@@ -14,6 +14,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
+use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, WindowExt as _,
     button::Button,
@@ -50,7 +51,10 @@ use crate::{
         ImageSignature, ImageSource, ImageStateReason, ResponseMime,
     },
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
-    local_data::{LocalPreferences, load_preferences, normalize_issue_jql_scope, save_preferences},
+    local_data::{
+        LocalPreferences, MAX_TEAM_MEMBERS, PersistedTeamMember, load_preferences,
+        normalize_issue_jql_scope, normalize_team_members, save_preferences,
+    },
     presentation::{
         IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
         UpdateGroupViewModel, UpdateViewModel, issue_views_for_filter, update_groups_for_events,
@@ -62,6 +66,7 @@ use crate::{
     },
     sample_data::{sample_issues, sample_updates, sample_users},
     semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
+    team_table::{TeamTicketTableDelegate, TeamTicketTableStateExt},
 };
 
 fn safe_sync_error(error: &ApplicationError) -> &'static str {
@@ -893,7 +898,68 @@ fn project_label(issues: &[Issue]) -> String {
 enum Section {
     Issues,
     Updates,
+    Team,
     Settings,
+}
+
+fn team_identifier_lines(value: &str) -> Result<Vec<String>, &'static str> {
+    let lines = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if lines.len() > MAX_TEAM_MEMBERS {
+        return Err("Team tracker accepts at most 100 members");
+    }
+    for line in &lines {
+        if line.chars().any(char::is_control) || line.len() > 320 {
+            return Err("Team tracker entries must be short, single-line values");
+        }
+        if !line.contains('@') {
+            let account = AccountId::new(line.clone())
+                .map_err(|_| "Enter a valid Jira account ID or Atlassian email")?;
+            if account
+                .as_str()
+                .chars()
+                .any(|character| matches!(character, '"' | '\\'))
+            {
+                return Err("Jira account IDs cannot contain quote or backslash characters");
+            }
+        }
+    }
+    Ok(lines)
+}
+
+fn team_email_resolution_message(candidate_count: usize) -> Option<&'static str> {
+    match candidate_count {
+        1 => None,
+        0 => Some("Email did not resolve to one active Jira user"),
+        _ => Some("Email matched multiple active Jira users; enter an account ID instead"),
+    }
+}
+
+fn persisted_direct_team_member(identifier: String) -> Result<PersistedTeamMember, &'static str> {
+    let account_id = AccountId::new(identifier.clone())
+        .map_err(|_| "Enter a valid Jira account ID or Atlassian email")?;
+    if account_id
+        .as_str()
+        .chars()
+        .any(|character| matches!(character, '"' | '\\'))
+    {
+        return Err("Jira account IDs cannot contain quote or backslash characters");
+    }
+    Ok(PersistedTeamMember {
+        identifier,
+        account_id: account_id.into_inner(),
+        display_name: "Unknown user".to_owned(),
+    })
+}
+
+fn persisted_team_member_has_display_name(member: &PersistedTeamMember) -> bool {
+    !member.display_name.trim().is_empty()
+        && !member.display_name.eq_ignore_ascii_case("unknown user")
+        && member.display_name != member.account_id
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1413,6 +1479,17 @@ pub struct Dashboard {
     users: Vec<User>,
     workspace_name: String,
     workspace_members: String,
+    team_issues: Vec<Issue>,
+    team_events: Vec<jira_domain::UpdateEvent>,
+    team_members: Vec<PersistedTeamMember>,
+    team_table: Option<Entity<TableState<TeamTicketTableDelegate>>>,
+    team_table_subscriptions: Vec<Subscription>,
+    team_input: Option<Entity<TextareaState>>,
+    team_text: String,
+    team_feedback: Option<String>,
+    team_task: Option<gpui::Task<()>>,
+    team_age_task: Option<gpui::Task<()>>,
+    team_automatic_polling_paused: bool,
     site_label: String,
     mode_label: String,
     operation_in_progress: bool,
@@ -1494,6 +1571,17 @@ impl Dashboard {
             users,
             workspace_name: "Platform team".to_owned(),
             workspace_members: "Amina, Devon, Marco".to_owned(),
+            team_issues: Vec::new(),
+            team_events: Vec::new(),
+            team_members: Vec::new(),
+            team_table: None,
+            team_table_subscriptions: Vec::new(),
+            team_input: None,
+            team_text: String::new(),
+            team_feedback: None,
+            team_task: None,
+            team_age_task: None,
+            team_automatic_polling_paused: false,
             site_label: "sample.atlassian.net".to_owned(),
             mode_label: "Local preview mode".to_owned(),
             operation_in_progress: false,
@@ -1582,6 +1670,17 @@ impl Dashboard {
             } else {
                 "Environment bootstrap · Assigned or watched view unavailable".to_owned()
             },
+            team_issues: Vec::new(),
+            team_events: Vec::new(),
+            team_members: Vec::new(),
+            team_table: None,
+            team_table_subscriptions: Vec::new(),
+            team_input: None,
+            team_text: String::new(),
+            team_feedback: None,
+            team_task: None,
+            team_age_task: None,
+            team_automatic_polling_paused: false,
             site_label: session.site_label,
             mode_label:
                 "Live Jira sync · confirmed comments, assignee changes, and status transitions · best-effort desktop notifications"
@@ -1657,9 +1756,11 @@ impl Dashboard {
             .await
             {
                 Ok(authenticated_user) => {
-                    let (saved_scope, preference_warning) = match load_preferences() {
+                    let (saved_scope, saved_team, preference_warning) = match load_preferences() {
                         Ok(preferences) => {
-                            match normalize_issue_jql_scope(preferences.issue_jql_scope) {
+                            let (scope, scope_warning) = match normalize_issue_jql_scope(
+                                preferences.issue_jql_scope.clone(),
+                            ) {
                                 Ok(scope) => (scope, None),
                                 Err(_) => (
                                     None,
@@ -1668,12 +1769,19 @@ impl Dashboard {
                                             .to_owned(),
                                     ),
                                 ),
-                            }
+                            };
+                            let (team, team_warning) = match normalize_team_members(preferences.team_members) {
+                                Ok(team) => (team, None),
+                                Err(_) => (Vec::new(), Some("Saved team tracker settings were invalid; using an empty team".to_owned())),
+                            };
+                            let warning = scope_warning.or(team_warning);
+                            (scope, team, warning)
                         }
                         Err(_) => (
                             None,
+                            Vec::new(),
                             Some(
-                                "Saved Jira settings could not be read; using the default scope"
+                                "Saved Jira settings could not be read; using default Jira and team settings"
                                     .to_owned(),
                             ),
                         ),
@@ -1695,13 +1803,20 @@ impl Dashboard {
                     {
                         Ok(workspace) => {
                             let workspace = Arc::new(workspace);
-                            workspace
-                                .load_cached_for_authenticated_account()
-                                .await
-                                .map(|cached| {
-                                    (workspace, cached, authenticated_user, preference_warning)
-                                })
-                                .map_err(|error| safe_sync_error(&error).to_owned())
+                            let team_accounts = saved_team
+                                .iter()
+                                .filter_map(|member| AccountId::new(member.account_id.clone()).ok())
+                                .collect::<Vec<_>>();
+                            match workspace.configure_team_members(team_accounts).await {
+                                Err(error) => Err(safe_sync_error(&error).to_owned()),
+                                Ok(()) => match workspace.load_cached_for_authenticated_account().await {
+                                    Err(error) => Err(safe_sync_error(&error).to_owned()),
+                                    Ok(cached) => match workspace.load_cached_team().await {
+                                        Err(error) => Err(safe_sync_error(&error).to_owned()),
+                                        Ok(team_cached) => Ok((workspace, cached, team_cached, authenticated_user, saved_team, preference_warning)),
+                                    },
+                                },
+                            }
                         }
                         Err(error) => Err(safe_sync_error(&error).to_owned()),
                     }
@@ -1711,10 +1826,25 @@ impl Dashboard {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.operation_in_progress = false;
                 match result {
-                    Ok((workspace, cached, authenticated_user, preference_warning)) => {
+                    Ok((workspace, cached, team_cached, authenticated_user, saved_team, preference_warning)) => {
                         let issue_count = cached.issues.len();
                         let update_count = cached.events.len();
                         this.users = vec![authenticated_user.clone()];
+                        this.users.extend(saved_team.iter().filter_map(|member| {
+                            if !persisted_team_member_has_display_name(member) {
+                                return None;
+                            }
+                            AccountId::new(member.account_id.clone()).ok().map(|account_id| {
+                                User::new(workspace.site_id().clone(), account_id, member.display_name.clone(), None, true)
+                            })
+                        }));
+                        this.team_members = saved_team;
+                        this.team_text = this.team_members.iter().map(|member| member.identifier.clone()).collect::<Vec<_>>().join("\n");
+                        if let Some(input) = this.team_input.clone() {
+                            input.update(cx, |input, cx| {
+                                input.set_value(&this.team_text, window, cx)
+                            });
+                        }
                         this.authenticated_account = Some(authenticated_user.account_id.clone());
                         this.settings_scope_text = workspace
                             .jql_scope()
@@ -1728,6 +1858,7 @@ impl Dashboard {
                         this.workspace_members = "Authenticated Jira account".to_owned();
                         this.workspace = Some(workspace);
                         this.apply_cached(cached, cx);
+                        this.apply_team_cached(team_cached, cx);
                         this.start_automatic_polling(cx);
                         this.sync_message =
                             format!("Ready · cached {issue_count} issues · {update_count} updates");
@@ -1775,6 +1906,20 @@ impl Dashboard {
 
                 let cancellation = CancellationToken::new();
                 let result = workspace.refresh_automatically(&cancellation).await;
+                let team_polling_allowed =
+                    match this.update(cx, |this, _| !this.team_automatic_polling_paused) {
+                        Ok(allowed) => allowed,
+                        Err(_) => break,
+                    };
+                let team_result = if result.is_ok() && team_polling_allowed {
+                    Some(
+                        workspace
+                            .refresh_team_automatically(&CancellationToken::new())
+                            .await,
+                    )
+                } else {
+                    None
+                };
                 let next_delay = match this.update(cx, |this, cx| {
                     this.operation_in_progress = false;
                     match result {
@@ -1782,6 +1927,17 @@ impl Dashboard {
                             consecutive_failures = 0;
                             this.sync_message = refresh_complete_message(&result);
                             this.apply_cached(result.cached, cx);
+                            if let Some(team_result) = team_result {
+                                match team_result {
+                                    Ok(team_result) => {
+                                        this.apply_team_cached(team_result.cached, cx)
+                                    }
+                                    Err(error) => {
+                                        this.team_feedback =
+                                            Some(safe_sync_error(&error).to_owned())
+                                    }
+                                }
+                            }
                             cx.notify();
                             Some(policy.next_delay_after_success())
                         }
@@ -3069,6 +3225,119 @@ impl Dashboard {
         self.update_groups = update_groups;
     }
 
+    fn apply_team_cached(&mut self, cached: CachedWorkspace, cx: &mut Context<Self>) {
+        self.team_issues = cached.issues;
+        self.team_events = cached.events;
+        self.refresh_team_table(cx);
+    }
+
+    fn refresh_team_table(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.team_table.clone() else {
+            return;
+        };
+        let issues = self.team_issues.clone();
+        let events = self.team_events.clone();
+        let users = self.users.clone();
+        table.update(cx, |table, cx| {
+            table.replace_team_ticket_rows(
+                &issues,
+                &events,
+                &users,
+                jira_domain::Timestamp::now_utc(),
+                cx,
+            );
+        });
+    }
+
+    fn ensure_team_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.team_table.is_some() {
+            return;
+        }
+        let delegate = TeamTicketTableDelegate::new(
+            &self.team_issues,
+            &self.team_events,
+            &self.users,
+            jira_domain::Timestamp::now_utc(),
+        );
+        let table = cx.new(|cx| TableState::new(delegate, window, cx));
+        self.team_table_subscriptions.push(cx.subscribe_in(
+            &table,
+            window,
+            |this, table, event: &TableEvent, window, cx| {
+                if let TableEvent::SelectRow(_) = event
+                    && let Some(issue_id) = table.read(cx).selected_team_ticket_issue_id()
+                {
+                    this.select_issue(issue_id, cx, true);
+                    this.section = Section::Team;
+                    this.mobile_detail_open =
+                        layout_for_width(f32::from(window.viewport_size().width)).is_mobile();
+                    cx.notify();
+                }
+            },
+        ));
+        self.team_table = Some(table);
+        let table = self.team_table.clone().expect("team table created");
+        self.team_age_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let result = this.update(cx, |this, cx| {
+                    if this.team_table.is_none() {
+                        return false;
+                    }
+                    let issues = this.team_issues.clone();
+                    let events = this.team_events.clone();
+                    let users = this.users.clone();
+                    table.update(cx, |table, cx| {
+                        table.replace_team_ticket_rows(
+                            &issues,
+                            &events,
+                            &users,
+                            jira_domain::Timestamp::now_utc(),
+                            cx,
+                        );
+                    });
+                    true
+                });
+                if !matches!(result, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn begin_team_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.team_task.is_some() || self.operation_in_progress {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.team_feedback =
+                Some("Team tracker is unavailable until Jira is connected".to_owned());
+            cx.notify();
+            return;
+        };
+        self.operation_in_progress = true;
+        self.team_feedback = Some("Refreshing team tracker…".to_owned());
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace.refresh_team(&CancellationToken::new()).await;
+            let _ = this.update(cx, |this, cx| {
+                this.team_task = None;
+                this.operation_in_progress = false;
+                match result {
+                    Ok(result) => {
+                        this.apply_team_cached(result.cached, cx);
+                        this.team_feedback = Some("Team tracker refreshed".to_owned());
+                    }
+                    Err(error) => this.team_feedback = Some(safe_sync_error(&error).to_owned()),
+                }
+                cx.notify();
+            });
+        });
+        self.team_task = Some(task);
+        cx.notify();
+    }
+
     fn begin_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.operation_in_progress
             || matches!(self.issue_edit_state, IssueEditState::Submitting { .. })
@@ -3092,6 +3361,7 @@ impl Dashboard {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = workspace.refresh(&cancellation).await;
+            let team_result = workspace.refresh_team(&CancellationToken::new()).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.operation_in_progress = false;
                 match result {
@@ -3103,6 +3373,12 @@ impl Dashboard {
                         );
                         this.sync_message = refresh_complete_message(&outcome);
                         this.apply_cached(outcome.cached, cx);
+                        match team_result {
+                            Ok(team) => this.apply_team_cached(team.cached, cx),
+                            Err(error) => {
+                                this.team_feedback = Some(safe_sync_error(&error).to_owned())
+                            }
+                        }
                         this.issue_edit_reconciliation_pending = false;
                         if matches!(
                             this.issue_edit_state,
@@ -3380,6 +3656,14 @@ impl Dashboard {
                         cx,
                     ))
                     .child(self.nav_item(
+                        "Team tracker",
+                        Some(self.team_issues.len()),
+                        self.section == Section::Team,
+                        Section::Team,
+                        rail,
+                        cx,
+                    ))
+                    .child(self.nav_item(
                         "Settings",
                         None,
                         self.section == Section::Settings,
@@ -3460,6 +3744,7 @@ impl Dashboard {
         let icon = match section {
             Section::Issues => IconName::LayoutDashboard,
             Section::Updates => IconName::Inbox,
+            Section::Team => IconName::LayoutDashboard,
             Section::Settings => IconName::Settings,
         };
         let visual = if rail {
@@ -3525,6 +3810,7 @@ impl Dashboard {
                         match self.section {
                             Section::Issues => "Jira issues",
                             Section::Updates => "Local updates",
+                            Section::Team => "Team tracker",
                             Section::Settings => "Settings",
                         },
                     ))
@@ -3728,6 +4014,87 @@ impl Dashboard {
         };
 
         h_flex().size_full().min_w_0().child(panes)
+    }
+
+    fn render_team(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+        let mobile = layout.is_mobile();
+        let configured = !self.team_members.is_empty();
+        let show_mobile_detail = mobile && self.mobile_detail_open;
+        let table = self.team_table.clone();
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .p(px(layout.list_padding()))
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_base().font_semibold().child("In-progress team tickets"))
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
+                        "All visible Jira issues whose status category is In Progress and whose assignee is one of the configured accounts. Jira permissions still apply.",
+                    ))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
+                        if configured { format!("{} configured team members · cached updates remain isolated from Jira issues", self.team_members.len()) } else { "No team members configured · no Jira request will be made".to_owned() },
+                    )),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .when(mobile, |this| this.flex_col())
+                    .child(if show_mobile_detail {
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .p_3()
+                            .gap_2()
+                            .child(
+                                Button::new("team-back-to-table")
+                                    .ghost()
+                                    .label("Back to team tickets")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.mobile_detail_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(self.render_detail_state_for(&self.detail_state, layout, cx))
+                            .into_any_element()
+                    } else {
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .child(if !configured {
+                                div()
+                                    .p_4()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Configure at least one Jira account ID or Atlassian email in Settings to load team tickets.")
+                                    .into_any_element()
+                            } else if let Some(table) = table {
+                                DataTable::new(&table).into_any_element()
+                            } else {
+                                div().p_4().text_sm().text_color(cx.theme().muted_foreground).child(if configured { "Loading team tracker…" } else { "Configure at least one Jira account ID or Atlassian email in Settings to load team tickets." }).into_any_element()
+                            })
+                            .into_any_element()
+                    })
+                    .when(!mobile, |this| {
+                        this.child(
+                            v_flex()
+                                .w(px(320.))
+                                .ml_3()
+                                .p_4()
+                                .gap_2()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .child(div().text_base().font_semibold().child("Issue detail"))
+                                .child(self.render_detail_state_for(&self.detail_state, layout, cx)),
+                        )
+                    }),
+            )
     }
 
     fn status_filter_dropdown(&self) -> impl IntoElement {
@@ -5223,6 +5590,30 @@ impl Dashboard {
         self.settings_input = Some(input);
     }
 
+    fn ensure_team_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.team_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(5)
+                .placeholder("account-id-1\nuser@example.com")
+        });
+        input.update(cx, |input, cx| input.set_value(&self.team_text, window, cx));
+        self.settings_subscriptions.push(cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.team_text = input.read(cx).value().to_string();
+                    this.team_feedback = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.team_input = Some(input);
+    }
+
     fn reset_settings_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_scope_text = DEFAULT_JQL_SCOPE.to_owned();
         self.settings_feedback = None;
@@ -5245,6 +5636,7 @@ impl Dashboard {
         };
         let entered = self.settings_scope_text.clone();
         let previous_scope = workspace.jql_scope();
+        let team_members = self.team_members.clone();
         self.operation_in_progress = true;
         self.settings_feedback = Some("Applying scope and refreshing Jira…".to_owned());
         cx.notify();
@@ -5270,6 +5662,7 @@ impl Dashboard {
                 };
                 if save_preferences(&LocalPreferences {
                     issue_jql_scope: normalized.clone(),
+                    team_members,
                 })
                 .is_err()
                 {
@@ -5314,6 +5707,149 @@ impl Dashboard {
             });
         });
         self.settings_task = Some(task);
+    }
+
+    fn begin_save_team(&mut self, cx: &mut Context<Self>) {
+        if self.team_task.is_some() || self.operation_in_progress {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.team_feedback = Some("Connect Jira before saving the team tracker".to_owned());
+            cx.notify();
+            return;
+        };
+        let entered = self.team_text.clone();
+        let previous_members = self.team_members.clone();
+        let previous_text = self.team_text.clone();
+        let previous_accounts = workspace.team_members();
+        let issue_jql_scope = workspace.jql_scope();
+        self.operation_in_progress = true;
+        self.team_feedback = Some("Resolving team members and refreshing Jira…".to_owned());
+        let task = cx.spawn(async move |this, cx| {
+            let result = async {
+                let identifiers = team_identifier_lines(&entered)?;
+                let mut resolved = Vec::new();
+                for identifier in identifiers {
+                    let user = if identifier.contains('@') {
+                        let users = workspace
+                            .search_users(identifier.clone(), 5, &CancellationToken::new())
+                            .await
+                            .map_err(|_| "Jira user search failed; existing team remains active")?
+                            .into_iter()
+                            .filter(|user| user.active)
+                            .collect::<Vec<_>>();
+                        if let Some(message) = team_email_resolution_message(users.len()) {
+                            return Err(message);
+                        }
+                        users.into_iter().next().expect("exactly one candidate")
+                    } else {
+                        let member = persisted_direct_team_member(identifier)?;
+                        resolved.push(member);
+                        continue;
+                    };
+                    resolved.push(PersistedTeamMember {
+                        identifier,
+                        account_id: user.account_id.to_string(),
+                        display_name: user.display_name,
+                    });
+                }
+                let normalized = normalize_team_members(resolved)
+                    .map_err(|_| "Team tracker entries are invalid or exceed the member limit")?;
+                let accounts = normalized
+                    .iter()
+                    .filter_map(|member| AccountId::new(member.account_id.clone()).ok())
+                    .collect::<Vec<_>>();
+                workspace.configure_team_members(accounts).await.map_err(
+                    |_| "Team configuration could not be applied; existing team remains active",
+                )?;
+                let refreshed = match workspace.refresh_team(&CancellationToken::new()).await {
+                    Ok(refreshed) => refreshed,
+                    Err(_) => {
+                        let restored = workspace
+                            .configure_team_members(previous_accounts.clone())
+                            .await
+                            .is_ok();
+                        return Err(if restored {
+                            "Team refresh failed; existing team remains active"
+                        } else {
+                            "Team refresh failed and the previous team could not be restored; team tracker paused"
+                        });
+                    }
+                };
+                if save_preferences(&LocalPreferences {
+                    issue_jql_scope,
+                    team_members: normalized.clone(),
+                })
+                .is_err()
+                {
+                    let restored = workspace
+                        .configure_team_members(previous_accounts.clone())
+                        .await
+                        .is_ok();
+                    return Err(if restored {
+                        "Team refreshed but could not be saved locally; existing team remains active"
+                    } else {
+                        "Team settings could not be saved and the previous team could not be restored; team tracker paused"
+                    });
+                }
+                Ok((normalized, refreshed))
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.team_task = None;
+                this.operation_in_progress = false;
+                match result {
+                    Ok((members, refreshed)) => {
+                        this.team_automatic_polling_paused = false;
+                        this.team_members = members;
+                        this.team_text = this
+                            .team_members
+                            .iter()
+                            .map(|member| member.identifier.clone())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let authenticated_account = this.authenticated_account.clone();
+                        this.users.retain(|user| {
+                            authenticated_account.as_ref() == Some(&user.account_id)
+                        });
+                        this.users
+                            .extend(this.team_members.iter().filter_map(|member| {
+                                if !persisted_team_member_has_display_name(member) {
+                                    return None;
+                                }
+                                AccountId::new(member.account_id.clone())
+                                    .ok()
+                                    .map(|account_id| {
+                                        User::new(
+                                            workspace.site_id().clone(),
+                                            account_id,
+                                            member.display_name.clone(),
+                                            None,
+                                            true,
+                                        )
+                                    })
+                            }));
+                        this.apply_team_cached(refreshed.cached, cx);
+                        this.team_feedback = Some("Team tracker saved and refreshed".to_owned());
+                    }
+                    Err(message) => {
+                        this.team_members = previous_members;
+                        this.team_text = previous_text;
+                        if message.contains("could not be restored") {
+                            this.team_automatic_polling_paused = true;
+                            this.team_members.clear();
+                            this.team_issues.clear();
+                            this.team_events.clear();
+                            this.refresh_team_table(cx);
+                        }
+                        this.team_feedback = Some(message.to_owned());
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.team_task = Some(task);
+        cx.notify();
     }
 
     fn begin_forget_saved_login(&mut self, cx: &mut Context<Self>) {
@@ -5393,6 +5929,7 @@ impl Dashboard {
 
     fn render_settings(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         let input = self.settings_input.clone();
+        let team_input = self.team_input.clone();
         let text = self.settings_scope_text.clone();
         let chars = text.chars().count();
         let bytes = text.len();
@@ -5595,9 +6132,23 @@ impl Dashboard {
                                             .ghost()
                                             .label("Use default scope")
                                             .disabled(!live || self.operation_in_progress)
-                                            .on_click(cx.listener(|this, _, window, cx| this.reset_settings_editor(window, cx))),
+                                        .on_click(cx.listener(|this, _, window, cx| this.reset_settings_editor(window, cx))),
                                     ),
-                            ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .p_3()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(div().text_base().font_semibold().child("Team tracker"))
+                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child("One Jira account ID or Atlassian email per line. This shows in-progress tickets assigned to those accounts; Jira permissions still apply."))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Email resolution requires exactly one active Jira user because the User search domain does not retain email. Uses existing read:jira-user/read:jira-work scopes; no new scope is needed."))
+                                    .when_some(team_input, |this, input| this.child(Textarea::new(&input).w_full().h(px(if layout.is_mobile() { 110. } else { 140. })).aria_label("Team tracker members").disabled(!live || self.team_task.is_some() || self.operation_in_progress)))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{} configured · maximum {}", self.team_members.len(), MAX_TEAM_MEMBERS)))
+                                    .when_some(self.team_feedback.clone(), |this, message| this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(message)))
+                                    .child(h_flex().gap_2().when(layout.is_mobile(), |this| this.flex_col()).child(Button::new("save-team").primary().label(if self.team_task.is_some() { "Saving team…" } else { "Save team" }).disabled(!live || self.team_task.is_some() || self.operation_in_progress).on_click(cx.listener(|this, _, _, cx| this.begin_save_team(cx)))).child(Button::new("refresh-team").ghost().label("Refresh team").disabled(!live || self.team_task.is_some() || self.operation_in_progress || self.team_automatic_polling_paused).on_click(cx.listener(|this, _, _, cx| this.begin_team_refresh(cx))))),
+                            )
                     ),
             )
     }
@@ -5796,6 +6347,17 @@ impl Dashboard {
                     })),
             )
             .child(
+                Button::new("mobile-team")
+                    .compact()
+                    .when(self.section == Section::Team, |this| this.primary())
+                    .label(format!("Team · {}", self.team_issues.len()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.section = Section::Team;
+                        this.mobile_detail_open = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("mobile-settings")
                     .compact()
                     .when(self.section == Section::Settings, |this| this.primary())
@@ -5815,10 +6377,13 @@ impl Render for Dashboard {
         self.ensure_search_input(window, cx);
         self.ensure_comment_input(window, cx);
         self.ensure_settings_input(window, cx);
+        self.ensure_team_input(window, cx);
+        self.ensure_team_table(window, cx);
         let layout = layout_for_width(f32::from(window.viewport_size().width));
         let content = match self.section {
             Section::Issues => self.render_issues(layout, cx).into_any_element(),
             Section::Updates => self.render_updates(layout, cx).into_any_element(),
+            Section::Team => self.render_team(layout, cx).into_any_element(),
             Section::Settings => self.render_settings(layout, cx).into_any_element(),
         };
 
@@ -7142,5 +7707,35 @@ mod tests {
             PathBuf::from(".")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn team_identifier_parser_trims_bounds_and_rejects_jql_metacharacters() {
+        assert_eq!(
+            team_identifier_lines("  account-a  \n\nuser@example.com").expect("valid"),
+            vec!["account-a", "user@example.com"]
+        );
+        assert!(team_identifier_lines("account\"bad").is_err());
+        assert!(team_identifier_lines(&"account-a\n".repeat(MAX_TEAM_MEMBERS + 1)).is_err());
+    }
+
+    #[test]
+    fn team_email_resolution_requires_exactly_one_candidate() {
+        assert_eq!(team_email_resolution_message(1), None);
+        assert!(team_email_resolution_message(0).is_some());
+        assert!(team_email_resolution_message(2).is_some());
+    }
+
+    #[test]
+    fn direct_account_id_member_uses_persistable_unknown_display_name() {
+        let member = persisted_direct_team_member("account-123".to_owned()).expect("valid ID");
+        assert_eq!(member.display_name, "Unknown user");
+        assert!(normalize_team_members(vec![member]).is_ok());
+    }
+
+    #[test]
+    fn team_section_is_distinct_from_primary_issue_section() {
+        assert_ne!(Section::Issues, Section::Team);
+        assert_ne!(Section::Team, Section::Settings);
     }
 }

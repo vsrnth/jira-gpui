@@ -18,6 +18,7 @@ mod responsive;
 mod rich_text_view;
 mod sample_data;
 mod semantic_icons;
+mod team_table;
 
 pub use app_shell::AppShell;
 pub use config::{StartupSelection, startup_from_environment};

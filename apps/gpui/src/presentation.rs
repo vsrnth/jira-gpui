@@ -492,6 +492,13 @@ fn describe_change(kind: &UpdateKind, identities: &IdentityDirectory) -> String 
     }
 }
 
+pub(crate) fn describe_update_with_directory(
+    event: &UpdateEvent,
+    identities: &IdentityDirectory,
+) -> String {
+    describe_change(&event.kind, identities)
+}
+
 fn change_sentence(
     field: &str,
     old: &ChangeValue,
@@ -518,7 +525,7 @@ fn display_change_value(value: &ChangeValue, identities: &IdentityDirectory) -> 
     }
 }
 
-fn format_timestamp(value: OffsetDateTime) -> String {
+pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
     let offset = local_offset_for(value).unwrap_or(UtcOffset::UTC);
     format_timestamp_with_offset(value, offset)
 }

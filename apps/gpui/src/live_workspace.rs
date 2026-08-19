@@ -14,16 +14,19 @@ use jira_application::{
     IssueDetailService, IssueEditCachePort, IssueEditService, IssueListQuery, IssueLocator,
     IssueMediaConfig, IssueMediaService, IssueTransitionsRequest, JiraCommentWritePort,
     JiraIssueEditPort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest,
-    SyncService, TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSetDraft,
-    UserSetPort, UserSetService, validate_jql_scope,
+    SyncService, TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSearchRequest,
+    UserSetDraft, UserSetPort, UserSetService, validate_jql_scope,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
-    AccountId, EventId, Issue, IssueDetail, IssueKey, JiraSiteId, Timestamp, UpdateEvent, UserSetId,
+    AccountId, EventId, Issue, IssueDetail, IssueKey, JiraSiteId, Timestamp, UpdateEvent, User,
+    UserSetId,
 };
 use jira_storage::SqliteStore;
 
 const WORKSPACE_NAME: &str = "Jira Desk workspace";
+const TEAM_WORKSPACE_NAME: &str = "Jira Desk workspace · configured team view";
+const TEAM_STATUS_SCOPE: &str = "statusCategory = \"In Progress\"";
 const ISSUE_PAGE_SIZE: usize = 1_000;
 const MAX_CACHED_ISSUES: usize = 10_000;
 const MAX_FEED_EVENTS: usize = 500;
@@ -54,6 +57,7 @@ pub struct LiveWorkspace {
     site_id: JiraSiteId,
     authenticated_account: Option<AccountId>,
     scope_state: Arc<RwLock<ScopeState>>,
+    team_state: Arc<RwLock<TeamState>>,
     catalog: IssueCatalogService,
     feed: UpdateFeedService,
     detail: IssueDetailService,
@@ -69,6 +73,12 @@ pub struct LiveWorkspace {
 struct ScopeState {
     user_set_id: UserSetId,
     normalized_scope: String,
+}
+
+#[derive(Clone, Debug)]
+struct TeamState {
+    user_set_id: UserSetId,
+    members: Vec<AccountId>,
 }
 
 impl LiveWorkspace {
@@ -149,17 +159,14 @@ impl LiveWorkspace {
         let workspace_name = workspace_name(&normalized_scope);
 
         let user_sets = UserSetService::new(cache.clone() as Arc<dyn UserSetPort>);
-        let existing_user_set = user_sets
-            .list(&site_id)
-            .await?
-            .into_iter()
-            .find(|user_set| {
-                user_set.site_id == site_id
-                    && user_set.name == workspace_name
-                    && user_set.members == members
-            });
+        let existing_user_sets = user_sets.list(&site_id).await?;
+        let existing_user_set = existing_user_sets.iter().find(|user_set| {
+            user_set.site_id == site_id
+                && user_set.name == workspace_name
+                && user_set.members == members
+        });
         let user_set_id = match existing_user_set {
-            Some(user_set) => user_set.id,
+            Some(user_set) => user_set.id.clone(),
             None if members.is_empty() => {
                 // UserSetService models nonempty user sets; save the deliberate
                 // empty unrestricted cache partition directly through the port.
@@ -183,6 +190,11 @@ impl LiveWorkspace {
                     .id
             }
         };
+        // Keep the unconfigured team entirely local. A persisted user-set partition is created
+        // only once members exist, which makes the no-members state both empty and side-effect
+        // free while retaining a deterministic in-memory identity for presentation adapters.
+        let team_members = Vec::new();
+        let team_user_set_id = empty_team_user_set_id();
 
         let cache_port: Arc<dyn IssueCachePort> = cache.clone();
         let catalog = IssueCatalogService::new(jira.clone(), cache_port.clone());
@@ -216,6 +228,10 @@ impl LiveWorkspace {
                 user_set_id,
                 normalized_scope,
             })),
+            team_state: Arc::new(RwLock::new(TeamState {
+                user_set_id: team_user_set_id,
+                members: team_members,
+            })),
             catalog,
             feed,
             detail,
@@ -234,6 +250,87 @@ impl LiveWorkspace {
 
     pub fn authenticated_account(&self) -> Option<&AccountId> {
         self.authenticated_account.as_ref()
+    }
+
+    /// Resolve a user-entered Jira query through the read-only user-search port. The caller owns
+    /// exact-match policy and must not infer an account when Jira returns zero or many candidates.
+    pub async fn search_users(
+        &self,
+        query: String,
+        limit: usize,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<User>, ApplicationError> {
+        self.catalog
+            .search_users(
+                &UserSearchRequest {
+                    site_id: self.site_id.clone(),
+                    query,
+                    limit,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Return the configured team members in deterministic order.
+    pub fn team_members(&self) -> Vec<AccountId> {
+        self.team_state
+            .read()
+            .expect("team state lock")
+            .members
+            .clone()
+    }
+
+    pub fn team_user_set_id(&self) -> UserSetId {
+        self.team_state
+            .read()
+            .expect("team state lock")
+            .user_set_id
+            .clone()
+    }
+
+    /// Replace the configured team membership and select its isolated local cache partition.
+    /// Account IDs are sorted and deduplicated, so equivalent configurations reuse the same
+    /// user-set identity. An empty configuration is valid and remains a local no-op on refresh.
+    pub async fn configure_team_members(
+        &self,
+        mut members: Vec<AccountId>,
+    ) -> Result<(), ApplicationError> {
+        members.sort();
+        members.dedup();
+        let existing = self
+            .cache
+            .list(&self.site_id)
+            .await?
+            .into_iter()
+            .find(|user_set| user_set.name == TEAM_WORKSPACE_NAME && user_set.members == members);
+        let user_set_id = match existing {
+            Some(user_set) => user_set.id,
+            None if members.is_empty() => empty_team_user_set_id(),
+            None => {
+                self.cache
+                    .save(UserSetDraft {
+                        site_id: self.site_id.clone(),
+                        name: TEAM_WORKSPACE_NAME.to_owned(),
+                        members: members.clone(),
+                    })
+                    .await?
+                    .id
+            }
+        };
+        *self.team_state.write().expect("team state lock") = TeamState {
+            user_set_id,
+            members,
+        };
+        Ok(())
+    }
+
+    /// Product-facing alias for replacing configured team members.
+    pub async fn replace_team_members(
+        &self,
+        members: Vec<AccountId>,
+    ) -> Result<(), ApplicationError> {
+        self.configure_team_members(members).await
     }
 
     pub fn user_set_id(&self) -> UserSetId {
@@ -465,13 +562,22 @@ impl LiveWorkspace {
         &self,
         scope_state: &ScopeState,
     ) -> Result<CachedWorkspace, ApplicationError> {
+        self.load_cached_for_partition(&scope_state.user_set_id, Some(&scope_state.user_set_id))
+            .await
+    }
+
+    async fn load_cached_for_partition(
+        &self,
+        user_set_id: &UserSetId,
+        required_event_user_set_id: Option<&UserSetId>,
+    ) -> Result<CachedWorkspace, ApplicationError> {
         let mut issues = Vec::new();
         for offset in (0..MAX_CACHED_ISSUES).step_by(ISSUE_PAGE_SIZE) {
             let page = self
                 .catalog
                 .list_cached(&IssueListQuery {
                     site_id: self.site_id.clone(),
-                    user_set_id: scope_state.user_set_id.clone(),
+                    user_set_id: user_set_id.clone(),
                     text: None,
                     // Membership is already account-scoped by the remote JQL and user-set
                     // identity. Re-filtering by assignee would hide watched issues.
@@ -503,8 +609,29 @@ impl LiveWorkspace {
             .await?
             .into_iter()
             .filter(|event| displayed_issue_ids.contains(&event.issue_id))
+            .filter(|event| {
+                required_event_user_set_id.is_none_or(|user_set_id| {
+                    event
+                        .matching_user_set_ids
+                        .iter()
+                        .any(|id| id == user_set_id)
+                })
+            })
             .collect();
         Ok(CachedWorkspace { issues, events })
+    }
+
+    /// Load only the configured team's local cache and update feed. This never contacts Jira.
+    pub async fn load_cached_team(&self) -> Result<CachedWorkspace, ApplicationError> {
+        let state = self.team_state.read().expect("team state lock").clone();
+        if state.members.is_empty() {
+            return Ok(CachedWorkspace {
+                issues: Vec::new(),
+                events: Vec::new(),
+            });
+        }
+        self.load_cached_for_partition(&state.user_set_id, Some(&state.user_set_id))
+            .await
     }
 
     /// Synchronize Jira and reload bounded local data.
@@ -537,9 +664,18 @@ impl LiveWorkspace {
         scope_state: &ScopeState,
         subsequent_mode: SyncMode,
     ) -> Result<SyncMode, ApplicationError> {
+        self.next_mode_for_user_set(&scope_state.user_set_id, subsequent_mode)
+            .await
+    }
+
+    async fn next_mode_for_user_set(
+        &self,
+        user_set_id: &UserSetId,
+        subsequent_mode: SyncMode,
+    ) -> Result<SyncMode, ApplicationError> {
         if self
             .cache
-            .sync_state(&self.site_id, &scope_state.user_set_id)
+            .sync_state(&self.site_id, user_set_id)
             .await?
             .is_some_and(|state| state.last_incremental_succeeded_at.is_some())
         {
@@ -580,6 +716,78 @@ impl LiveWorkspace {
             )
             .await?;
         let cached = self.load_cached_for_scope(scope_state).await?;
+        Ok(RefreshResult { cached, outcome })
+    }
+
+    /// Synchronize the configured team's in-progress issues and reload its isolated local data.
+    /// No Jira request is made when the team has no configured members.
+    pub async fn refresh_team(
+        &self,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<RefreshResult, ApplicationError> {
+        let team_state = self.team_state.read().expect("team state lock").clone();
+        if team_state.members.is_empty() {
+            cancellation.check()?;
+            return Ok(RefreshResult {
+                cached: self.load_cached_team().await?,
+                outcome: empty_team_sync_outcome(),
+            });
+        }
+        let mode = self
+            .next_mode_for_user_set(&team_state.user_set_id, SyncMode::Reconciliation)
+            .await?;
+        self.refresh_team_with_mode(&team_state, mode, cancellation)
+            .await
+    }
+
+    /// Synchronize the configured team, using its incremental cursor after a successful
+    /// baseline while preserving the local team membership view.
+    pub async fn refresh_team_automatically(
+        &self,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<RefreshResult, ApplicationError> {
+        let team_state = self.team_state.read().expect("team state lock").clone();
+        if team_state.members.is_empty() {
+            cancellation.check()?;
+            return Ok(RefreshResult {
+                cached: self.load_cached_team().await?,
+                outcome: empty_team_sync_outcome(),
+            });
+        }
+        let mode = self
+            .next_mode_for_user_set(&team_state.user_set_id, SyncMode::Incremental)
+            .await?;
+        self.refresh_team_with_mode(&team_state, mode, cancellation)
+            .await
+    }
+
+    async fn refresh_team_with_mode(
+        &self,
+        team_state: &TeamState,
+        mode: SyncMode,
+        cancellation: &jira_application::CancellationToken,
+    ) -> Result<RefreshResult, ApplicationError> {
+        let outcome = self
+            .sync
+            .run(
+                SyncRequest {
+                    site_id: self.site_id.clone(),
+                    user_set_id: team_state.user_set_id.clone(),
+                    assignees: Some(team_state.members.clone()),
+                    watchers: None,
+                    jql_scope: Some(team_jql_scope()),
+                    // Team membership controls fetches only. Desktop notifications remain
+                    // restricted to the authenticated account, matching the primary view.
+                    notification_assignees: self
+                        .authenticated_account
+                        .clone()
+                        .map(|account_id| vec![account_id]),
+                    mode,
+                },
+                cancellation,
+            )
+            .await?;
+        let cached = self.load_cached_team().await?;
         Ok(RefreshResult { cached, outcome })
     }
 
@@ -707,6 +915,26 @@ fn workspace_name(scope: &str) -> String {
     )
 }
 
+fn team_jql_scope() -> String {
+    TEAM_STATUS_SCOPE.to_owned()
+}
+
+fn empty_team_user_set_id() -> UserSetId {
+    UserSetId::new("configured-team-empty").expect("static team user set ID is valid")
+}
+
+fn empty_team_sync_outcome() -> SyncOutcome {
+    SyncOutcome {
+        mode: SyncMode::Baseline,
+        pages_fetched: 0,
+        issues_fetched: 0,
+        events_inserted: 0,
+        notifications_delivered: 0,
+        notification_failures: 0,
+        cursor: Timestamp::now_utc(),
+    }
+}
+
 fn normalize_scope(scope: Option<&str>) -> Result<String, ApplicationError> {
     validate_jql_scope(scope).map_err(ApplicationError::invalid_input)?;
     Ok(scope.unwrap_or(DEFAULT_JQL_SCOPE).trim().to_owned())
@@ -759,6 +987,7 @@ mod tests {
         request_count: Mutex<usize>,
         assignee_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
         watcher_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
+        jql_scopes: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeJira {
@@ -796,6 +1025,10 @@ mod tests {
                 .lock()
                 .expect("watcher filters lock")
                 .clone()
+        }
+
+        fn jql_scopes(&self) -> Vec<Option<String>> {
+            self.jql_scopes.lock().expect("JQL scopes lock").clone()
         }
     }
 
@@ -863,6 +1096,10 @@ mod tests {
                 .lock()
                 .expect("watcher filters lock")
                 .push(request.watchers.clone());
+            self.jql_scopes
+                .lock()
+                .expect("JQL scopes lock")
+                .push(request.jql_scope.clone());
             let result = self
                 .pages
                 .lock()
@@ -1159,6 +1396,82 @@ mod tests {
         let sets =
             block_on(cache.list(&JiraSiteId::new("site").expect("valid site"))).expect("list sets");
         assert_eq!(sets.len(), 1);
+    }
+
+    #[test]
+    fn team_members_are_deduplicated_sorted_and_use_an_isolated_identity() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("memory store"));
+        let workspace = make_workspace(jira, cache.clone());
+        let primary_id = workspace.user_set_id();
+
+        block_on(workspace.configure_team_members(vec![
+            account("team-b"),
+            account("team-a"),
+            account("team-b"),
+        ]))
+        .expect("configure team");
+        let first_id = workspace.team_user_set_id();
+        assert_ne!(first_id, primary_id);
+        assert_eq!(
+            workspace.team_members(),
+            vec![account("team-a"), account("team-b")]
+        );
+
+        block_on(workspace.replace_team_members(vec![account("team-a"), account("team-b")]))
+            .expect("replace equivalent team");
+        assert_eq!(workspace.team_user_set_id(), first_id);
+    }
+
+    #[test]
+    fn empty_team_refresh_is_a_safe_local_no_op() {
+        let jira = Arc::new(FakeJira::default());
+        let workspace = make_workspace(
+            jira.clone(),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        );
+        let result = block_on(workspace.refresh_team(&CancellationToken::new()))
+            .expect("empty team refresh");
+        assert_eq!(result.outcome.mode, SyncMode::Baseline);
+        assert_eq!(result.outcome.pages_fetched, 0);
+        assert!(result.cached.issues.is_empty());
+        assert_eq!(jira.request_count(), 0);
+    }
+
+    #[test]
+    fn team_refresh_is_assignee_only_and_keeps_primary_view_separate() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue("Primary issue")));
+        jira.push_page(page(issue_for("Team issue", "team-a")));
+        let workspace = make_workspace(
+            jira.clone(),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        );
+        let cancellation = CancellationToken::new();
+
+        let primary = block_on(workspace.refresh(&cancellation)).expect("primary baseline");
+        block_on(workspace.configure_team_members(vec![account("team-a")]))
+            .expect("configure team");
+        let team = block_on(workspace.refresh_team(&cancellation)).expect("team baseline");
+
+        assert_eq!(primary.cached.issues[0].summary, "Primary issue");
+        assert_eq!(team.outcome.mode, SyncMode::Baseline);
+        assert_eq!(team.cached.issues[0].summary, "Team issue");
+        assert_eq!(
+            jira.assignee_filters(),
+            vec![
+                Some(vec![account("account-a")]),
+                Some(vec![account("team-a")])
+            ]
+        );
+        assert_eq!(
+            jira.watcher_filters(),
+            vec![Some(vec![account("account-a")]), None]
+        );
+        assert_eq!(
+            jira.jql_scopes(),
+            vec![Some(DEFAULT_JQL_SCOPE.to_owned()), Some(team_jql_scope())]
+        );
     }
 
     #[test]

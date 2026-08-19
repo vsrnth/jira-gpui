@@ -12,12 +12,17 @@ use std::{
 };
 
 use jira_application::{DEFAULT_JQL_SCOPE, validate_jql_scope};
+use jira_domain::AccountId;
 use jira_storage::SqliteStore;
 
 const APP_DIRECTORY: &str = "jira-desk";
 const DATABASE_FILENAME: &str = "jira-desk.sqlite3";
 const PREFERENCES_FILENAME: &str = "preferences.json";
 const MAX_PREFERENCES_BYTES: usize = 64 * 1024;
+/// Keep the offline team cache small enough that startup and generated JQL remain bounded.
+pub(crate) const MAX_TEAM_MEMBERS: usize = 100;
+const MAX_TEAM_MEMBER_IDENTIFIER_BYTES: usize = 320;
+const MAX_TEAM_MEMBER_DISPLAY_NAME_BYTES: usize = 255;
 const ENV_XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 const ENV_XDG_STATE_HOME: &str = "XDG_STATE_HOME";
 const ENV_HOME: &str = "HOME";
@@ -32,6 +37,92 @@ pub(crate) struct LocalDataError;
 pub(crate) struct LocalPreferences {
     #[serde(default)]
     pub(crate) issue_jql_scope: Option<String>,
+    /// Resolved team identities are local metadata, not credentials. Omitting an empty value
+    /// keeps the on-disk representation compatible with preferences written before team support.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) team_members: Vec<PersistedTeamMember>,
+}
+
+/// A locally persisted team identity. `identifier` is what the user entered (an account ID or
+/// email); `account_id` is the stable Jira identity resolved from it; `display_name` is the safe
+/// label used to populate the offline identity cache without another startup lookup.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PersistedTeamMember {
+    pub(crate) identifier: String,
+    pub(crate) account_id: String,
+    pub(crate) display_name: String,
+}
+
+/// Normalize and validate team identities before using or persisting them.
+///
+/// The input order is retained and the first record for a stable account ID wins. This makes
+/// duplicate handling deterministic while preserving the order chosen in the team settings UI.
+/// At most [`MAX_TEAM_MEMBERS`] records may be supplied, before deduplication, so malformed or
+/// duplicate-heavy input cannot be used to bypass the bound.
+pub(crate) fn normalize_team_members(
+    members: Vec<PersistedTeamMember>,
+) -> Result<Vec<PersistedTeamMember>, LocalDataError> {
+    if members.len() > MAX_TEAM_MEMBERS {
+        return Err(LocalDataError);
+    }
+
+    let mut normalized = Vec::with_capacity(members.len());
+    for member in members {
+        let identifier =
+            normalize_team_member_text(member.identifier, MAX_TEAM_MEMBER_IDENTIFIER_BYTES)?;
+        let account_id = normalize_team_member_account_id(member.account_id)?;
+        let display_name =
+            normalize_team_member_text(member.display_name, MAX_TEAM_MEMBER_DISPLAY_NAME_BYTES)?;
+        if display_name == account_id {
+            return Err(LocalDataError);
+        }
+
+        if normalized
+            .iter()
+            .any(|existing: &PersistedTeamMember| existing.account_id == account_id)
+        {
+            continue;
+        }
+        normalized.push(PersistedTeamMember {
+            identifier,
+            account_id,
+            display_name,
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_team_member_text(
+    value: String,
+    maximum_bytes: usize,
+) -> Result<String, LocalDataError> {
+    if value.chars().any(char::is_control) {
+        return Err(LocalDataError);
+    }
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum_bytes {
+        return Err(LocalDataError);
+    }
+    Ok(value.to_owned())
+}
+
+fn normalize_team_member_account_id(value: String) -> Result<String, LocalDataError> {
+    if value.chars().any(char::is_control) {
+        return Err(LocalDataError);
+    }
+    let value = value.trim();
+    let account_id = AccountId::new(value.to_owned()).map_err(|_| LocalDataError)?;
+    // Account IDs are interpolated as quoted JQL literals by the Jira adapter. Keep this
+    // persistence boundary aligned with that adapter instead of storing a value that could alter
+    // a generated query's meaning.
+    if account_id
+        .as_str()
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+    {
+        return Err(LocalDataError);
+    }
+    Ok(account_id.into_inner())
 }
 
 /// Normalize the persisted scope into the representation used by the session and user-set key.
@@ -427,6 +518,139 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preferences_without_team_members_load_unchanged() {
+        let preferences: LocalPreferences =
+            serde_json::from_str(r#"{"issue_jql_scope":"project = APP"}"#)
+                .expect("legacy preferences");
+        assert_eq!(
+            preferences,
+            LocalPreferences {
+                issue_jql_scope: Some("project = APP".to_owned()),
+                team_members: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn team_members_normalize_trim_and_deduplicate_by_account_id() {
+        let normalized = normalize_team_members(vec![
+            PersistedTeamMember {
+                identifier: "  first@example.com  ".to_owned(),
+                account_id: "  account-1  ".to_owned(),
+                display_name: "  First Person  ".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "second@example.com".to_owned(),
+                account_id: "account-1".to_owned(),
+                display_name: "Second Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "third@example.com".to_owned(),
+                account_id: "account-2".to_owned(),
+                display_name: "Third Person".to_owned(),
+            },
+        ])
+        .expect("normalized team");
+
+        assert_eq!(
+            normalized,
+            vec![
+                PersistedTeamMember {
+                    identifier: "first@example.com".to_owned(),
+                    account_id: "account-1".to_owned(),
+                    display_name: "First Person".to_owned(),
+                },
+                PersistedTeamMember {
+                    identifier: "third@example.com".to_owned(),
+                    account_id: "account-2".to_owned(),
+                    display_name: "Third Person".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn team_members_reject_empty_oversized_and_control_values() {
+        let cases = [
+            PersistedTeamMember {
+                identifier: "   ".to_owned(),
+                account_id: "account-1".to_owned(),
+                display_name: "Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person@example.com".to_owned(),
+                account_id: "   ".to_owned(),
+                display_name: "Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person@example.com".to_owned(),
+                account_id: "account-1\n".to_owned(),
+                display_name: "Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person@example.com".to_owned(),
+                account_id: "account-1\"unsafe".to_owned(),
+                display_name: "Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person\u{0007}@example.com".to_owned(),
+                account_id: "account-1".to_owned(),
+                display_name: "Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person@example.com".to_owned(),
+                account_id: "account-1".to_owned(),
+                display_name: "Person\u{0007}".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person@example.com".to_owned(),
+                account_id: "account-1".to_owned(),
+                display_name: "account-1".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "x".repeat(MAX_TEAM_MEMBER_IDENTIFIER_BYTES + 1),
+                account_id: "account-1".to_owned(),
+                display_name: "Person".to_owned(),
+            },
+            PersistedTeamMember {
+                identifier: "person@example.com".to_owned(),
+                account_id: "account-1".to_owned(),
+                display_name: "x".repeat(MAX_TEAM_MEMBER_DISPLAY_NAME_BYTES + 1),
+            },
+        ];
+
+        for member in cases {
+            assert!(normalize_team_members(vec![member]).is_err());
+        }
+    }
+
+    #[test]
+    fn team_members_enforce_conservative_size_limit() {
+        let members = (0..=MAX_TEAM_MEMBERS)
+            .map(|index| PersistedTeamMember {
+                identifier: format!("person-{index}@example.com"),
+                account_id: format!("account-{index}"),
+                display_name: format!("Person {index}"),
+            })
+            .collect();
+        assert!(normalize_team_members(members).is_err());
+
+        let members = (0..MAX_TEAM_MEMBERS)
+            .map(|index| PersistedTeamMember {
+                identifier: format!("person-{index}@example.com"),
+                account_id: format!("account-{index}"),
+                display_name: format!("Person {index}"),
+            })
+            .collect();
+        assert_eq!(
+            normalize_team_members(members)
+                .expect("limit boundary")
+                .len(),
+            MAX_TEAM_MEMBERS
+        );
+    }
+
+    #[test]
     fn preference_scope_normalization_stores_default_as_none() {
         assert_eq!(normalize_issue_jql_scope(None).unwrap(), None);
         assert_eq!(
@@ -448,6 +672,11 @@ mod tests {
         let app = prepare_app_directory(Some(&root), None).expect("app directory");
         let expected = LocalPreferences {
             issue_jql_scope: Some("project = DEMO ORDER BY updated DESC".to_owned()),
+            team_members: vec![PersistedTeamMember {
+                identifier: "ada@example.com".to_owned(),
+                account_id: "account-ada".to_owned(),
+                display_name: "Ada Lovelace".to_owned(),
+            }],
         };
         save_preferences_in_directory(&app, &expected).expect("save preferences");
         assert_eq!(
@@ -489,6 +718,7 @@ mod tests {
         let target = root.join("target.json");
         let expected = LocalPreferences {
             issue_jql_scope: Some("project = TARGET".to_owned()),
+            team_members: Vec::new(),
         };
         let target_bytes = serde_json::to_vec(&expected).expect("serialize target");
         fs::write(&target, &target_bytes).expect("write target");
