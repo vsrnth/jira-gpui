@@ -1102,6 +1102,10 @@ fn status_control_is_editable(
         )
 }
 
+fn transition_option_label(transition: &IssueTransition) -> &str {
+    transition.to.name.as_str()
+}
+
 fn issue_edit_target_is_current(
     selected_issue: Option<&IssueId>,
     expected_issue: &IssueId,
@@ -4473,28 +4477,34 @@ impl Dashboard {
                             .child("Loading available transitions…"),
                     ),
                 )
-                .child(
-                    Button::new("cancel-status-transition-load")
-                        .compact()
-                        .label("Cancel")
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
-                )
                 .into_any_element(),
             IssueEditState::TransitionChooser { transitions, .. } => {
                 let no_transitions = transitions.is_empty();
                 v_flex()
                     .gap_2()
                     .child(div().text_sm().font_semibold().child("Change issue status"))
-                    .children(transitions.into_iter().map(|transition| {
-                        let label = format!("{} → {}", transition.name, transition.to.name);
-                        Button::new(format!("status-transition-{}", transition.id))
-                            .w_full()
-                            .compact()
-                            .label(label)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.choose_transition(transition.clone(), cx)
-                            }))
-                    }))
+                    .when(!no_transitions, |this| {
+                        this.child(
+                            v_flex()
+                                .min_h_0()
+                                .max_h(px(280.))
+                                .gap_1()
+                                .overflow_y_scrollbar()
+                                .children(transitions.into_iter().map(|transition| {
+                                    let label = transition_option_label(&transition).to_owned();
+                                    Button::new(format!("status-transition-{}", transition.id))
+                                        .w_full()
+                                        .compact()
+                                        .ghost()
+                                        .justify_start()
+                                        .label(label.clone())
+                                        .tooltip(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.choose_transition(transition.clone(), cx)
+                                        }))
+                                })),
+                        )
+                    })
                     .when(no_transitions, |this| {
                         this.child(
                             div()
@@ -4503,12 +4513,6 @@ impl Dashboard {
                                 .child("No status transitions are currently available."),
                         )
                     })
-                    .child(
-                        Button::new("cancel-status-transition")
-                            .compact()
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_issue_edit(cx))),
-                    )
                     .into_any_element()
             }
             _ => div().into_any_element(),
@@ -5803,6 +5807,21 @@ mod tests {
             false,
             &confirming
         ));
+    }
+
+    #[test]
+    fn transition_option_label_uses_destination_status_only() {
+        let transition = IssueTransition {
+            id: "31".to_owned(),
+            name: "Move issue".to_owned(),
+            to: jira_domain::Status {
+                id: "3".to_owned(),
+                name: "In Progress".to_owned(),
+                category: None,
+            },
+        };
+
+        assert_eq!(transition_option_label(&transition), "In Progress");
     }
 
     #[test]
