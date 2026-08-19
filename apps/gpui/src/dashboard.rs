@@ -11,7 +11,7 @@ use chrono::{Local, SecondsFormat};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, AnyElement, AppContext as _, Context, Entity, Image, ImageFormat,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::{
@@ -1140,6 +1140,16 @@ fn status_control_is_editable(
 
 fn transition_option_label(transition: &IssueTransition) -> &str {
     transition.to.name.as_str()
+}
+
+const STATUS_TRANSITION_ROW_HEIGHT: f32 = 32.;
+const STATUS_TRANSITION_GAP: f32 = 4.;
+const STATUS_TRANSITION_LIST_MAX_HEIGHT: f32 = 280.;
+
+fn status_transition_list_height(transition_count: usize) -> Pixels {
+    let rows_height = transition_count as f32 * STATUS_TRANSITION_ROW_HEIGHT;
+    let gaps_height = transition_count.saturating_sub(1) as f32 * STATUS_TRANSITION_GAP;
+    px((rows_height + gaps_height).min(STATUS_TRANSITION_LIST_MAX_HEIGHT))
 }
 
 fn issue_edit_target_is_current(
@@ -4528,17 +4538,22 @@ impl Dashboard {
                     .when(!no_transitions, |this| {
                         this.child(
                             v_flex()
+                                .h(status_transition_list_height(transitions.len()))
                                 .min_h_0()
-                                .max_h(px(280.))
+                                .max_h(px(STATUS_TRANSITION_LIST_MAX_HEIGHT))
                                 .gap_1()
                                 .overflow_y_scrollbar()
                                 .children(transitions.into_iter().map(|transition| {
+                                    let transition_id = transition.id.clone();
                                     let label = transition_option_label(&transition).to_owned();
                                     Button::new(format!("status-transition-{}", transition.id))
                                         .w_full()
                                         .compact()
                                         .ghost()
                                         .justify_start()
+                                        .debug_selector(move || {
+                                            format!("status-transition-{transition_id}")
+                                        })
                                         .label(label.clone())
                                         .tooltip(label)
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -5839,8 +5854,49 @@ mod tests {
     use super::*;
     use crate::presentation::{UpdateViewModel, normalized_issue_key};
     use crate::sample_data::{sample_issues, sample_users};
+    use gpui::VisualTestContext;
     use gpui_component::searchable_list::SearchableListDelegate as _;
+    use jira_application::{
+        ErrorKind, IssueFetchRequest, IssuePage, PortFuture, UserSearchRequest,
+    };
     use time::macros::datetime;
+
+    struct EmptyJira;
+
+    impl JiraReadPort for EmptyJira {
+        fn fetch_current_user<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, User> {
+            Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
+        }
+
+        fn search_users<'a>(
+            &'a self,
+            _request: &'a UserSearchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<User>> {
+            Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
+        }
+
+        fn fetch_issue_page<'a>(
+            &'a self,
+            _request: &'a IssueFetchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, IssuePage> {
+            Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
+        }
+
+        fn fetch_issues_by_id<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _issue_ids: &'a [IssueId],
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<Issue>> {
+            Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
+        }
+    }
 
     fn update_view(event_id: &str, change: &str, occurred_at: &str) -> UpdateViewModel {
         UpdateViewModel {
@@ -5941,6 +5997,16 @@ mod tests {
         };
 
         assert_eq!(transition_option_label(&transition), "In Progress");
+    }
+
+    #[test]
+    fn transition_list_height_is_compact_and_bounded() {
+        assert_eq!(status_transition_list_height(1), px(32.));
+        assert_eq!(status_transition_list_height(2), px(68.));
+        assert_eq!(
+            status_transition_list_height(12),
+            px(STATUS_TRANSITION_LIST_MAX_HEIGHT)
+        );
     }
 
     #[test]
@@ -6309,6 +6375,75 @@ mod tests {
         assert_eq!(selected_issue, Some(issue.id));
         assert_eq!(section, Section::Issues);
         assert!(mobile_detail_open);
+    }
+
+    #[gpui::test]
+    fn transition_chooser_options_remain_visible_in_constrained_popover(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
+            JiraSiteId::new("site").expect("site"),
+            None,
+            Arc::new(EmptyJira),
+            Arc::new(jira_storage::SqliteStore::in_memory().expect("store")),
+        ))
+        .expect("workspace");
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.workspace = Some(Arc::new(workspace));
+        let issue = dashboard
+            .selected_issue
+            .clone()
+            .expect("sample issue selected");
+        let transitions = (0..12)
+            .map(|index| IssueTransition {
+                id: (31 + index).to_string(),
+                name: format!("Move issue {index}"),
+                to: jira_domain::Status {
+                    id: (3 + index).to_string(),
+                    name: format!("Status {index}"),
+                    category: None,
+                },
+            })
+            .collect();
+        dashboard.issue_edit_state = IssueEditState::TransitionChooser {
+            issue_id: issue,
+            issue_key: "DESK-176".to_owned(),
+            transitions,
+        };
+        dashboard.status_popover_open = true;
+        let window = cx.open_window(gpui::size(px(720.), px(600.)), |_, _| dashboard);
+        let dashboard_entity = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let option_bounds = visual
+            .debug_bounds("status-transition-31")
+            .expect("transition option should be laid out");
+        assert!(
+            option_bounds.size.height > px(0.),
+            "transition option collapsed: {option_bounds:?}"
+        );
+
+        visual.simulate_click(
+            gpui::point(
+                option_bounds.origin.x + option_bounds.size.width / 2.,
+                option_bounds.origin.y + option_bounds.size.height / 2.,
+            ),
+            Default::default(),
+        );
+        assert!(
+            dashboard_entity.read_with(&visual, |dashboard, _| {
+                matches!(
+                    dashboard.issue_edit_state,
+                    IssueEditState::ConfirmingTransition { .. }
+                )
+            }),
+            "first transition should be clickable at {option_bounds:?}"
+        );
     }
 
     #[test]
