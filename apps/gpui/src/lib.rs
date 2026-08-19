@@ -7,6 +7,8 @@
 
 mod app_shell;
 mod config;
+#[cfg(target_os = "linux")]
+pub(crate) mod credential_store;
 mod dashboard;
 mod diagnostics;
 mod live_workspace;

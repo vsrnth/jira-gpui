@@ -37,6 +37,7 @@ const DEFAULT_USER_AGENT: &str = "jira-gpui/0.1 (Jira Cloud client)";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TENANT_INFO_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
 const MAX_CHANGELOG_PAGES: usize = 8;
 
@@ -146,7 +147,8 @@ fn jira_comment_create_body(text: &str) -> JiraCommentCreateRequest {
 
 /// Credentials for Jira Cloud basic authentication (email + API token).
 ///
-/// The token is deliberately not exposed through `Debug`, `Display`, or an error value.
+/// The identity and token are deliberately not exposed through `Debug`, `Display`, or an error
+/// value.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ApiTokenCredentials {
     email: String,
@@ -171,7 +173,7 @@ impl fmt::Debug for ApiTokenCredentials {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ApiTokenCredentials")
-            .field("email", &self.email)
+            .field("email", &"[REDACTED]")
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -200,6 +202,54 @@ impl fmt::Debug for JiraBaseUrl {
             .debug_tuple("JiraBaseUrl")
             .field(&self.0.as_str())
             .finish()
+    }
+}
+
+/// The stable Atlassian Cloud tenant identifier used by the scoped-token API gateway.
+///
+/// Cloud IDs are intentionally kept separate from [`JiraSiteId`]. The latter is the
+/// application's cache/site partition, while this value is only used to construct the
+/// Atlassian API gateway path. Only a conservative, path-safe ASCII token is accepted.
+#[derive(Clone, Eq, PartialEq, Hash)]
+pub struct JiraCloudId(String);
+
+impl JiraCloudId {
+    const MAX_LENGTH: usize = 128;
+
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, ConfigError> {
+        let value = value.as_ref();
+        if value.is_empty()
+            || value.len() > Self::MAX_LENGTH
+            || !value.is_ascii()
+            || !value.bytes().all(is_cloud_id_byte)
+            || !value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !value
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(ConfigError::InvalidCloudId);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for JiraCloudId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Debug for JiraCloudId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("JiraCloudId").field(&self.0).finish()
     }
 }
 
@@ -255,7 +305,7 @@ impl JiraHttpConfig {
 /// Jira Cloud client implementing the application read and explicit-write boundaries.
 pub struct JiraHttpClient {
     site_id: JiraSiteId,
-    base_url: JiraBaseUrl,
+    base_url: Url,
     credentials: ApiTokenCredentials,
     client: Client,
     runtime: Arc<RuntimeBridge>,
@@ -276,20 +326,20 @@ impl fmt::Debug for JiraHttpClient {
 impl JiraHttpClient {
     pub fn new(
         site_id: JiraSiteId,
-        base_url: impl AsRef<str>,
+        cloud_id: JiraCloudId,
         credentials: ApiTokenCredentials,
     ) -> Result<Self, ConfigError> {
-        Self::with_config(site_id, base_url, credentials, JiraHttpConfig::default())
+        Self::with_config(site_id, cloud_id, credentials, JiraHttpConfig::default())
     }
 
     pub fn with_config(
         site_id: JiraSiteId,
-        base_url: impl AsRef<str>,
+        cloud_id: JiraCloudId,
         credentials: ApiTokenCredentials,
         config: JiraHttpConfig,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
-        let base_url = JiraBaseUrl::parse(base_url)?;
+        let base_url = gateway_base_url(&cloud_id)?;
         let client = Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
@@ -309,10 +359,21 @@ impl JiraHttpClient {
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, ApplicationError> {
-        self.base_url
-            .as_url()
+        let url = self
+            .base_url
             .join(path)
-            .map_err(|_| ApplicationError::new(ErrorKind::Internal, "invalid Jira endpoint"))
+            .map_err(|_| ApplicationError::new(ErrorKind::Internal, "invalid Jira endpoint"))?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("api.atlassian.com")
+            || url.port().is_some()
+            || !url.path().starts_with(self.base_url.path())
+        {
+            return Err(ApplicationError::new(
+                ErrorKind::Internal,
+                "invalid Jira endpoint",
+            ));
+        }
+        Ok(url)
     }
 
     fn validate_site(&self, site_id: &JiraSiteId) -> Result<(), ApplicationError> {
@@ -1420,6 +1481,8 @@ impl JiraIssueEditPort for JiraHttpClient {
 pub enum ConfigError {
     #[error("Jira base URL must be a valid HTTPS Atlassian Cloud URL")]
     InvalidBaseUrl,
+    #[error("Jira Cloud ID is invalid")]
+    InvalidCloudId,
     #[error("Jira {0} cannot be empty")]
     EmptyCredential(&'static str),
     #[error("Jira HTTP timeouts must be positive")]
@@ -1434,12 +1497,15 @@ pub enum ConfigError {
     HttpClientBuild,
     #[error("could not initialize the Jira runtime")]
     RuntimeBuild,
+    #[error("could not discover the Jira Cloud ID")]
+    CloudIdDiscovery,
 }
 
 fn validate_base_url(url: &Url, require_atlassian: bool) -> Result<JiraBaseUrl, ConfigError> {
     if url.scheme() != "https"
         || url.username() != ""
         || url.password().is_some()
+        || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
@@ -1457,6 +1523,67 @@ fn validate_base_url(url: &Url, require_atlassian: bool) -> Result<JiraBaseUrl, 
         }
     }
     Ok(JiraBaseUrl(url.clone()))
+}
+
+fn is_cloud_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+fn gateway_base_url(cloud_id: &JiraCloudId) -> Result<Url, ConfigError> {
+    Url::parse(&format!(
+        "https://api.atlassian.com/ex/jira/{}/",
+        cloud_id.as_str()
+    ))
+    .map_err(|_| ConfigError::InvalidCloudId)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TenantInfoResponse {
+    #[serde(rename = "cloudId")]
+    cloud_id: String,
+}
+
+/// Discovers the stable Atlassian Cloud ID for a validated Jira site URL.
+///
+/// This operation is deliberately unauthenticated. The tenant-info request is made by the
+/// transport-owned Tokio runtime and never receives caller credentials.
+pub async fn discover_cloud_id(site_url: JiraBaseUrl) -> Result<JiraCloudId, ConfigError> {
+    let runtime = RuntimeBridge::new().map_err(|_| ConfigError::RuntimeBuild)?;
+    let client = Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(DEFAULT_REQUEST_TIMEOUT)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .user_agent(DEFAULT_USER_AGENT)
+        .build()
+        .map_err(|_| ConfigError::HttpClientBuild)?;
+    let url = site_url
+        .as_url()
+        .join("_edge/tenant_info")
+        .map_err(|_| ConfigError::CloudIdDiscovery)?;
+    runtime
+        .dispatch(discover_cloud_id_request(client, url))
+        .await
+        .map_err(|_| ConfigError::CloudIdDiscovery)?
+        .map_err(|_| ConfigError::CloudIdDiscovery)
+}
+
+async fn discover_cloud_id_request(
+    client: Client,
+    url: Url,
+) -> Result<JiraCloudId, ApplicationError> {
+    let response = tenant_info_request_builder(&client, url)
+        .send()
+        .await
+        .map_err(transport_error)?;
+    let payload: TenantInfoResponse = read_json(response, MAX_TENANT_INFO_RESPONSE_BYTES).await?;
+    JiraCloudId::parse(payload.cloud_id).map_err(|_| {
+        ApplicationError::new(ErrorKind::Upstream, "Jira returned an invalid Cloud ID")
+    })
+}
+
+fn tenant_info_request_builder(client: &Client, url: Url) -> reqwest::RequestBuilder {
+    client.get(url).header(header::ACCEPT, "application/json")
 }
 
 fn validate_string_id(value: &str, field: &'static str) -> Result<(), ApplicationError> {
@@ -1999,12 +2126,17 @@ impl RuntimeBridge {
 mod tests {
     use super::*;
 
+    fn test_gateway_url() -> Url {
+        gateway_base_url(&JiraCloudId::parse("cloud-id").unwrap()).unwrap()
+    }
+
     #[test]
     fn accepts_only_https_atlassian_cloud_urls_without_embedded_data() {
         assert!(JiraBaseUrl::parse("https://example.atlassian.net").is_ok());
         assert!(JiraBaseUrl::parse("https://example.atlassian.net/").is_ok());
         for invalid in [
             "http://example.atlassian.net",
+            "https://example.atlassian.net:8443",
             "https://example.atlassian.net/?token=secret",
             "https://user@example.atlassian.net",
             "https://example.atlassian.net#fragment",
@@ -2016,11 +2148,76 @@ mod tests {
     }
 
     #[test]
+    fn cloud_id_is_bounded_and_path_safe() {
+        let cloud_id = JiraCloudId::parse("b1b2c3d4-1234-5678-9abc-def012345678").unwrap();
+        assert_eq!(cloud_id.as_str(), "b1b2c3d4-1234-5678-9abc-def012345678");
+        assert!(JiraCloudId::parse("stable_id-01").is_ok());
+        for invalid in [
+            "",
+            "../escape",
+            "cloud/id",
+            "cloud id",
+            "cloud?query",
+            "-leading",
+        ] {
+            assert!(JiraCloudId::parse(invalid).is_err(), "{invalid}");
+        }
+        assert!(JiraCloudId::parse("a".repeat(JiraCloudId::MAX_LENGTH + 1)).is_err());
+    }
+
+    #[test]
+    fn gateway_base_is_canonical_and_endpoint_paths_stay_under_tenant_prefix() {
+        let cloud_id = JiraCloudId::parse("cloud-id").unwrap();
+        let base = gateway_base_url(&cloud_id).unwrap();
+        assert_eq!(base.as_str(), "https://api.atlassian.com/ex/jira/cloud-id/");
+
+        let site_id = JiraSiteId::new("site").unwrap();
+        let client = JiraHttpClient::new(
+            site_id,
+            cloud_id,
+            ApiTokenCredentials::new("person@example.com", "token").unwrap(),
+        )
+        .unwrap();
+        let endpoint = client
+            .issue_endpoint(
+                &IssueLocator::Key(jira_domain::IssueKey::new("ENG-42").unwrap()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(endpoint.scheme(), "https");
+        assert_eq!(endpoint.host_str(), Some("api.atlassian.com"));
+        assert_eq!(endpoint.port(), None);
+        assert_eq!(endpoint.path(), "/ex/jira/cloud-id/rest/api/3/issue/ENG-42");
+    }
+
+    #[test]
+    fn tenant_info_requires_cloud_id_and_never_attaches_authorization() {
+        let payload: TenantInfoResponse =
+            serde_json::from_str(r#"{"cloudId":"cloud-id","tenantId":"tenant"}"#).unwrap();
+        assert_eq!(
+            JiraCloudId::parse(payload.cloud_id).unwrap().as_str(),
+            "cloud-id"
+        );
+        assert!(serde_json::from_str::<TenantInfoResponse>(r#"{}"#).is_err());
+        assert!(serde_json::from_str::<TenantInfoResponse>(r#"{"cloudId":null}"#).is_err());
+
+        let request = tenant_info_request_builder(
+            &Client::new(),
+            Url::parse("https://example.atlassian.net/_edge/tenant_info").unwrap(),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert!(request.headers().get(header::AUTHORIZATION).is_none());
+    }
+
+    #[test]
     fn credentials_debug_redacts_token() {
         let credentials =
             ApiTokenCredentials::new("person@example.com", "super-secret-token").unwrap();
         let debug = format!("{credentials:?}");
         assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("person@example.com"));
         assert!(!debug.contains("super-secret-token"));
     }
 
@@ -2057,7 +2254,7 @@ mod tests {
         let other = JiraSiteId::new("other-site").unwrap();
         let base = JiraHttpClient {
             site_id: configured,
-            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            base_url: test_gateway_url(),
             credentials: ApiTokenCredentials::new("person@example.com", "secret").unwrap(),
             client: Client::new(),
             runtime: Arc::new(RuntimeBridge::new().unwrap()),
@@ -2123,7 +2320,7 @@ mod tests {
         let configured = JiraSiteId::new("configured-site").unwrap();
         let client = JiraHttpClient {
             site_id: configured,
-            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            base_url: test_gateway_url(),
             credentials: ApiTokenCredentials::new("person@example.com", "secret").unwrap(),
             client: Client::new(),
             runtime: Arc::new(RuntimeBridge::new().unwrap()),
@@ -2136,7 +2333,10 @@ mod tests {
         detail
             .query_pairs_mut()
             .append_pair("fields", &jira_adapter::issue_detail_fields_query());
-        assert_eq!(detail.path(), "/rest/api/3/issue/ENG%2F42%3Fprivate");
+        assert_eq!(
+            detail.path(),
+            "/ex/jira/cloud-id/rest/api/3/issue/ENG%2F42%3Fprivate"
+        );
         assert_eq!(
             detail
                 .query_pairs()
@@ -2155,7 +2355,7 @@ mod tests {
             .append_pair("orderBy", "-created");
         assert_eq!(
             comments.path(),
-            "/rest/api/3/issue/ENG%2F42%3Fprivate/comment"
+            "/ex/jira/cloud-id/rest/api/3/issue/ENG%2F42%3Fprivate/comment"
         );
         assert_eq!(
             comments.query(),
@@ -2188,7 +2388,7 @@ mod tests {
         let configured = JiraSiteId::new("configured-site").unwrap();
         let client = JiraHttpClient {
             site_id: configured,
-            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            base_url: test_gateway_url(),
             credentials: ApiTokenCredentials::new("person@example.com", "secret").unwrap(),
             client: Client::new(),
             runtime: Arc::new(RuntimeBridge::new().unwrap()),
@@ -2199,7 +2399,7 @@ mod tests {
             .issue_endpoint(&IssueLocator::Key(issue_key), None)
             .unwrap();
 
-        assert_eq!(url.path(), "/rest/api/3/issue/ENG-42");
+        assert_eq!(url.path(), "/ex/jira/cloud-id/rest/api/3/issue/ENG-42");
         assert_eq!(url.query(), None);
     }
 
@@ -2425,7 +2625,7 @@ mod tests {
         let site = JiraSiteId::new("configured-site").unwrap();
         let client = JiraHttpClient::new(
             site.clone(),
-            "https://example.atlassian.net",
+            JiraCloudId::parse("cloud-id").unwrap(),
             ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
         )
         .unwrap();
@@ -2602,7 +2802,7 @@ mod tests {
         let configured = JiraSiteId::new("configured-site").unwrap();
         let client = JiraHttpClient {
             site_id: configured,
-            base_url: JiraBaseUrl::parse("https://example.atlassian.net").unwrap(),
+            base_url: test_gateway_url(),
             credentials: ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
             client: Client::new(),
             runtime: Arc::new(RuntimeBridge::new().unwrap()),
@@ -2622,7 +2822,7 @@ mod tests {
         assert_eq!(request.method(), reqwest::Method::GET);
         assert_eq!(
             request.url().path(),
-            "/rest/api/3/attachment/thumbnail/att%2F42%3Furl=evil"
+            "/ex/jira/cloud-id/rest/api/3/attachment/thumbnail/att%2F42%3Furl=evil"
         );
         assert_eq!(
             request.url().query(),
@@ -2649,7 +2849,7 @@ mod tests {
             .append_pair("redirect", "false");
         assert_eq!(
             content_request.url().path(),
-            "/rest/api/3/attachment/content/42"
+            "/ex/jira/cloud-id/rest/api/3/attachment/content/42"
         );
         assert_eq!(content_request.url().query(), Some("redirect=false"));
     }
@@ -3199,7 +3399,7 @@ mod tests {
         let site = JiraSiteId::new("configured-site").unwrap();
         let client = JiraHttpClient::new(
             site.clone(),
-            "https://example.atlassian.net",
+            JiraCloudId::parse("cloud-id").unwrap(),
             ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
         )
         .unwrap();

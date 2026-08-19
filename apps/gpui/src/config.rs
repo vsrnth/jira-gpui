@@ -1,20 +1,25 @@
 //! Startup configuration for the native shell.
 //!
-//! The environment-backed API-token flow is intentionally an internal
+//! The environment-backed scoped-token flow is intentionally an internal
 //! development bootstrap. The returned session owns the constructed client
 //! and local cache; the token is consumed while building the client and is
-//! never kept as a separate application setting.
+//! never kept as a separate application setting. Authenticated requests use
+//! Atlassian's Cloud-ID scoped API gateway; site URLs are only labels and
+//! discovery inputs.
 
 use std::{env, fmt, sync::Arc};
 
 use jira_application::{CancellationToken, ErrorKind, JiraReadPort};
 use jira_domain::{JiraSiteId, User};
-use jira_http::{ApiTokenCredentials, ConfigError, JiraBaseUrl, JiraHttpClient};
+use jira_http::{
+    ApiTokenCredentials, ConfigError, JiraBaseUrl, JiraCloudId, JiraHttpClient, discover_cloud_id,
+};
 use jira_storage::SqliteStore;
 
 use crate::local_data;
 
 const ENV_BASE_URL: &str = "JIRA_BASE_URL";
+const ENV_CLOUD_ID: &str = "JIRA_CLOUD_ID";
 const ENV_SITE_ID: &str = "JIRA_SITE_ID";
 const ENV_EMAIL: &str = "JIRA_EMAIL";
 const ENV_API_TOKEN: &str = "JIRA_API_TOKEN";
@@ -41,11 +46,13 @@ pub enum StartupError {
     Incomplete,
     InvalidSiteId,
     InvalidBaseUrl,
+    InvalidCloudId,
     MissingEmail,
     MissingApiToken,
     InvalidCredentials,
     AuthenticationRejected,
     AuthorizationDenied,
+    CloudIdUnavailable,
     CurrentUserUnavailable,
     ClientUnavailable,
     StorageUnavailable,
@@ -55,21 +62,25 @@ impl fmt::Display for StartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Incomplete => {
-                "Jira configuration is incomplete; set the Jira URL, site ID, email, and API token"
+                "Jira configuration is incomplete; set the Jira URL, Cloud ID, site ID, Atlassian email, and scoped API token"
             }
             Self::InvalidSiteId => "Jira configuration has an invalid site ID",
-            Self::InvalidBaseUrl => "Jira configuration has an invalid HTTPS Atlassian URL",
-            Self::MissingEmail => "Enter the Atlassian email associated with this Jira token",
-            Self::MissingApiToken => "Enter an Atlassian API token",
-            Self::InvalidCredentials => "The Jira API token contains invalid whitespace",
+            Self::InvalidBaseUrl => "Jira configuration has an invalid HTTPS Atlassian site URL",
+            Self::InvalidCloudId => "Jira configuration has an invalid Cloud ID",
+            Self::MissingEmail => "Enter the Atlassian email associated with this scoped API token",
+            Self::MissingApiToken => "Enter a scoped Atlassian API token",
+            Self::InvalidCredentials => "The scoped Jira API token contains invalid whitespace",
             Self::AuthenticationRejected => {
-                "Jira rejected the credentials (HTTP 401); check the email and API token"
+                "Jira rejected the credentials (HTTP 401); check the email and scoped API token"
             }
             Self::AuthorizationDenied => {
-                "Jira denied access (HTTP 403); check this account's Jira permissions"
+                "Jira denied access (HTTP 403); check the scoped token's scopes and this account's Jira permissions"
+            }
+            Self::CloudIdUnavailable => {
+                "Jira Cloud ID could not be discovered; check the Jira site URL and connection"
             }
             Self::CurrentUserUnavailable => {
-                "Jira account could not be verified; check the site URL and credentials"
+                "Jira account could not be verified; check the site connection and scoped token permissions"
             }
             Self::ClientUnavailable => "the Jira client could not be initialized",
             Self::StorageUnavailable => "local Jira Desk storage is unavailable",
@@ -81,6 +92,7 @@ impl fmt::Display for StartupError {
 #[derive(Default)]
 struct EnvironmentValues {
     base_url: Option<String>,
+    cloud_id: Option<String>,
     site_id: Option<String>,
     email: Option<String>,
     api_token: Option<String>,
@@ -90,6 +102,7 @@ impl EnvironmentValues {
     fn from_process() -> Self {
         Self {
             base_url: env::var(ENV_BASE_URL).ok(),
+            cloud_id: env::var(ENV_CLOUD_ID).ok(),
             site_id: env::var(ENV_SITE_ID).ok(),
             email: env::var(ENV_EMAIL).ok(),
             api_token: env::var(ENV_API_TOKEN).ok(),
@@ -104,8 +117,10 @@ pub fn startup_from_environment() -> StartupSelection {
 /// Builds a live session from values entered in the native configuration UI.
 ///
 /// The site ID used by the local cache is derived from the validated Atlassian
-/// hostname. This keeps the UI independent of Jira's internal cloud ID while
-/// preserving a stable cache partition for each Jira site.
+/// hostname. This keeps the UI independent of Jira's internal Cloud ID while
+/// preserving a stable cache partition for each Jira site. Discovery is
+/// unauthenticated; the returned Cloud ID is then used for all authenticated
+/// requests through Atlassian's scoped-token gateway.
 pub async fn live_session_from_manual_configuration(
     base_url: String,
     email: String,
@@ -135,8 +150,11 @@ where
     let site_id = JiraSiteId::new(host.to_owned()).map_err(|_| StartupError::InvalidBaseUrl)?;
 
     let credentials = credentials_from_values(email, api_token)?;
+    let cloud_id = discover_cloud_id(parsed_url)
+        .await
+        .map_err(|_| StartupError::CloudIdUnavailable)?;
     let site_label = base_url.clone();
-    let jira = JiraHttpClient::new(site_id.clone(), base_url, credentials)
+    let jira = JiraHttpClient::new(site_id.clone(), cloud_id, credentials)
         .map(Arc::new)
         .map_err(|error| match error {
             ConfigError::InvalidBaseUrl => StartupError::InvalidBaseUrl,
@@ -211,6 +229,7 @@ where
 {
     let configured = [
         values.base_url.is_some(),
+        values.cloud_id.is_some(),
         values.site_id.is_some(),
         values.email.is_some(),
         values.api_token.is_some(),
@@ -227,9 +246,14 @@ where
         Ok(site_id) => site_id,
         Err(_) => return StartupSelection::ConfigurationError(StartupError::InvalidSiteId),
     };
+    let cloud_id = match JiraCloudId::parse(values.cloud_id.expect("presence checked").trim()) {
+        Ok(cloud_id) => cloud_id,
+        Err(_) => return StartupSelection::ConfigurationError(StartupError::InvalidCloudId),
+    };
     match build_live_session(
         site_id,
         values.base_url.expect("presence checked"),
+        cloud_id,
         values.email.expect("presence checked"),
         values.api_token.expect("presence checked"),
         store_factory,
@@ -242,6 +266,7 @@ where
 fn build_live_session<F>(
     site_id: JiraSiteId,
     base_url: String,
+    cloud_id: JiraCloudId,
     email: String,
     api_token: String,
     store_factory: F,
@@ -251,13 +276,18 @@ where
 {
     let (base_url, email, api_token) = normalize_manual_inputs(&base_url, &email, &api_token);
 
+    // The environment URL is a validated site label only. Authenticated
+    // requests are always addressed by the Cloud-ID gateway below.
+    JiraBaseUrl::parse(&base_url).map_err(|_| StartupError::InvalidBaseUrl)?;
+
     // Consume the credential strings directly into the client. No startup
     // state retains the token after this function returns.
     let credentials = credentials_from_values(email, api_token)?;
     let site_label = base_url.clone();
-    let jira = match JiraHttpClient::new(site_id.clone(), base_url, credentials) {
+    let jira = match JiraHttpClient::new(site_id.clone(), cloud_id, credentials) {
         Ok(jira) => Arc::new(jira),
         Err(ConfigError::InvalidBaseUrl) => return Err(StartupError::InvalidBaseUrl),
+        Err(ConfigError::InvalidCloudId) => return Err(StartupError::InvalidCloudId),
         Err(_) => return Err(StartupError::ClientUnavailable),
     };
     let cache = store_factory()?;
@@ -317,6 +347,7 @@ mod tests {
     fn complete() -> EnvironmentValues {
         EnvironmentValues {
             base_url: Some("https://example.atlassian.net".to_owned()),
+            cloud_id: Some("cloud-id".to_owned()),
             site_id: Some("cloud-site".to_owned()),
             email: Some("developer@example.com".to_owned()),
             api_token: Some("token-that-must-not-escape".to_owned()),
@@ -507,12 +538,12 @@ mod tests {
             if kind == ErrorKind::Authentication {
                 assert_eq!(
                     message,
-                    "Jira rejected the credentials (HTTP 401); check the email and API token"
+                    "Jira rejected the credentials (HTTP 401); check the email and scoped API token"
                 );
             } else {
                 assert_eq!(
                     message,
-                    "Jira denied access (HTTP 403); check this account's Jira permissions"
+                    "Jira denied access (HTTP 403); check the scoped token's scopes and this account's Jira permissions"
                 );
             }
         }
@@ -589,6 +620,25 @@ mod tests {
             selection,
             StartupSelection::ConfigurationError(StartupError::Incomplete)
         ));
+    }
+
+    #[test]
+    fn invalid_cloud_id_is_safe_and_does_not_open_store() {
+        let called = Arc::new(AtomicBool::new(false));
+        let store_called = called.clone();
+        let mut values = complete();
+        values.cloud_id = Some("not a valid cloud id".to_owned());
+
+        let selection = startup_from_values_with_store(values, move || {
+            store_called.store(true, Ordering::SeqCst);
+            Err(StartupError::StorageUnavailable)
+        });
+
+        assert!(matches!(
+            selection,
+            StartupSelection::ConfigurationError(StartupError::InvalidCloudId)
+        ));
+        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -86,7 +86,7 @@ API acceptance does not prove that GNOME or another shell rendered a banner.
 - Linux with a Wayland compositor and the build dependencies listed in
   [`packaging/appimage/README.md`](packaging/appimage/README.md).
 - Rust 1.95 or newer, installed through [rustup](https://rustup.rs/).
-- A Jira Cloud site and an Atlassian API token for local development. Tokens
+- A Jira Cloud site and a scoped Atlassian API token for local development. Tokens
   are secrets: do not commit, log, or paste them into issue reports.
 
 ## Quick start
@@ -95,10 +95,21 @@ API acceptance does not prove that GNOME or another shell rendered a banner.
 cargo run -p jira-gpui
 ```
 
-On first launch, enter the Jira URL, Atlassian email, and unscoped API token.
-Jira Desk derives your Jira identity from the authenticated connection; you do
-not need to find or enter an account ID. See [operations and
-security](docs/operations.md) for credential handling and local data.
+On first launch, enter the Jira URL and Atlassian email, then create an **API
+token with scopes** and select exactly these classic scopes:
+
+```text
+read:jira-user
+read:jira-work
+write:jira-work
+```
+
+Jira Desk discovers the Cloud ID automatically from the site URL, and Jira
+permissions still apply. “Remember securely in system keyring” is enabled by
+default; when selected, the URL, email, and token are stored only in the
+system keyring after successful authentication. Uncheck it for a session-only
+login. See [operations and security](docs/operations.md) for credential
+handling and local data.
 
 ## Development commands
 

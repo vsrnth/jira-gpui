@@ -43,6 +43,7 @@ use jira_domain::{
 
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
+    credential_store::{self, DeleteOutcome},
     diagnostics::{
         DesktopNotificationTestResult as DiagnosticDesktopNotificationTestResult,
         DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageFetchResult, ImagePreflight,
@@ -914,6 +915,41 @@ enum DesktopNotificationTestState {
     Completed(DesktopNotificationTestReport),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SavedLoginDeleteOutcome {
+    Deleted,
+    Absent,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SavedLoginDeleteState {
+    Idle,
+    Deleting,
+    Completed(SavedLoginDeleteOutcome),
+}
+
+fn saved_login_delete_feedback(outcome: SavedLoginDeleteOutcome) -> (&'static str, bool) {
+    match outcome {
+        SavedLoginDeleteOutcome::Deleted => (
+            "Saved Jira login forgotten. This session remains connected.",
+            false,
+        ),
+        SavedLoginDeleteOutcome::Absent => (
+            "No saved Jira login was present. This session remains connected.",
+            false,
+        ),
+        SavedLoginDeleteOutcome::Error => (
+            "Saved Jira login could not be removed from the system keyring.",
+            true,
+        ),
+    }
+}
+
+fn can_start_saved_login_delete(state: SavedLoginDeleteState) -> bool {
+    !matches!(state, SavedLoginDeleteState::Deleting)
+}
+
 struct RefreshNotification;
 struct CommentNotification;
 struct IssueEditNotification;
@@ -1413,6 +1449,8 @@ pub struct Dashboard {
     settings_warning: Option<String>,
     settings_feedback: Option<String>,
     settings_task: Option<gpui::Task<()>>,
+    saved_login_delete_state: SavedLoginDeleteState,
+    saved_login_delete_task: Option<gpui::Task<()>>,
     desktop_notification_test_state: DesktopNotificationTestState,
     desktop_notification_test_task: Option<gpui::Task<()>>,
 }
@@ -1500,6 +1538,8 @@ impl Dashboard {
             settings_warning: None,
             settings_feedback: None,
             settings_task: None,
+            saved_login_delete_state: SavedLoginDeleteState::Idle,
+            saved_login_delete_task: None,
             desktop_notification_test_state: DesktopNotificationTestState::Idle,
             desktop_notification_test_task: None,
         }
@@ -1588,6 +1628,8 @@ impl Dashboard {
             settings_warning: None,
             settings_feedback: None,
             settings_task: None,
+            saved_login_delete_state: SavedLoginDeleteState::Idle,
+            saved_login_delete_task: None,
             desktop_notification_test_state: DesktopNotificationTestState::Idle,
             desktop_notification_test_task: None,
         };
@@ -5259,6 +5301,29 @@ impl Dashboard {
         self.settings_task = Some(task);
     }
 
+    fn begin_forget_saved_login(&mut self, cx: &mut Context<Self>) {
+        if self.saved_login_delete_task.is_some()
+            || !can_start_saved_login_delete(self.saved_login_delete_state)
+        {
+            return;
+        }
+        self.saved_login_delete_state = SavedLoginDeleteState::Deleting;
+        let task = cx.spawn(async move |this, cx| {
+            let outcome = match credential_store::delete_saved_credentials().await {
+                Ok(DeleteOutcome::Deleted) => SavedLoginDeleteOutcome::Deleted,
+                Ok(DeleteOutcome::Absent) => SavedLoginDeleteOutcome::Absent,
+                Err(_) => SavedLoginDeleteOutcome::Error,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.saved_login_delete_task = None;
+                this.saved_login_delete_state = SavedLoginDeleteState::Completed(outcome);
+                cx.notify();
+            });
+        });
+        self.saved_login_delete_task = Some(task);
+        cx.notify();
+    }
+
     fn begin_test_desktop_notification(&mut self, cx: &mut Context<Self>) {
         if !self.can_start_desktop_notification_test() {
             return;
@@ -5321,6 +5386,10 @@ impl Dashboard {
         let test_running = matches!(
             self.desktop_notification_test_state,
             DesktopNotificationTestState::Sending
+        );
+        let saved_login_deleting = matches!(
+            self.saved_login_delete_state,
+            SavedLoginDeleteState::Deleting
         );
         v_flex()
             .size_full()
@@ -5441,6 +5510,56 @@ impl Dashboard {
                                                     .child(div().text_sm().child(format!("Last test · {} · {result}", report.timestamp)))
                                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Accepted by the desktop service does not prove GNOME displayed a banner."))
                                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Diagnostic events are written to diagnostics.jsonl.")),
+                                            )
+                                        },
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .p_3()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(div().text_base().font_semibold().child("Saved Jira login"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Credentials are kept in the desktop system keyring, reused automatically across Jira Desk/AppImage versions, and never written to SQLite, preferences, or logs."),
+                                    )
+                                    .child(
+                                        Button::new("forget-saved-jira-login")
+                                            .label(if saved_login_deleting {
+                                                "Forgetting saved Jira login…"
+                                            } else {
+                                                "Forget saved Jira login"
+                                            })
+                                            .when(layout.is_mobile(), |this| this.w_full())
+                                            .disabled(saved_login_deleting)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.begin_forget_saved_login(cx)
+                                            })),
+                                    )
+                                    .when_some(
+                                        match self.saved_login_delete_state {
+                                            SavedLoginDeleteState::Completed(outcome) => {
+                                                Some(outcome)
+                                            }
+                                            SavedLoginDeleteState::Idle
+                                            | SavedLoginDeleteState::Deleting => None,
+                                        },
+                                        |this, outcome| {
+                                            let (message, is_error) =
+                                                saved_login_delete_feedback(outcome);
+                                            this.child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(if is_error {
+                                                        cx.theme().danger
+                                                    } else {
+                                                        cx.theme().muted_foreground
+                                                    })
+                                                    .child(message),
                                             )
                                         },
                                     ),
@@ -5893,6 +6012,42 @@ mod tests {
         let dashboard = Dashboard::from_sample_data();
 
         assert_eq!(dashboard.settings_scope_text, DEFAULT_JQL_SCOPE);
+    }
+
+    #[test]
+    fn saved_login_delete_feedback_is_safe_and_explicit() {
+        assert_eq!(
+            saved_login_delete_feedback(SavedLoginDeleteOutcome::Deleted),
+            (
+                "Saved Jira login forgotten. This session remains connected.",
+                false
+            )
+        );
+        assert_eq!(
+            saved_login_delete_feedback(SavedLoginDeleteOutcome::Absent),
+            (
+                "No saved Jira login was present. This session remains connected.",
+                false
+            )
+        );
+        assert_eq!(
+            saved_login_delete_feedback(SavedLoginDeleteOutcome::Error),
+            (
+                "Saved Jira login could not be removed from the system keyring.",
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn saved_login_delete_gates_repeated_clicks_only_while_deleting() {
+        assert!(can_start_saved_login_delete(SavedLoginDeleteState::Idle));
+        assert!(!can_start_saved_login_delete(
+            SavedLoginDeleteState::Deleting
+        ));
+        assert!(can_start_saved_login_delete(
+            SavedLoginDeleteState::Completed(SavedLoginDeleteOutcome::Deleted,)
+        ));
     }
 
     #[test]

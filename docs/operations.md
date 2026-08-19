@@ -6,7 +6,18 @@ The first-run form asks for exactly three values:
 
 1. Jira Cloud URL.
 2. Atlassian account email.
-3. An unscoped API token.
+3. A scoped Atlassian API token.
+
+The token must include exactly these classic Jira scopes:
+
+```text
+read:jira-user
+read:jira-work
+write:jira-work
+```
+
+Jira Desk discovers the site's Cloud ID through the unauthenticated
+`/_edge/tenant_info` endpoint; the user does not need to enter or discover it.
 
 Jira Desk trims the snapshots before constructing the session, validates the
 credentials through Jira's authenticated `/myself` endpoint, and derives the
@@ -15,9 +26,11 @@ discover or enter an account ID. Missing local email/token input is reported
 separately from remote `401 Unauthorized` and `403 Forbidden` failures.
 
 The token input control is dropped before asynchronous connection work starts.
-The token is held only by the in-memory Jira client; it is never logged or
-written to SQLite. Error messages are safe and actionable without echoing
-credentials.
+When `Remember securely in system keyring` is enabled (the default), the
+validated URL, email, and scoped token are saved in the system keyring after a
+successful connection. With that option disabled, they remain in memory for
+the session only. Credentials are never written to SQLite, preferences, or
+logs. Error messages are safe and actionable without echoing credentials.
 
 ## Environment startup
 
@@ -25,14 +38,20 @@ For internal development, startup can use this all-or-none set:
 
 ```text
 JIRA_BASE_URL=https://your-site.atlassian.net
-JIRA_SITE_ID=your-atlassian-cloud-id
+JIRA_CLOUD_ID=your-atlassian-cloud-id
+JIRA_SITE_ID=your-site-cache-partition-id
 JIRA_EMAIL=you@example.com
-JIRA_API_TOKEN=your-unscoped-api-token
+JIRA_API_TOKEN=your-scoped-api-token
 ```
 
-No project is fixed during onboarding. `JIRA_ASSIGNEE_ACCOUNT_IDS` is not
-required and is not treated as authenticated identity. Environment bootstrap
-constructs the client and opens SQLite but does not set an authenticated user.
+The all-or-none tuple is `(JIRA_BASE_URL, JIRA_CLOUD_ID, JIRA_SITE_ID,
+JIRA_EMAIL, JIRA_API_TOKEN)`. All five variables are required together;
+`JIRA_SITE_ID` is the local
+application/cache partition and is separate from `JIRA_CLOUD_ID`, which routes
+authenticated requests through Atlassian's API gateway. No project is fixed
+during onboarding. `JIRA_ASSIGNEE_ACCOUNT_IDS` is not required and is not
+treated as authenticated identity. Environment bootstrap constructs the client
+and opens SQLite but does not set an authenticated user.
 Dashboard initialization resolves `/myself` through that client, then creates
 the authenticated assigned-or-watched workspace and loads its scoped cache
 before enabling the view. The active JQL scope defaults to Jira's generic
@@ -51,11 +70,11 @@ then saves the preference. Jira rejection or a local persistence failure rolls
 back to the previous scope and preference without applying the new cache to the
 dashboard. The editor keeps the failed expression visible for correction.
 
-This API-token path is for internal development and local testing. Public
+This scoped API-token path is for internal development and local testing. Public
 distribution still needs Atlassian OAuth 2.0 3LO with scoped, revocable
-credentials and a platform-appropriate secret store. Jira Desk does not erase
-or modify the process environment, so callers remain responsible for its
-exposure.
+credentials and product-specific credential lifecycle and revocation controls.
+Jira Desk does not erase or modify the process environment, so callers remain
+responsible for its exposure.
 
 ## Local data and sync
 

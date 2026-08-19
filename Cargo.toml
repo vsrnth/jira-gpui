@@ -28,6 +28,7 @@ futures-lite = "2.6.1"
 # resolves one GPUI type universe. Cargo.lock pins it to the compatible commit.
 gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed" }
 gpui-component = { version = "0.5.2", git = "https://github.com/longbridge/gpui-component", rev = "b29ee13379e161c2fb68c14c229c958d52d6ffe4" }
+keyring = { version = "4.1.6", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
 notify-rust = { version = "4.18.0", default-features = false, features = ["z"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
@@ -37,6 +38,7 @@ tokio = { version = "1.50.0", default-features = false, features = ["net", "rt",
 thiserror = "2.0.18"
 time = { version = "0.3.41", features = ["formatting", "macros", "parsing", "serde"] }
 url = "2.5.8"
+zeroize = "1.9.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
