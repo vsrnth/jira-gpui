@@ -88,6 +88,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          source_sha="$(git rev-parse --verify HEAD)"
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unexpected checked-out commit: $source_sha" >&2
+            exit 1
+          fi
+
           version=''
           case "$EVENT_NAME:$REF_TYPE" in
             push:tag)
@@ -122,18 +128,24 @@ jobs:
             exit 1
           fi
 
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Cargo dependencies and build output
+      - name: Cache Cargo registry and git dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-
+
+      - name: Cache Cargo build output
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ steps.appimage-version.outputs.source_sha }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Validate desktop and AppStream metadata
         run: |
