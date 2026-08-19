@@ -3,14 +3,20 @@ name: Linux AppImage
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional historical version tag to rebuild'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,6 +30,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           persist-credentials: false
 
       - name: Install Wayland build dependencies
@@ -69,6 +76,53 @@ jobs:
           rustup default 1.95.0
           rustc --version
           cargo --version
+
+      - name: Resolve AppImage version
+        id: appimage-version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          version=''
+          case "$EVENT_NAME:$REF_TYPE" in
+            push:tag)
+              case "$REF_NAME" in
+                v*) version=${REF_NAME#v} ;;
+                *)
+                  echo 'Tag pushes must use a v-prefixed version tag' >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            workflow_dispatch:*)
+              if [ -n "$RELEASE_TAG" ]; then
+                case "$RELEASE_TAG" in
+                  v*) version=${RELEASE_TAG#v} ;;
+                  *)
+                    echo 'release_tag must be a v-prefixed version tag' >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              ;;
+          esac
+
+          if [ -z "$version" ]; then
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | jq -er '[.packages[] | select(.name == "jira-gpui") | .version] | if length == 1 then .[0] else error("expected exactly one jira-gpui package") end')
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]]; then
+            echo "Unsupported AppImage version: $version" >&2
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo dependencies and build output
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -146,10 +200,9 @@ jobs:
         shell: bash
         env:
           TOOL_DIR: ${{ runner.temp }}/jira-desk-appimage-tools
+          VERSION: ${{ steps.appimage-version.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "jira-gpui") | .version')"
           test -n "$VERSION"
           LINUXDEPLOY="$TOOL_DIR/linuxdeploy" \
           APPIMAGETOOL="$TOOL_DIR/appimagetool" \
@@ -192,7 +245,7 @@ jobs:
       - name: Upload AppImage artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: jira-desk-${{ github.sha }}-x86_64
+          name: jira-desk-${{ steps.appimage-version.outputs.version }}-x86_64
           path: |
             dist/Jira_Desk-*-x86_64.AppImage
             dist/Jira_Desk-*-x86_64.AppImage.sha256
