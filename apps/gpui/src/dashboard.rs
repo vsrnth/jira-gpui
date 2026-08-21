@@ -10,7 +10,7 @@ use chrono::{Local, SecondsFormat};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, Entity, Image, ImageFormat,
+    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, Image, ImageFormat,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
@@ -143,6 +143,16 @@ fn safe_lookup_error(error: &ApplicationError) -> &'static str {
 const MAX_RICH_IMAGES: usize = RichTextDocument::MAX_FALLBACK_IMAGES;
 const MAX_RICH_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+const DETAIL_SIDEBAR_MIN_WIDTH: f32 = 320.;
+const DETAIL_SIDEBAR_DEFAULT_WIDTH: f32 = 480.;
+
+struct DetailSidebarResize;
+
+impl Render for DetailSidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 #[derive(Clone)]
 struct CollectedRichImage {
@@ -1537,6 +1547,7 @@ pub struct Dashboard {
     search_input: Option<Entity<InputState>>,
     search_subscriptions: Vec<Subscription>,
     detail_state: DetailState,
+    detail_sidebar_width: Pixels,
     detail_generation: u64,
     detail_cancellation: Option<CancellationToken>,
     detail_task: Option<gpui::Task<()>>,
@@ -1629,6 +1640,7 @@ impl Dashboard {
             search_input: None,
             search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
+            detail_sidebar_width: px(DETAIL_SIDEBAR_DEFAULT_WIDTH),
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
@@ -1730,6 +1742,7 @@ impl Dashboard {
             search_input: None,
             search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
+            detail_sidebar_width: px(DETAIL_SIDEBAR_DEFAULT_WIDTH),
             detail_generation: 0,
             detail_cancellation: None,
             detail_task: None,
@@ -4161,14 +4174,26 @@ impl Dashboard {
                     })
                     .when(!mobile, |this| {
                         this.child(
+                            div()
+                                .id("team-detail-resize-handle")
+                                .h_full()
+                                .w(px(8.))
+                                .flex_shrink_0()
+                                .cursor(gpui::CursorStyle::ResizeColumn)
+                                .hover(|style| style.bg(cx.theme().muted))
+                                .on_drag(DetailSidebarResize, |_, _, _, cx| {
+                                    cx.new(|_| DetailSidebarResize)
+                                }),
+                        )
+                        .child(
                             v_flex()
                                 .id("team-detail")
                                 .h_full()
                                 .min_h_0()
                                 .min_w_0()
                                 .debug_selector(|| "team-detail".to_owned())
-                                .w(px(320.))
-                                .ml_3()
+                                .w(self.detail_sidebar_width)
+                                .flex_shrink_0()
                                 .p_4()
                                 .gap_2()
                                 .overflow_y_scrollbar()
@@ -4178,7 +4203,20 @@ impl Dashboard {
                                 .child(div().text_base().font_semibold().child("Issue detail"))
                                 .child(self.render_detail_state_for(&self.detail_state, layout, cx)),
                         )
-                    }),
+                    })
+                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DetailSidebarResize>, _, cx| {
+                        let container_right = event.bounds.right();
+                        let max_width = (event.bounds.size.width / 2.).max(px(DETAIL_SIDEBAR_MIN_WIDTH));
+                        let requested = container_right - event.event.position.x;
+                        let clamped = requested.clamp(
+                            px(DETAIL_SIDEBAR_MIN_WIDTH),
+                            max_width,
+                        );
+                        if clamped != this.detail_sidebar_width {
+                            this.detail_sidebar_width = clamped;
+                            cx.notify();
+                        }
+                    })),
             )
     }
 
