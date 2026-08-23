@@ -3283,17 +3283,19 @@ impl Dashboard {
                 h_flex()
                     .w_full()
                     .min_w_0()
+                    .overflow_x_hidden()
                     .justify_center()
                     .gap_2()
                     .child(Icon::new(icon).text_color(icon_color))
                     .when(!rail, |this| {
-                        this.child(div().min_w_0().truncate().child(label))
+                        this.child(div().flex_1().min_w_0().truncate().child(label))
                     })
                     .when(!rail && count > 0, |this| {
                         this.child(
                             div()
-                                .ml_auto()
+                                .flex_shrink_0()
                                 .min_w(px(26.))
+                                .ml_auto()
                                 .px_2()
                                 .py_0p5()
                                 .rounded_full()
@@ -3338,21 +3340,29 @@ impl Dashboard {
             .border_color(cx.theme().border)
             .child(
                 h_flex()
+                    .w_full()
                     .min_w_0()
                     .justify_between()
-                    .child(div().min_w_0().truncate().text_lg().font_semibold().child(
-                        match self.section {
-                            Section::Issues => "Jira issues",
-                            Section::Updates => "Local updates",
-                            Section::Team => "Team tracker",
-                            Section::Settings => "Settings",
-                        },
-                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_lg()
+                            .font_semibold()
+                            .child(match self.section {
+                                Section::Issues => "Jira issues",
+                                Section::Updates => "Local updates",
+                                Section::Team => "Team tracker",
+                                Section::Settings => "Settings",
+                            }),
+                    )
                     .when(self.section != Section::Settings, |this| {
                         this.child(
                             Button::new("refresh")
                                 .compact()
                                 .primary()
+                                .flex_shrink_0()
                                 .label(if self.operation_in_progress {
                                     "Refreshing…"
                                 } else {
@@ -4098,6 +4108,8 @@ impl Dashboard {
                     .child(
                         h_flex().gap_2().child(Spinner::new()).child(
                             div()
+                                .min_w_0()
+                                .whitespace_normal()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!("Looking up {query}…")),
@@ -4108,6 +4120,8 @@ impl Dashboard {
                     .child(div().text_base().font_semibold().child("Jira lookup failed"))
                     .child(
                         div()
+                            .min_w_0()
+                            .whitespace_normal()
                             .text_sm()
                             .text_color(cx.theme().danger)
                             .child(message.clone()),
@@ -4117,6 +4131,8 @@ impl Dashboard {
                     .child(div().text_base().font_semibold().child("Unable to load issue details"))
                     .child(
                         div()
+                            .min_w_0()
+                            .whitespace_normal()
                             .text_sm()
                             .text_color(cx.theme().danger)
                             .child(message.clone()),
@@ -4130,6 +4146,8 @@ impl Dashboard {
                     .child(div().text_base().font_semibold().child("Select an issue"))
                     .child(
                         div()
+                            .min_w_0()
+                            .whitespace_normal()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("Choose a Jira issue to view its description, fields, comments, and attachments."),
@@ -4137,13 +4155,20 @@ impl Dashboard {
             };
             return v_flex()
                 .id("issue-detail")
+                .debug_selector(|| "issue-detail".to_owned())
                 .w_full()
                 .flex_1()
                 .min_h_0()
                 .items_center()
                 .justify_center()
                 .p(px(layout.detail_padding()))
-                .child(status_surface)
+                .child(
+                    status_surface
+                        .debug_selector(|| "issue-detail-status".to_owned())
+                        .w_full()
+                        .max_w_full()
+                        .min_w_0(),
+                )
                 .into_any_element();
         };
         let project = issue.project.clone();
@@ -6851,6 +6876,37 @@ mod tests {
         assert!(
             mobile_table_bounds.size.height > px(300.),
             "mobile team table body collapsed: {mobile_table_bounds:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.section = Section::Team;
+        dashboard.selected_issue = None;
+        dashboard.selected_issue_core = None;
+        let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let detail_bounds = visual
+            .debug_bounds("issue-detail")
+            .expect("issue detail should be laid out");
+        let status_bounds = visual
+            .debug_bounds("issue-detail-status")
+            .expect("empty detail status should be laid out");
+        assert!(
+            status_bounds.origin.x >= detail_bounds.origin.x,
+            "empty detail status escapes left edge: detail={detail_bounds:?}, status={status_bounds:?}"
+        );
+        assert!(
+            status_bounds.origin.x + status_bounds.size.width
+                <= detail_bounds.origin.x + detail_bounds.size.width + px(1.),
+            "empty detail status escapes right edge: detail={detail_bounds:?}, status={status_bounds:?}"
         );
     }
 
