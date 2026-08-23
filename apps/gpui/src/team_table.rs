@@ -7,14 +7,19 @@
 
 use std::cmp::Ordering;
 
-use gpui::{App, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{
+    App, Context, InteractiveElement as _, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, Window, div, px,
+};
 use gpui_component::ActiveTheme as _;
 use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_component::tooltip::Tooltip;
 use jira_domain::{Issue, IssueId, Timestamp, UpdateEvent, User};
 
 use crate::presentation::{IdentityDirectory, describe_update_with_directory, format_timestamp};
 
-const COLUMN_COUNT: usize = 7;
+const DENSE_COLUMN_COUNT: usize = 5;
+const WIDE_COLUMN_COUNT: usize = 7;
 
 /// Display-ready values for one row in the team ticket table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +39,8 @@ pub struct TeamTicketRow {
     pub elapsed: String,
     /// Elapsed seconds, useful for callers that need their own accessibility wording.
     pub elapsed_seconds: i64,
+    /// Compact activity text retaining the latest change, exact timestamp, and age.
+    pub activity: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,15 +52,20 @@ enum SortColumn {
     LatestUpdate,
     LastUpdated,
     Elapsed,
+    Activity,
 }
 
 impl SortColumn {
-    fn from_index(index: usize) -> Option<Self> {
+    fn from_index(index: usize, dense_columns: bool) -> Option<Self> {
+        if dense_columns && index >= DENSE_COLUMN_COUNT {
+            return None;
+        }
         Some(match index {
             0 => Self::Key,
             1 => Self::Summary,
             2 => Self::Assignee,
             3 => Self::Status,
+            4 if dense_columns => Self::Activity,
             4 => Self::LatestUpdate,
             5 => Self::LastUpdated,
             6 => Self::Elapsed,
@@ -67,6 +79,7 @@ pub struct TeamTicketTableDelegate {
     rows: Vec<TeamTicketRow>,
     sort_column: SortColumn,
     sort_order: ColumnSort,
+    dense_columns: bool,
 }
 
 impl TeamTicketTableDelegate {
@@ -75,14 +88,38 @@ impl TeamTicketTableDelegate {
     /// Status category matching is intentionally repeated here instead of relying on an upstream
     /// filter: stale or mixed-case cached data must never leak a non-in-progress issue into this
     /// surface.
+    #[cfg(test)]
     pub fn new(issues: &[Issue], events: &[UpdateEvent], users: &[User], now: Timestamp) -> Self {
         let mut this = Self {
             rows: Vec::new(),
             sort_column: SortColumn::LastUpdated,
             sort_order: ColumnSort::Ascending,
+            dense_columns: false,
         };
         this.replace_rows(issues, events, users, now);
         this
+    }
+
+    /// Builds a delegate whose columns fit the compact and standard dashboard widths.
+    pub fn new_with_density(
+        issues: &[Issue],
+        events: &[UpdateEvent],
+        users: &[User],
+        now: Timestamp,
+        dense_columns: bool,
+    ) -> Self {
+        let mut this = Self {
+            rows: Vec::new(),
+            sort_column: SortColumn::LastUpdated,
+            sort_order: ColumnSort::Ascending,
+            dense_columns,
+        };
+        this.replace_rows(issues, events, users, now);
+        this
+    }
+
+    pub fn set_dense_columns(&mut self, dense_columns: bool) {
+        self.dense_columns = dense_columns;
     }
 
     /// Rebuilds and default-sorts the rows. The oldest activity is first so the stalest work is
@@ -152,6 +189,9 @@ pub trait TeamTicketTableStateExt: Sized {
 
     /// Resolve the current row selection to an issue ID, if any.
     fn selected_team_ticket_issue_id(&self) -> Option<IssueId>;
+
+    /// Switch between the wide table and a bounded compact column set after a window resize.
+    fn set_team_ticket_density(&mut self, dense_columns: bool, cx: &mut Context<Self>);
 }
 
 impl TeamTicketTableStateExt for TableState<TeamTicketTableDelegate> {
@@ -163,8 +203,15 @@ impl TeamTicketTableStateExt for TableState<TeamTicketTableDelegate> {
         now: Timestamp,
         cx: &mut Context<Self>,
     ) {
+        let selected_issue_id = self.selected_team_ticket_issue_id();
         self.delegate_mut().replace_rows(issues, events, users, now);
         self.refresh(cx);
+        match selected_issue_id
+            .and_then(|issue_id| row_index_for_issue_id(&self.delegate().rows, &issue_id))
+        {
+            Some(row_ix) => self.set_selected_row(row_ix, cx),
+            None => self.clear_selection(cx),
+        }
         cx.notify();
     }
 
@@ -172,11 +219,24 @@ impl TeamTicketTableStateExt for TableState<TeamTicketTableDelegate> {
         self.selected_row()
             .and_then(|row_ix| self.delegate().issue_id_for_row(row_ix))
     }
+
+    fn set_team_ticket_density(&mut self, dense_columns: bool, cx: &mut Context<Self>) {
+        if self.delegate().dense_columns == dense_columns {
+            return;
+        }
+        self.delegate_mut().set_dense_columns(dense_columns);
+        self.refresh(cx);
+        cx.notify();
+    }
 }
 
 impl TableDelegate for TeamTicketTableDelegate {
     fn columns_count(&self, _: &App) -> usize {
-        COLUMN_COUNT
+        if self.dense_columns {
+            DENSE_COLUMN_COUNT
+        } else {
+            WIDE_COLUMN_COUNT
+        }
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -184,24 +244,32 @@ impl TableDelegate for TeamTicketTableDelegate {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        match col_ix {
-            0 => Column::new("key", "Ticket")
-                .width(px(100.))
+        let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) else {
+            return Column::default();
+        };
+        let width = column_widths(self.dense_columns)[col_ix];
+        match column {
+            SortColumn::Key => Column::new("key", "Ticket")
+                .width(px(width))
                 .sortable()
                 .fixed_left(),
-            1 => Column::new("summary", "Summary").width(px(280.)).sortable(),
-            2 => Column::new("assignee", "Assignee")
-                .width(px(150.))
+            SortColumn::Summary => Column::new("summary", "Summary")
+                .width(px(width))
                 .sortable(),
-            3 => Column::new("status", "Status").width(px(125.)).sortable(),
-            4 => Column::new("latest_update", "Latest update")
-                .width(px(260.))
+            SortColumn::Assignee => Column::new("assignee", "Assignee")
+                .width(px(width))
                 .sortable(),
-            5 => Column::new("last_updated", "Last updated")
-                .width(px(190.))
+            SortColumn::Status => Column::new("status", "Status").width(px(width)).sortable(),
+            SortColumn::LatestUpdate => Column::new("latest_update", "Latest update")
+                .width(px(width))
+                .sortable(),
+            SortColumn::LastUpdated => Column::new("last_updated", "Updated")
+                .width(px(width))
                 .sort(ColumnSort::Ascending),
-            6 => Column::new("elapsed", "Age").width(px(85.)).sortable(),
-            _ => Column::default(),
+            SortColumn::Elapsed => Column::new("elapsed", "Age").width(px(width)).sortable(),
+            SortColumn::Activity => Column::new("activity", "Activity")
+                .width(px(width))
+                .sortable(),
         }
     }
 
@@ -212,7 +280,7 @@ impl TableDelegate for TeamTicketTableDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
-        if let Some(column) = SortColumn::from_index(col_ix) {
+        if let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) {
             self.sort_column = column;
             self.sort_order = if matches!(sort, ColumnSort::Default) {
                 ColumnSort::Ascending
@@ -234,24 +302,31 @@ impl TableDelegate for TeamTicketTableDelegate {
             return div().into_any_element();
         };
 
-        let value = match col_ix {
-            0 => row.key.as_str(),
-            1 => row.summary.as_str(),
-            2 => row.assignee.as_str(),
-            3 => row.status.as_str(),
-            4 => row.latest_update.as_str(),
-            5 => row.last_updated.as_str(),
-            6 => row.elapsed.as_str(),
-            _ => "",
+        let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) else {
+            return div().into_any_element();
         };
-        let mut cell = div().size_full().truncate().child(value.to_owned());
-        cell = match col_ix {
-            0 => cell.text_color(cx.theme().blue).text_sm(),
-            3 => cell.text_color(cx.theme().green).text_sm(),
-            6 => cell
+        let value = cell_value(row, column);
+        // Keep the compact visual width while exposing the complete value (including the exact
+        // localized Updated timestamp in Activity cells) to assistive technology and keyboard
+        // users. The table's generic cell renderer truncates the visible text by design.
+        let mut cell = div()
+            .id(format!("team-ticket-cell-{row_ix}-{col_ix}"))
+            .size_full()
+            .truncate()
+            .aria_label(value.to_owned())
+            .child(value.to_owned());
+        if matches!(column, SortColumn::Activity) {
+            let activity = value.to_owned();
+            cell = cell.tooltip(move |window, cx| Tooltip::new(activity.clone()).build(window, cx));
+        }
+        cell = match column {
+            SortColumn::Key => cell.text_color(cx.theme().blue).text_sm(),
+            SortColumn::Status => cell.text_color(cx.theme().green).text_sm(),
+            SortColumn::Elapsed => cell
                 .text_color(age_color(row.elapsed_seconds, cx))
                 .text_xs(),
-            5 => cell.text_color(cx.theme().muted_foreground).text_xs(),
+            SortColumn::LastUpdated => cell.text_color(cx.theme().muted_foreground).text_xs(),
+            SortColumn::Activity => cell.text_color(cx.theme().foreground).text_xs(),
             _ => cell.text_color(cx.theme().foreground).text_sm(),
         };
         cell.into_any_element()
@@ -261,17 +336,27 @@ impl TableDelegate for TeamTicketTableDelegate {
         let Some(row) = self.rows.get(row_ix) else {
             return String::new();
         };
-        match col_ix {
-            0 => row.key.clone(),
-            1 => row.summary.clone(),
-            2 => row.assignee.clone(),
-            3 => row.status.clone(),
-            4 => row.latest_update.clone(),
-            5 => row.last_updated.clone(),
-            6 => row.elapsed.clone(),
-            _ => String::new(),
-        }
+        SortColumn::from_index(col_ix, self.dense_columns)
+            .map(|column| cell_value(row, column).to_owned())
+            .unwrap_or_default()
     }
+}
+
+fn cell_value(row: &TeamTicketRow, column: SortColumn) -> &str {
+    match column {
+        SortColumn::Key => row.key.as_str(),
+        SortColumn::Summary => row.summary.as_str(),
+        SortColumn::Assignee => row.assignee.as_str(),
+        SortColumn::Status => row.status.as_str(),
+        SortColumn::LatestUpdate => row.latest_update.as_str(),
+        SortColumn::LastUpdated => row.last_updated.as_str(),
+        SortColumn::Elapsed => row.elapsed.as_str(),
+        SortColumn::Activity => row.activity.as_str(),
+    }
+}
+
+fn row_index_for_issue_id(rows: &[TeamTicketRow], issue_id: &IssueId) -> Option<usize> {
+    rows.iter().position(|row| &row.issue_id == issue_id)
 }
 
 fn build_row(
@@ -299,6 +384,7 @@ fn build_row(
         .map(|event| event.occurred_at.max(issue.updated_at))
         .unwrap_or(issue.updated_at);
     let elapsed_seconds = elapsed_seconds(last_updated_at, now);
+    let activity = format_activity(&latest_update, last_updated_at, elapsed_seconds);
 
     TeamTicketRow {
         issue_id: issue.id.clone(),
@@ -311,7 +397,20 @@ fn build_row(
         last_updated_at,
         elapsed: format_elapsed(elapsed_seconds),
         elapsed_seconds,
+        activity,
     }
+}
+
+fn format_activity(
+    latest_update: &str,
+    last_updated_at: Timestamp,
+    elapsed_seconds: i64,
+) -> String {
+    format!(
+        "{latest_update} · Updated {} · Age {}",
+        format_timestamp(last_updated_at),
+        format_elapsed(elapsed_seconds)
+    )
 }
 
 fn current_state_fallback(issue: &Issue) -> String {
@@ -347,6 +446,7 @@ fn compare_rows(left: &TeamTicketRow, right: &TeamTicketRow, column: SortColumn)
         // Age is a derived value, so its ascending order means freshest first. This is
         // intentionally different from the default LastUpdated sort, which is oldest first.
         SortColumn::Elapsed => left.elapsed_seconds.cmp(&right.elapsed_seconds),
+        SortColumn::Activity => left.last_updated_at.cmp(&right.last_updated_at),
     }
 }
 
@@ -386,6 +486,14 @@ fn age_color(seconds: i64, cx: &Context<TableState<TeamTicketTableDelegate>>) ->
         cx.theme().yellow
     } else {
         cx.theme().muted_foreground
+    }
+}
+
+fn column_widths(dense_columns: bool) -> &'static [f32] {
+    if dense_columns {
+        &[64.0, 140.0, 90.0, 75.0, 145.0]
+    } else {
+        &[100.0, 280.0, 150.0, 125.0, 260.0, 190.0, 85.0]
     }
 }
 
@@ -461,6 +569,25 @@ mod tests {
             row.latest_update,
             "Jira issue updated · currently In Progress"
         );
+    }
+
+    #[test]
+    fn dense_activity_keeps_change_timestamp_and_age_discoverable() {
+        let table = TeamTicketTableDelegate::new(
+            &sample_issues(),
+            &[],
+            &sample_users(),
+            datetime!(2026-08-19 00:00 UTC),
+        );
+        let row = table
+            .rows()
+            .iter()
+            .find(|row| row.key == "DESK-184")
+            .unwrap();
+
+        assert!(row.activity.contains(&row.latest_update));
+        assert!(row.activity.contains(&row.last_updated));
+        assert!(row.activity.contains(&row.elapsed));
     }
 
     #[test]
@@ -543,8 +670,61 @@ mod tests {
             &sample_users(),
             datetime!(2026-08-19 00:00 UTC),
         );
-        let selected = table.issue_id_for_row(0).unwrap();
+        let selected = table
+            .issue_id_for_row(0)
+            .expect("sample team table has a row at index zero");
         assert_eq!(selected, IssueId::new("10171").unwrap());
         assert!(table.issue_id_for_row(99).is_none());
+    }
+
+    #[test]
+    fn dense_columns_fit_compact_dashboard_content() {
+        assert_eq!(column_widths(true), &[64.0, 140.0, 90.0, 75.0, 145.0]);
+        assert_eq!(column_widths(true).iter().sum::<f32>(), 514.0);
+        assert!(column_widths(false).iter().sum::<f32>() > 900.0);
+    }
+
+    #[test]
+    fn dense_columns_expose_only_compact_ticket_fields() {
+        let dense = (0..DENSE_COLUMN_COUNT)
+            .map(|index| SortColumn::from_index(index, true))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dense,
+            vec![
+                Some(SortColumn::Key),
+                Some(SortColumn::Summary),
+                Some(SortColumn::Assignee),
+                Some(SortColumn::Status),
+                Some(SortColumn::Activity),
+            ]
+        );
+        assert_eq!(SortColumn::from_index(DENSE_COLUMN_COUNT, true), None);
+        assert_eq!(SortColumn::from_index(6, false), Some(SortColumn::Elapsed));
+    }
+
+    #[test]
+    fn selection_recovery_uses_issue_identity_after_rows_move() {
+        let table = TeamTicketTableDelegate::new(
+            &sample_issues(),
+            &[],
+            &sample_users(),
+            datetime!(2026-08-19 00:00 UTC),
+        );
+        let selected_issue_id = table.rows()[0].issue_id.clone();
+        let mut rebuilt_rows = table.rows().to_vec();
+        rebuilt_rows.reverse();
+
+        assert_eq!(
+            row_index_for_issue_id(&rebuilt_rows, &selected_issue_id),
+            Some(rebuilt_rows.len() - 1)
+        );
+        assert_eq!(
+            row_index_for_issue_id(
+                &rebuilt_rows,
+                &IssueId::new("missing").expect("missing test issue ID is valid"),
+            ),
+            None
+        );
     }
 }

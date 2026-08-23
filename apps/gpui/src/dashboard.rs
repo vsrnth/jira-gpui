@@ -1,18 +1,12 @@
-use std::{
-    collections::HashSet,
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use chrono::{Local, SecondsFormat};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, Image, ImageFormat,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
@@ -38,17 +32,14 @@ use jira_application::{
 };
 
 use jira_desktop_notifications::{TEST_NOTIFICATION_BODY, TEST_NOTIFICATION_SUMMARY};
-use jira_domain::{
-    AccountId, Issue, IssueId, IssueKey, JiraSiteId, RichBlock, RichImage, RichTextDocument, User,
-};
+use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
 use crate::{
     config::{LiveSession, StartupError, ensure_authenticated_user},
     credential_store::{self, DeleteOutcome},
     diagnostics::{
         DesktopNotificationTestResult as DiagnosticDesktopNotificationTestResult,
-        DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageFetchResult, ImagePreflight,
-        ImageSignature, ImageSource, ImageStateReason, ResponseMime,
+        DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageSource, ImageStateReason,
     },
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     local_data::{
@@ -61,12 +52,23 @@ use crate::{
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
-        RichAttachmentCardAction, RichImageRenderState, RichImageRenderStates, RichTextPalette,
-        render_rich_text, render_rich_text_with_actions,
+        RichAttachmentCardAction, RichImageRenderStates, RichTextPalette, render_rich_text,
+        render_rich_text_with_actions,
     },
     sample_data::{sample_issues, sample_updates, sample_users},
     semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
     team_table::{TeamTicketTableDelegate, TeamTicketTableStateExt},
+};
+
+mod media;
+
+use media::{
+    AttachmentDownloadState, MAX_ATTACHMENT_DOWNLOAD_BYTES, attachment_download_button_label,
+    attachment_download_is_current, attachment_issue_id, attachment_temp_path,
+    attachment_temp_token, cleanup_attachment_temp, collect_detail_images_with_context,
+    fetch_rich_image_states, image_result_is_current, inline_attachment_for_download,
+    loading_image_states, portal_download_directory, rich_image_contexts,
+    sanitized_attachment_filename, write_attachment_temp,
 };
 
 fn safe_sync_error(error: &ApplicationError) -> &'static str {
@@ -140,11 +142,58 @@ fn safe_lookup_error(error: &ApplicationError) -> &'static str {
     }
 }
 
-const MAX_RICH_IMAGES: usize = RichTextDocument::MAX_FALLBACK_IMAGES;
-const MAX_RICH_IMAGE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 const DETAIL_SIDEBAR_MIN_WIDTH: f32 = 320.;
 const DETAIL_SIDEBAR_DEFAULT_WIDTH: f32 = 480.;
+const TEAM_DETAIL_RESIZE_HANDLE_WIDTH: f32 = 8.;
+const TEAM_DENSE_TABLE_WIDTH: f32 = 514.;
+const TEAM_WIDE_TABLE_WIDTH: f32 = 1_190.;
+const TEAM_WIDE_TABLE_MIN_VIEWPORT: f32 = 1_920.;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeamTableMode {
+    Cards,
+    DenseTable,
+    WideTable,
+}
+
+fn team_table_mode_for_width(width: f32) -> TeamTableMode {
+    if width >= TEAM_WIDE_TABLE_MIN_VIEWPORT {
+        TeamTableMode::WideTable
+    } else if width >= 1_200. {
+        TeamTableMode::DenseTable
+    } else {
+        TeamTableMode::Cards
+    }
+}
+
+fn team_table_min_width(mode: TeamTableMode, layout: LayoutMode) -> f32 {
+    match mode {
+        TeamTableMode::Cards => layout.issue_list_range().0,
+        TeamTableMode::DenseTable => TEAM_DENSE_TABLE_WIDTH,
+        TeamTableMode::WideTable => TEAM_WIDE_TABLE_WIDTH,
+    }
+}
+
+fn is_activation_key(event: &KeyDownEvent) -> bool {
+    !event.is_held
+        && !event.keystroke.modifiers.modified()
+        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+}
+
+fn clamped_team_detail_width(
+    requested: f32,
+    viewport_width: f32,
+    layout: LayoutMode,
+    table_mode: TeamTableMode,
+) -> f32 {
+    let content_width =
+        (viewport_width - layout.sidebar_width() - 2. * layout.list_padding()).max(0.);
+    let table_min_width = team_table_min_width(table_mode, layout);
+    let max_width = ((content_width - TEAM_DETAIL_RESIZE_HANDLE_WIDTH - table_min_width).max(0.))
+        .min(content_width / 2.);
+    let min_width = DETAIL_SIDEBAR_MIN_WIDTH.min(max_width);
+    requested.clamp(min_width, max_width)
+}
 
 struct DetailSidebarResize;
 
@@ -154,246 +203,6 @@ impl Render for DetailSidebarResize {
     }
 }
 
-#[derive(Clone)]
-struct CollectedRichImage {
-    image: RichImage,
-    surface_ordinal: usize,
-    source: ImageSource,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum AttachmentDownloadState {
-    Idle,
-    Saving { attachment_id: String },
-}
-
-fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
-    match mime_type.trim().to_ascii_lowercase().as_str() {
-        "image/png" => Some(ImageFormat::Png),
-        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
-        "image/gif" => Some(ImageFormat::Gif),
-        "image/webp" => Some(ImageFormat::Webp),
-        _ => None,
-    }
-}
-
-fn image_format_from_bytes(bytes: &[u8]) -> Option<ImageFormat> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some(ImageFormat::Png)
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some(ImageFormat::Jpeg)
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some(ImageFormat::Gif)
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some(ImageFormat::Webp)
-    } else {
-        None
-    }
-}
-
-/// Cached metadata must identify an allowlisted image. Authenticated responses
-/// may use an allowlisted image MIME or the original-content
-/// `application/octet-stream` MIME; in either case, the bytes must carry a
-/// strict image signature before GPUI decodes them.
-fn fetched_image_format(
-    cached_mime_type: &str,
-    response_mime_type: &str,
-    bytes: &[u8],
-) -> Option<ImageFormat> {
-    image_format_for_mime(cached_mime_type)?;
-    if !response_mime_type
-        .trim()
-        .eq_ignore_ascii_case("application/octet-stream")
-    {
-        image_format_for_mime(response_mime_type)?;
-    }
-    image_format_from_bytes(bytes)
-}
-
-fn image_response_preflight(
-    cached_mime_type: &str,
-    response_mime_type: &str,
-    bytes: &[u8],
-    resident_bytes: usize,
-) -> ImagePreflight {
-    if image_format_for_mime(cached_mime_type).is_none() {
-        ImagePreflight::UnsupportedCachedMime
-    } else if bytes.is_empty() {
-        ImagePreflight::Empty
-    } else if !image_bytes_fit_aggregate(resident_bytes, bytes.len()) {
-        ImagePreflight::AggregateRejected
-    } else if ResponseMime::classify(response_mime_type) == ResponseMime::Unsupported {
-        ImagePreflight::ResponseMimeRejected
-    } else if fetched_image_format(cached_mime_type, response_mime_type, bytes).is_none() {
-        ImagePreflight::SignatureRejected
-    } else {
-        ImagePreflight::Accepted
-    }
-}
-
-/// Keep only a leaf filename suitable for a portal suggestion. The selected
-/// destination remains controlled by the user and is never derived from Jira.
-fn sanitized_attachment_filename(filename: &str) -> String {
-    let candidate = filename
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect::<String>();
-    let candidate = candidate.trim().trim_matches('.').trim();
-    if candidate.is_empty() {
-        "jira-attachment".to_owned()
-    } else {
-        let mut bounded = String::new();
-        for character in candidate.chars() {
-            if bounded.len().saturating_add(character.len_utf8()) > 255 {
-                break;
-            }
-            bounded.push(character);
-        }
-        if bounded.is_empty() {
-            "jira-attachment".to_owned()
-        } else {
-            bounded
-        }
-    }
-}
-
-fn choose_portal_download_directory(
-    home: Option<&Path>,
-    downloads: Option<&Path>,
-    current: &Path,
-) -> PathBuf {
-    downloads
-        .filter(|path| path.is_dir())
-        .or_else(|| home.filter(|path| path.is_dir()))
-        .unwrap_or(current)
-        .to_path_buf()
-}
-
-fn portal_download_directory() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let downloads = std::env::var_os("XDG_DOWNLOAD_DIR")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|path| path.join("Downloads")));
-    choose_portal_download_directory(home.as_deref(), downloads.as_deref(), Path::new("."))
-}
-
-fn attachment_temp_path(destination: &Path, unique_token: &str) -> PathBuf {
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    let filename = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("jira-attachment");
-    parent.join(format!(".{filename}.jira-desk-{unique_token}.part"))
-}
-
-fn attachment_temp_token() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{}-{nanos}", std::process::id())
-}
-
-fn write_attachment_temp(
-    path: &Path,
-    bytes: &[u8],
-    cancellation: &CancellationToken,
-) -> Result<(), String> {
-    if cancellation.is_cancelled() {
-        return Err("Download cancelled".to_owned());
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| "Could not create a temporary attachment file".to_owned())?;
-    let result = (|| {
-        file.write_all(bytes)
-            .map_err(|_| "Could not save the attachment".to_owned())?;
-        file.sync_all()
-            .map_err(|_| "Could not save the attachment".to_owned())?;
-        if cancellation.is_cancelled() {
-            return Err("Download cancelled".to_owned());
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(path);
-    }
-    result
-}
-
-fn cleanup_attachment_temp(path: &Path) {
-    let _ = std::fs::remove_file(path);
-}
-
-fn attachment_download_is_current(
-    current_generation: u64,
-    expected_generation: u64,
-    cancellation: &CancellationToken,
-) -> bool {
-    current_generation == expected_generation && !cancellation.is_cancelled()
-}
-
-fn image_bytes_fit_aggregate(current: usize, next: usize) -> bool {
-    next <= MAX_RICH_IMAGE_BYTES && current <= MAX_RICH_IMAGE_BYTES.saturating_sub(next)
-}
-
-fn image_result_is_current(
-    selected_issue: Option<&IssueId>,
-    expected_issue: &IssueId,
-    generation: u64,
-    expected_generation: u64,
-) -> bool {
-    detail_result_is_current(
-        selected_issue,
-        expected_issue,
-        generation,
-        expected_generation,
-    )
-}
-
-fn attachment_download_button_label(active: bool) -> &'static str {
-    if active { "Saving…" } else { "Download" }
-}
-
-fn attachment_issue_id(
-    selected_issue: Option<&IssueId>,
-    remote_issue: Option<&IssueId>,
-) -> Option<IssueId> {
-    remote_issue.cloned().or_else(|| selected_issue.cloned())
-}
-
-fn unique_attachment_for_id(
-    attachments: &[crate::presentation::AttachmentViewModel],
-    attachment_id: &str,
-) -> Option<crate::presentation::AttachmentViewModel> {
-    if attachment_id.trim().is_empty() {
-        return None;
-    }
-
-    let mut matches = attachments
-        .iter()
-        .filter(|attachment| !attachment.id.trim().is_empty() && attachment.id == attachment_id);
-    let attachment = matches.next()?.clone();
-    matches.next().is_none().then_some(attachment)
-}
-
-fn inline_attachment_for_download(
-    expected_issue_id: &IssueId,
-    active_issue_id: &IssueId,
-    attachments: &[crate::presentation::AttachmentViewModel],
-    attachment_id: &str,
-) -> Option<crate::presentation::AttachmentViewModel> {
-    (expected_issue_id == active_issue_id)
-        .then(|| unique_attachment_for_id(attachments, attachment_id))
-        .flatten()
-}
-
 fn should_close_status_filter_after_change(
     previous: IssueStatusSelection,
     next: IssueStatusSelection,
@@ -401,443 +210,6 @@ fn should_close_status_filter_after_change(
     previous == IssueStatusSelection::All
         && next.values().len() == 1
         && next != IssueStatusSelection::All
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn collect_rich_images(document: &RichTextDocument) -> Vec<RichImage> {
-    let mut images = Vec::new();
-    let mut seen = HashSet::new();
-    for block in &document.blocks {
-        collect_rich_images_from_block(block, &mut seen, &mut images);
-        if images.len() == MAX_RICH_IMAGES {
-            break;
-        }
-    }
-    for image in &document.fallback_images {
-        if seen.insert(image.attachment_id.clone()) {
-            images.push(image.clone());
-        }
-        if images.len() == MAX_RICH_IMAGES {
-            break;
-        }
-    }
-    images
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn collect_rich_images_from_block(
-    block: &RichBlock,
-    seen: &mut HashSet<String>,
-    images: &mut Vec<RichImage>,
-) {
-    if images.len() == MAX_RICH_IMAGES {
-        return;
-    }
-    match block {
-        RichBlock::Image(image) => {
-            if seen.insert(image.attachment_id.clone()) {
-                images.push(image.clone());
-            }
-        }
-        RichBlock::BlockQuote(children)
-        | RichBlock::Panel {
-            content: children, ..
-        } => {
-            for child in children {
-                collect_rich_images_from_block(child, seen, images);
-                if images.len() == MAX_RICH_IMAGES {
-                    break;
-                }
-            }
-        }
-        RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
-            for item in items {
-                for child in &item.blocks {
-                    collect_rich_images_from_block(child, seen, images);
-                    if images.len() == MAX_RICH_IMAGES {
-                        return;
-                    }
-                }
-            }
-        }
-        RichBlock::Paragraph(_)
-        | RichBlock::Heading { .. }
-        | RichBlock::CodeBlock { .. }
-        | RichBlock::Placeholder { .. } => {}
-    }
-}
-
-#[allow(dead_code)]
-fn collect_detail_images(detail: &IssueDetailViewModel) -> Vec<RichImage> {
-    collect_detail_images_with_context(detail)
-        .into_iter()
-        .map(|image| image.image)
-        .collect()
-}
-
-fn collect_detail_images_with_context(detail: &IssueDetailViewModel) -> Vec<CollectedRichImage> {
-    let mut images = Vec::new();
-    let mut seen = HashSet::new();
-    if let Some(document) = detail.rich_description.as_ref() {
-        for image in collect_rich_images_with_context(document, 0) {
-            if seen.insert(image.image.attachment_id.clone()) {
-                images.push(image);
-            }
-        }
-    }
-    for (comment_index, comment) in detail.comments.iter().enumerate() {
-        if let Some(document) = comment.rich_body.as_ref() {
-            for image in collect_rich_images_with_context(document, comment_index + 1) {
-                if seen.insert(image.image.attachment_id.clone()) {
-                    images.push(image);
-                    if images.len() == MAX_RICH_IMAGES {
-                        return images;
-                    }
-                }
-            }
-        }
-    }
-    images.truncate(MAX_RICH_IMAGES);
-    images
-}
-
-fn collect_rich_images_with_context(
-    document: &RichTextDocument,
-    surface_ordinal: usize,
-) -> Vec<CollectedRichImage> {
-    let mut images = Vec::new();
-    let mut seen = HashSet::new();
-    for block in &document.blocks {
-        collect_rich_images_from_block_with_context(
-            block,
-            &mut seen,
-            &mut images,
-            surface_ordinal,
-            ImageSource::ResolvedAdf,
-        );
-        if images.len() == MAX_RICH_IMAGES {
-            break;
-        }
-    }
-    for image in &document.fallback_images {
-        if seen.insert(image.attachment_id.clone()) {
-            images.push(CollectedRichImage {
-                image: image.clone(),
-                surface_ordinal,
-                source: ImageSource::FallbackCandidate,
-            });
-        }
-        if images.len() == MAX_RICH_IMAGES {
-            break;
-        }
-    }
-    images
-}
-
-fn collect_rich_images_from_block_with_context(
-    block: &RichBlock,
-    seen: &mut HashSet<String>,
-    images: &mut Vec<CollectedRichImage>,
-    surface_ordinal: usize,
-    source: ImageSource,
-) {
-    if images.len() == MAX_RICH_IMAGES {
-        return;
-    }
-    match block {
-        RichBlock::Image(image) => {
-            if seen.insert(image.attachment_id.clone()) {
-                images.push(CollectedRichImage {
-                    image: image.clone(),
-                    surface_ordinal,
-                    source,
-                });
-            }
-        }
-        RichBlock::BlockQuote(children)
-        | RichBlock::Panel {
-            content: children, ..
-        } => {
-            for child in children {
-                collect_rich_images_from_block_with_context(
-                    child,
-                    seen,
-                    images,
-                    surface_ordinal,
-                    source,
-                );
-                if images.len() == MAX_RICH_IMAGES {
-                    break;
-                }
-            }
-        }
-        RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
-            for item in items {
-                for child in &item.blocks {
-                    collect_rich_images_from_block_with_context(
-                        child,
-                        seen,
-                        images,
-                        surface_ordinal,
-                        source,
-                    );
-                    if images.len() == MAX_RICH_IMAGES {
-                        return;
-                    }
-                }
-            }
-        }
-        RichBlock::Paragraph(_)
-        | RichBlock::Heading { .. }
-        | RichBlock::CodeBlock { .. }
-        | RichBlock::Placeholder { .. } => {}
-    }
-}
-
-fn loading_image_states(
-    images: &[CollectedRichImage],
-    diagnostics: &DiagnosticsSink,
-    flow: DiagnosticFlow,
-    load_token: u64,
-) -> RichImageRenderStates {
-    let mut states = RichImageRenderStates::with_context(diagnostics.clone(), flow, load_token);
-    for (candidate_ordinal, image) in images.iter().enumerate() {
-        diagnostics.image_state(
-            flow,
-            load_token,
-            candidate_ordinal,
-            image.surface_ordinal,
-            image.source,
-            ImageStateReason::Loading,
-        );
-        states.insert_with_context(
-            image.image.attachment_id.clone(),
-            RichImageRenderState::Loading,
-            candidate_ordinal,
-            image.surface_ordinal,
-            image.source,
-        );
-    }
-    states
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn fetch_rich_image_states(
-    workspace: Arc<LiveWorkspace>,
-    site_id: JiraSiteId,
-    issue_id: IssueId,
-    images: Vec<CollectedRichImage>,
-    cancellation: CancellationToken,
-    diagnostics: DiagnosticsSink,
-    flow: DiagnosticFlow,
-    load_token: u64,
-) -> Result<RichImageRenderStates, ()> {
-    let mut states = RichImageRenderStates::with_context(diagnostics.clone(), flow, load_token);
-    let mut resident_bytes = 0usize;
-    for (candidate_ordinal, collected) in images.into_iter().enumerate() {
-        let image = collected.image;
-        let surface_ordinal = collected.surface_ordinal;
-        let source = collected.source;
-        if cancellation.is_cancelled() {
-            diagnostics.image_fetch_result(
-                flow,
-                load_token,
-                candidate_ordinal,
-                surface_ordinal,
-                source,
-                ImageFetchResult::Failed(DiagnosticErrorKind::Cancelled),
-            );
-            diagnostics.image_state(
-                flow,
-                load_token,
-                candidate_ordinal,
-                surface_ordinal,
-                source,
-                ImageStateReason::Cancelled,
-            );
-            return Err(());
-        }
-        diagnostics.image_fetch_started(
-            flow,
-            load_token,
-            candidate_ordinal,
-            surface_ordinal,
-            source,
-        );
-        if image_format_for_mime(&image.mime_type).is_none() {
-            diagnostics.image_response(
-                flow,
-                load_token,
-                candidate_ordinal,
-                surface_ordinal,
-                source,
-                ResponseMime::classify(&image.mime_type),
-                ImageSignature::Unknown,
-                0,
-                ImagePreflight::UnsupportedCachedMime,
-            );
-            diagnostics.image_fetch_result(
-                flow,
-                load_token,
-                candidate_ordinal,
-                surface_ordinal,
-                source,
-                ImageFetchResult::Failed(DiagnosticErrorKind::InvalidInput),
-            );
-            diagnostics.image_state(
-                flow,
-                load_token,
-                candidate_ordinal,
-                surface_ordinal,
-                source,
-                ImageStateReason::Unsupported,
-            );
-            states.insert_with_context(
-                image.attachment_id,
-                RichImageRenderState::Failed,
-                candidate_ordinal,
-                surface_ordinal,
-                source,
-            );
-            continue;
-        }
-        let result = workspace
-            .fetch_attachment_image(
-                jira_application::AttachmentImageRequest {
-                    site_id: site_id.clone(),
-                    issue_id: issue_id.clone(),
-                    attachment_id: image.attachment_id.clone(),
-                    width: 1_600,
-                    height: 1_200,
-                    max_bytes: 8 * 1024 * 1024,
-                },
-                &cancellation,
-            )
-            .await;
-        match result {
-            Ok(image_bytes) => {
-                let response_mime = ResponseMime::classify(&image_bytes.mime_type);
-                let signature = ImageSignature::classify(&image_bytes.bytes);
-                let preflight = image_response_preflight(
-                    &image.mime_type,
-                    &image_bytes.mime_type,
-                    &image_bytes.bytes,
-                    resident_bytes,
-                );
-                diagnostics.image_response(
-                    flow,
-                    load_token,
-                    candidate_ordinal,
-                    surface_ordinal,
-                    source,
-                    response_mime,
-                    signature,
-                    image_bytes.bytes.len(),
-                    preflight,
-                );
-                if preflight == ImagePreflight::Accepted {
-                    let format = fetched_image_format(
-                        &image.mime_type,
-                        &image_bytes.mime_type,
-                        &image_bytes.bytes,
-                    )
-                    .expect("accepted image preflight has a format");
-                    resident_bytes = resident_bytes.saturating_add(image_bytes.bytes.len());
-                    diagnostics.image_fetch_result(
-                        flow,
-                        load_token,
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                        ImageFetchResult::Succeeded,
-                    );
-                    diagnostics.image_state(
-                        flow,
-                        load_token,
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                        ImageStateReason::Ready,
-                    );
-                    states.insert_with_context(
-                        image.attachment_id,
-                        RichImageRenderState::Ready(Arc::new(Image::from_bytes(
-                            format,
-                            image_bytes.bytes,
-                        ))),
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                    );
-                } else {
-                    diagnostics.image_fetch_result(
-                        flow,
-                        load_token,
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                        ImageFetchResult::Failed(DiagnosticErrorKind::InvalidInput),
-                    );
-                    diagnostics.image_state(
-                        flow,
-                        load_token,
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                        ImageStateReason::Failed,
-                    );
-                    states.insert_with_context(
-                        image.attachment_id,
-                        RichImageRenderState::Failed,
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                    );
-                }
-            }
-            Err(error) => {
-                let error_kind = DiagnosticErrorKind::from(error.kind());
-                if let Some(attachment_diagnostic) = error.attachment_diagnostic() {
-                    diagnostics.attachment_read_diagnostic(
-                        flow,
-                        load_token,
-                        candidate_ordinal,
-                        surface_ordinal,
-                        source,
-                        attachment_diagnostic,
-                    );
-                }
-                diagnostics.image_fetch_result(
-                    flow,
-                    load_token,
-                    candidate_ordinal,
-                    surface_ordinal,
-                    source,
-                    ImageFetchResult::Failed(error_kind),
-                );
-                diagnostics.image_state(
-                    flow,
-                    load_token,
-                    candidate_ordinal,
-                    surface_ordinal,
-                    source,
-                    if error.kind() == jira_application::ErrorKind::Cancelled {
-                        ImageStateReason::Cancelled
-                    } else {
-                        ImageStateReason::Failed
-                    },
-                );
-                states.insert_with_context(
-                    image.attachment_id,
-                    RichImageRenderState::Failed,
-                    candidate_ordinal,
-                    surface_ordinal,
-                    source,
-                );
-            }
-        }
-    }
-    Ok(states)
 }
 
 fn refresh_complete_message(result: &RefreshResult) -> String {
@@ -973,6 +345,13 @@ fn team_summary(displayed: usize, configured_members: usize) -> String {
             "members"
         },
     )
+}
+
+fn team_feedback_is_loading(feedback: Option<&str>) -> bool {
+    feedback.is_some_and(|message| {
+        message.starts_with("Refreshing team tracker")
+            || message.starts_with("Resolving team members")
+    })
 }
 
 fn team_email_resolution_message(candidate_count: usize) -> Option<&'static str> {
@@ -1940,6 +1319,9 @@ impl Dashboard {
                     } else {
                         this.operation_in_progress = true;
                         this.sync_message = "Automatic refresh…".to_owned();
+                        if !this.team_members.is_empty() && !this.team_automatic_polling_paused {
+                            this.team_feedback = Some("Refreshing team tracker…".to_owned());
+                        }
                         cx.notify();
                         true
                     }
@@ -2185,10 +1567,7 @@ impl Dashboard {
             let issue = detail.core.issue.clone();
             let view = IssueDetailViewModel::from_domain(&detail, &users);
             let images = collect_detail_images_with_context(&view);
-            let image_contexts = images
-                .iter()
-                .map(|image| (image.surface_ordinal, image.source))
-                .collect::<Vec<_>>();
+            let image_contexts = rich_image_contexts(&images);
             let loading = loading_image_states(
                 &images,
                 &diagnostics,
@@ -2326,6 +1705,17 @@ impl Dashboard {
         self.status_popover_open = false;
     }
 
+    fn clear_selection_for_team_scope(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.issue_edit_state, IssueEditState::Submitting { .. }) {
+            return;
+        }
+        self.clear_remote_lookup();
+        self.invalidate_detail_selection();
+        self.invalidate_comment_selection();
+        self.invalidate_issue_edit_selection();
+        cx.notify();
+    }
+
     fn select_issue(&mut self, issue_id: IssueId, cx: &mut Context<Self>, force: bool) {
         if matches!(self.issue_edit_state, IssueEditState::Submitting { .. })
             && self.selected_issue.as_ref() != Some(&issue_id)
@@ -2411,10 +1801,7 @@ impl Dashboard {
             let issue = detail.core.issue.clone();
             let view = IssueDetailViewModel::from_domain(&detail, &users);
             let images = collect_detail_images_with_context(&view);
-            let image_contexts = images
-                .iter()
-                .map(|image| (image.surface_ordinal, image.source))
-                .collect::<Vec<_>>();
+            let image_contexts = rich_image_contexts(&images);
             let loading = loading_image_states(
                 &images,
                 &diagnostics,
@@ -3302,28 +2689,55 @@ impl Dashboard {
 
     fn ensure_team_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.team_table.is_some() {
+            let table_mode = team_table_mode_for_width(f32::from(window.viewport_size().width));
+            let dense_columns = !matches!(table_mode, TeamTableMode::WideTable);
+            if let Some(table) = self.team_table.clone() {
+                table.update(cx, |table, cx| {
+                    table.set_team_ticket_density(dense_columns, cx);
+                });
+            }
             return;
         }
-        let delegate = TeamTicketTableDelegate::new(
+        let table_mode = team_table_mode_for_width(f32::from(window.viewport_size().width));
+        let dense_columns = !matches!(table_mode, TeamTableMode::WideTable);
+        let delegate = TeamTicketTableDelegate::new_with_density(
             &self.team_issues,
             &self.team_events,
             &self.users,
             jira_domain::Timestamp::now_utc(),
+            dense_columns,
         );
         let table = cx.new(|cx| TableState::new(delegate, window, cx));
         self.team_table_subscriptions.push(cx.subscribe_in(
             &table,
             window,
-            |this, table, event: &TableEvent, window, cx| {
-                if let TableEvent::SelectRow(_) = event
-                    && let Some(issue_id) = table.read(cx).selected_team_ticket_issue_id()
-                {
-                    this.select_issue(issue_id, cx, true);
+            |this, table, event: &TableEvent, window, cx| match event {
+                TableEvent::SelectRow(_) => {
+                    let Some(issue_id) = table.read(cx).selected_team_ticket_issue_id() else {
+                        return;
+                    };
+                    if matches!(this.issue_edit_state, IssueEditState::Submitting { .. })
+                        && this.selected_issue.as_ref() != Some(&issue_id)
+                    {
+                        return;
+                    }
+                    if this.selected_issue.as_ref() != Some(&issue_id) {
+                        this.select_issue(issue_id, cx, true);
+                    }
                     this.section = Section::Team;
                     this.mobile_detail_open =
                         layout_for_width(f32::from(window.viewport_size().width)).is_mobile();
                     cx.notify();
                 }
+                TableEvent::ClearSelection => {
+                    let stale_selection = this.selected_issue.as_ref().is_some_and(|selected| {
+                        !this.team_issues.iter().any(|issue| &issue.id == selected)
+                    });
+                    if this.section == Section::Team && stale_selection {
+                        this.clear_selection_for_team_scope(cx);
+                    }
+                }
+                _ => {}
             },
         ));
         self.team_table = Some(table);
@@ -3411,6 +2825,9 @@ impl Dashboard {
         let cancellation = CancellationToken::new();
         self.operation_in_progress = true;
         self.sync_message = "Refreshing Jira…".to_owned();
+        if !self.team_members.is_empty() && !self.team_automatic_polling_paused {
+            self.team_feedback = Some("Refreshing team tracker…".to_owned());
+        }
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -3729,7 +3146,7 @@ impl Dashboard {
                     ))
                     .child(self.nav_item(
                         "Team tracker",
-                        Some(self.team_issues.len()),
+                        Some(team_issue_counts(&self.team_issues).1),
                         self.section == Section::Team,
                         Section::Team,
                         rail,
@@ -3815,54 +3232,97 @@ impl Dashboard {
     ) -> impl IntoElement {
         let icon = match section {
             Section::Issues => IconName::LayoutDashboard,
-            Section::Updates => IconName::Inbox,
-            Section::Team => IconName::LayoutDashboard,
-            Section::Settings => IconName::Settings,
+            Section::Updates => IconName::Bell,
+            Section::Team => IconName::CircleUser,
+            Section::Settings => IconName::Settings2,
         };
-        let visual = if rail {
-            Icon::new(icon).into_any_element()
+        let count = count.unwrap_or_default();
+        let icon_color = if selected {
+            cx.theme().sidebar_accent_foreground
         } else {
-            div()
-                .text_sm()
-                .font_semibold()
-                .child(label)
-                .into_any_element()
+            cx.theme().sidebar_foreground
         };
-        h_flex()
+        let tooltip = if count > 0 {
+            format!("{label} · {count}")
+        } else {
+            label.to_owned()
+        };
+        div()
             .id(label)
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(tooltip)
+            .aria_selected(selected)
+            .tab_index(0)
             .w_full()
             .px_3()
             .py_2()
-            .justify_between()
-            .when(rail, |this| this.justify_center().px_1())
             .rounded(cx.theme().radius)
+            .accessibility_id(label)
             .cursor_pointer()
-            .aria_label(label)
             .when(selected, |this| {
                 this.bg(cx.theme().sidebar_accent)
+                    .border_l_2()
+                    .border_color(cx.theme().primary)
                     .text_color(cx.theme().sidebar_accent_foreground)
             })
             .when(!selected, |this| {
                 this.hover(|style| style.bg(cx.theme().sidebar_accent))
             })
+            .when(rail, |this| this.w(px(48.)).overflow_hidden().px_1())
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.section = section;
-                cx.notify();
+                this.activate_section(section, cx);
             }))
-            .child(visual)
-            .when(!rail && count.is_some(), |this| {
-                this.child(
-                    div()
-                        .min_w(px(26.))
-                        .px_2()
-                        .py_0p5()
-                        .rounded_full()
-                        .bg(cx.theme().muted)
-                        .text_center()
-                        .text_xs()
-                        .child(count.unwrap_or_default().to_string()),
-                )
-            })
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if is_activation_key(event) {
+                    window.prevent_default();
+                    this.activate_section(section, cx);
+                }
+            }))
+            .focus(|style| style.border_1().border_color(cx.theme().primary))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .justify_center()
+                    .gap_2()
+                    .child(Icon::new(icon).text_color(icon_color))
+                    .when(!rail, |this| {
+                        this.child(div().min_w_0().truncate().child(label))
+                    })
+                    .when(!rail && count > 0, |this| {
+                        this.child(
+                            div()
+                                .ml_auto()
+                                .min_w(px(26.))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .text_center()
+                                .text_xs()
+                                .child(count.to_string()),
+                        )
+                    }),
+            )
+    }
+
+    fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Team
+            && self
+                .selected_issue
+                .as_ref()
+                .is_some_and(|selected| !self.team_issues.iter().any(|issue| &issue.id == selected))
+        {
+            if matches!(self.issue_edit_state, IssueEditState::Submitting { .. }) {
+                self.sync_message =
+                    "Finish the confirmed Jira change before changing views".to_owned();
+                cx.notify();
+                return;
+            }
+            self.clear_selection_for_team_scope(cx);
+        }
+        self.section = section;
+        cx.notify();
     }
 
     fn render_header(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3870,9 +3330,9 @@ impl Dashboard {
         v_flex()
             .id("header")
             .debug_selector(|| "header".to_owned())
-            .h(px(if mobile { 84. } else { 72. }))
+            .h(px(if mobile { 88. } else { 76. }))
             .px(px(if mobile { 12. } else { 20. }))
-            .py(px(if mobile { 10. } else { 12. }))
+            .py(px(if mobile { 9. } else { 10. }))
             .flex_shrink_0()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -3907,9 +3367,17 @@ impl Dashboard {
             )
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .max_w(px(if mobile { 420. } else { 720. }))
+                    .max_h(px(if mobile { 44. } else { 36. }))
+                    .overflow_y_scrollbar()
+                    .whitespace_normal()
                     .text_xs()
+                    .px_2()
+                    .py_1()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().secondary.opacity(0.45))
                     .text_color(cx.theme().muted_foreground)
                     .child(self.sync_message.clone()),
             )
@@ -4035,7 +3503,22 @@ impl Dashboard {
                         self.issues
                             .iter()
                             .map(|issue| self.issue_row(issue, layout, cx)),
-                    ),
+                    )
+                    .when(self.issues.is_empty() && self.remote_lookup_view().is_none(), |this| {
+                        this.child(
+                            v_flex()
+                                .items_center()
+                                .gap_2()
+                                .p_6()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.domain_issues.is_empty() {
+                                    "No Jira issues loaded yet. Refresh to check your assigned or watched view."
+                                } else {
+                                    "No issues match the current search and status filters."
+                                }),
+                        )
+                    }),
             )
             .into_any_element();
 
@@ -4090,12 +3573,33 @@ impl Dashboard {
         h_flex().size_full().min_w_0().child(panes)
     }
 
-    fn render_team(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_team(
+        &self,
+        layout: LayoutMode,
+        table_mode: TeamTableMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mobile = layout.is_mobile();
         let configured = !self.team_members.is_empty();
         let show_mobile_detail = mobile && self.mobile_detail_open;
         let table = self.team_table.clone();
         let (_, displayed_team_count) = team_issue_counts(&self.team_issues);
+        let team_loading = configured
+            && displayed_team_count == 0
+            && (self.team_task.is_some()
+                || team_feedback_is_loading(self.team_feedback.as_deref()));
+        let mobile_rows = self
+            .team_issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .status
+                    .category
+                    .as_deref()
+                    .is_some_and(|category| category.trim().eq_ignore_ascii_case("in progress"))
+            })
+            .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+            .collect::<Vec<_>>();
         v_flex()
             .size_full()
             .min_w_0()
@@ -4146,31 +3650,133 @@ impl Dashboard {
                                         cx.notify();
                                     })),
                             )
-                            .child(self.render_detail_state_for(&self.detail_state, layout, cx))
+                    .child(
+                                self.issue_detail(layout, cx),
+                            )
                             .into_any_element()
                     } else {
-                        v_flex()
-                            .id("team-table")
-                            .h_full()
-                            .debug_selector(|| "team-table".to_owned())
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .child(if !configured {
-                                div()
-                                    .p_4()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Configure at least one Jira account ID or Atlassian email in Settings to load team tickets.")
-                                    .into_any_element()
-                            } else if let Some(table) = table {
-                                DataTable::new(&table).into_any_element()
-                            } else {
-                                div().p_4().text_sm().text_color(cx.theme().muted_foreground).child(if configured { "Loading team tracker…" } else { "Configure at least one Jira account ID or Atlassian email in Settings to load team tickets." }).into_any_element()
-                            })
-                            .into_any_element()
+                        if matches!(table_mode, TeamTableMode::Cards) {
+                            v_flex()
+                                .id("team-table")
+                                .debug_selector(|| "team-table".to_owned())
+                                .h_full()
+                                .flex_1()
+                                .min_h_0()
+                                .min_w_0()
+                                .overflow_y_scrollbar()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .when(!configured, |this| {
+                                    this.child(
+                                        v_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .p_6()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Configure a team to see in-progress tickets here.")
+                                            .child(
+                                                Button::new("configure-team-mobile")
+                                                    .compact()
+                                                    .primary()
+                                                    .label("Configure team")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.section = Section::Settings;
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                                })
+                                .when(configured && mobile_rows.is_empty(), |this| {
+                                    this.child(
+                                        v_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .p_6()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .when(team_loading, |this| {
+                                                this.child(Spinner::new()).child(
+                                                    div().child("Loading team tickets…"),
+                                                )
+                                            })
+                                            .when(!team_loading, |this| {
+                                                this.child("No in-progress team tickets found.")
+                                            }),
+                                    )
+                                })
+                                .children(
+                                    mobile_rows
+                                        .iter()
+                                        .map(|issue| self.issue_row(issue, layout, cx)),
+                                )
+                                .into_any_element()
+                        } else {
+                            v_flex()
+                                .id("team-table")
+                                .debug_selector(|| "team-table".to_owned())
+                                .h_full()
+                                .flex_1()
+                                .min_h_0()
+                                .min_w_0()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .when(!configured, |this| {
+                                    this.child(
+                                        v_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .p_6()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Configure a team to see in-progress tickets here.")
+                                            .child(
+                                                Button::new("configure-team")
+                                                    .compact()
+                                                    .primary()
+                                                    .label("Configure team")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.section = Section::Settings;
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                                })
+                                .when(
+                                    configured
+                                        && displayed_team_count == 0
+                                        && !matches!(table_mode, TeamTableMode::Cards),
+                                    |this| {
+                                        this.child(
+                                            v_flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .p_6()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .when(team_loading, |this| {
+                                                    this.child(Spinner::new()).child(
+                                                        div().child("Loading team tickets…"),
+                                                    )
+                                                })
+                                                .when(!team_loading, |this| {
+                                                    this.child("No in-progress team tickets found.")
+                                                }),
+                                        )
+                                    },
+                                )
+                                .when(
+                                    configured
+                                        && displayed_team_count > 0
+                                        && table.is_some()
+                                        && !matches!(table_mode, TeamTableMode::Cards),
+                                    |this| {
+                                    this.child(
+                                        DataTable::new(table.as_ref().expect("team table exists")),
+                                    )
+                                })
+                                .into_any_element()
+                        }
                     })
                     .when(!mobile, |this| {
                         this.child(
@@ -4189,6 +3795,7 @@ impl Dashboard {
                             v_flex()
                                 .id("team-detail")
                                 .h_full()
+                                .flex_1()
                                 .min_h_0()
                                 .min_w_0()
                                 .debug_selector(|| "team-detail".to_owned())
@@ -4196,12 +3803,10 @@ impl Dashboard {
                                 .flex_shrink_0()
                                 .p_4()
                                 .gap_2()
-                                .overflow_y_scrollbar()
                                 .overflow_x_hidden()
                                 .border_1()
                                 .border_color(cx.theme().border)
-                                .child(div().text_base().font_semibold().child("Issue detail"))
-                                .child(self.render_detail_state_for(&self.detail_state, layout, cx)),
+                                .child(self.issue_detail(layout, cx)),
                         )
                     })
                     .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DetailSidebarResize>, _, cx| {
@@ -4282,6 +3887,13 @@ impl Dashboard {
             self.selected_issue_core.as_ref(),
             &self.users,
         )
+        .or_else(|| {
+            let selected = self.selected_issue.as_ref()?;
+            self.team_issues
+                .iter()
+                .find(|issue| &issue.id == selected)
+                .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+        })
     }
 
     fn comment_target_issue(&self) -> Option<&Issue> {
@@ -4317,21 +3929,33 @@ impl Dashboard {
     ) -> AnyElement {
         let selected = self.selected_issue.as_ref() == Some(&issue.id)
             || matches!(
-                &self.remote_lookup,
-                RemoteLookupState::Loaded { issue: remote, .. } if remote.id == issue.id
+                    &self.remote_lookup,
+                    RemoteLookupState::Loaded { issue: remote, .. } if remote.id == issue.id
             );
         let issue_id = issue.id.clone();
+        let keyboard_issue_id = issue.id.clone();
         let is_remote_result = !label.is_empty();
         let mobile = layout.is_mobile();
-        v_flex()
-            .id(issue.id.to_string())
-            .w_full()
+        let accessible_label = format!("Open {}: {}", issue.key, issue.summary);
+        div()
+            .id(format!("issue-row-{}", issue.id))
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(accessible_label)
+            .aria_selected(selected)
+            .tab_index(0)
             .p_4()
             .gap_2()
+            .items_start()
+            .min_w_0()
+            .w_full()
+            .cursor_pointer()
             .border_b_1()
             .border_color(cx.theme().border)
-            .cursor_pointer()
-            .when(selected, |this| this.bg(cx.theme().list_active))
+            .when(selected, |this| {
+                this.bg(cx.theme().list_active)
+                    .border_l_2()
+                    .border_color(cx.theme().primary)
+            })
             .when(!selected, |this| {
                 this.hover(|style| style.bg(cx.theme().list_hover))
             })
@@ -4343,80 +3967,100 @@ impl Dashboard {
                 this.mobile_detail_open = mobile;
                 cx.notify();
             }))
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if is_activation_key(event) {
+                    window.prevent_default();
+                    if !is_remote_result {
+                        this.clear_remote_lookup();
+                        this.select_issue(keyboard_issue_id.clone(), cx, false);
+                    }
+                    this.mobile_detail_open = mobile;
+                    cx.notify();
+                }
+            }))
+            .focus(|style| style.border_1().border_color(cx.theme().primary))
             .child(
-                h_flex()
+                v_flex()
+                    .w_full()
                     .min_w_0()
-                    .justify_between()
+                    .gap_2()
+                    .text_base()
+                    .text_color(cx.theme().foreground)
                     .child(
                         h_flex()
                             .min_w_0()
-                            .gap_2()
-                            .child(self.issue_key_with_icon(
-                                issue.key.clone(),
-                                &issue.issue_type,
-                                cx,
-                            ))
+                            .justify_between()
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(self.issue_key_with_icon(
+                                        issue.key.clone(),
+                                        &issue.issue_type,
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(issue.issue_type.clone()),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
+                                    .flex_shrink_0()
                                     .truncate()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(cx.theme().secondary)
+                                    .border_1()
+                                    .border_color(cx.theme().link.opacity(0.4))
+                                    .text_color(cx.theme().secondary_foreground)
                                     .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(issue.issue_type.clone()),
+                                    .font_semibold()
+                                    .child(issue.status.clone()),
                             ),
                     )
+                    .when(!label.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().link)
+                                .child(label.to_owned()),
+                        )
+                    })
                     .child(
                         div()
                             .min_w_0()
-                            .flex_shrink_0()
-                            .truncate()
-                            .px_2()
-                            .py_1()
-                            .rounded_full()
-                            .bg(cx.theme().secondary)
-                            .border_1()
-                            .border_color(cx.theme().link.opacity(0.4))
-                            .text_color(cx.theme().secondary_foreground)
-                            .text_xs()
+                            .line_clamp(2)
+                            .text_sm()
                             .font_semibold()
-                            .child(issue.status.clone()),
-                    ),
-            )
-            .when(!label.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().link)
-                        .child(label.to_owned()),
-                )
-            })
-            .child(
-                div()
-                    .min_w_0()
-                    .line_clamp(2)
-                    .text_sm()
-                    .font_semibold()
-                    .child(issue.summary.clone()),
-            )
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .justify_between()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                            .child(issue.summary.clone()),
+                    )
                     .child(
                         h_flex()
                             .min_w_0()
-                            .gap_1()
+                            .justify_between()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
                             .child(
-                                div()
+                                h_flex()
                                     .min_w_0()
-                                    .truncate()
-                                    .child(format!("{} ·", issue.assignee)),
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(format!("{} ·", issue.assignee)),
+                                    )
+                                    .child(self.priority_badge(issue.priority.clone(), cx)),
                             )
-                            .child(self.priority_badge(issue.priority.clone(), cx)),
-                    )
-                    .child(div().flex_shrink_0().child(issue.updated.clone())),
+                            .child(div().flex_shrink_0().child(issue.updated.clone())),
+                    ),
             )
             .into_any_element()
     }
@@ -4429,49 +4073,12 @@ impl Dashboard {
         }
     }
 
-    fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+    fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
         let issue = match &self.remote_lookup {
             RemoteLookupState::Loaded { .. } => self.remote_lookup_view(),
             RemoteLookupState::Loading { .. } | RemoteLookupState::Error { .. } => None,
             RemoteLookupState::Idle => self.selected_issue_view(),
         };
-        let lookup_query = match &self.remote_lookup {
-            RemoteLookupState::Loading { query } | RemoteLookupState::Error { query, .. } => {
-                Some(query.as_str())
-            }
-            RemoteLookupState::Idle | RemoteLookupState::Loaded { .. } => None,
-        };
-        let project = issue
-            .as_ref()
-            .map(|issue| issue.project.clone())
-            .unwrap_or_else(|| "Jira".to_owned());
-        let key = issue
-            .as_ref()
-            .map(|issue| issue.key.clone())
-            .or_else(|| lookup_query.map(str::to_owned))
-            .unwrap_or_else(|| "—".to_owned());
-        let summary = issue
-            .as_ref()
-            .map(|issue| issue.summary.clone())
-            .unwrap_or_else(|| {
-                if lookup_query.is_some() {
-                    "Jira lookup".to_owned()
-                } else {
-                    "No issues loaded".to_owned()
-                }
-            });
-        let issue_type = issue
-            .as_ref()
-            .map(|issue| issue.issue_type.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let status = issue
-            .as_ref()
-            .map(|issue| issue.status.clone())
-            .unwrap_or_else(|| "Ready to refresh".to_owned());
-        let priority = issue
-            .as_ref()
-            .map(|issue| issue.priority.clone())
-            .unwrap_or_else(|| "—".to_owned());
         let detail_state = match &self.remote_lookup {
             RemoteLookupState::Loaded { detail, .. } => DetailState::Loaded(detail.clone()),
             RemoteLookupState::Loading { query } => DetailState::RemoteLoading {
@@ -4483,18 +4090,75 @@ impl Dashboard {
             },
             RemoteLookupState::Idle => self.detail_state.clone(),
         };
+        let Some(issue) = issue else {
+            let status_surface = match &detail_state {
+                DetailState::RemoteLoading { query } => v_flex()
+                    .gap_2()
+                    .child(div().text_base().font_semibold().child("Jira lookup"))
+                    .child(
+                        h_flex().gap_2().child(Spinner::new()).child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("Looking up {query}…")),
+                        ),
+                    ),
+                DetailState::RemoteError { message, .. } => v_flex()
+                    .gap_2()
+                    .child(div().text_base().font_semibold().child("Jira lookup failed"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(message.clone()),
+                    ),
+                DetailState::Error { message, .. } => v_flex()
+                    .gap_2()
+                    .child(div().text_base().font_semibold().child("Unable to load issue details"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(message.clone()),
+                    ),
+                DetailState::Loading { .. } => v_flex()
+                    .gap_2()
+                    .child(div().text_base().font_semibold().child("Loading issue details"))
+                    .child(h_flex().gap_2().child(Spinner::new())),
+                DetailState::Empty | DetailState::Loaded(_) => v_flex()
+                    .gap_2()
+                    .child(div().text_base().font_semibold().child("Select an issue"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Choose a Jira issue to view its description, fields, comments, and attachments."),
+                    ),
+            };
+            return v_flex()
+                .id("issue-detail")
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .p(px(layout.detail_padding()))
+                .child(status_surface)
+                .into_any_element();
+        };
+        let project = issue.project.clone();
+        let key = issue.key.clone();
+        let summary = issue.summary.clone();
+        let issue_type = issue.issue_type.clone();
+        let status = issue.status.clone();
+        let priority = issue.priority.clone();
         let description = match &detail_state {
             DetailState::Loaded(detail) => detail.description.clone(),
-            _ => issue.as_ref().map_or_else(
-                || "Select an issue to load its details.".to_owned(),
-                |issue| issue.description.clone(),
-            ),
+            _ => issue.description.clone(),
         };
         let rich_description = match &detail_state {
             DetailState::Loaded(detail) => detail.rich_description.clone(),
-            _ => issue
-                .as_ref()
-                .and_then(|issue| issue.rich_description.clone()),
+            _ => issue.rich_description.clone(),
         };
         let detail_issue_id = match &self.remote_lookup {
             RemoteLookupState::Loaded { issue, .. } => Some(issue.id.clone()),
@@ -4530,41 +4194,16 @@ impl Dashboard {
                 )
             })
             .unwrap_or_else(|| div().text_sm().child(description).into_any_element());
-        let assignee = issue
-            .as_ref()
-            .map(|issue| issue.assignee.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let reporter = issue
-            .as_ref()
-            .map(|issue| issue.reporter.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let status_category = issue
-            .as_ref()
-            .map(|issue| issue.status_category.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let parent = issue
-            .as_ref()
-            .and_then(|issue| issue.parent.clone())
-            .unwrap_or_else(|| "None".to_owned());
-        let created = issue
-            .as_ref()
-            .map(|issue| issue.created.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let updated = issue
-            .as_ref()
-            .map(|issue| issue.updated.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let due_date = issue
-            .as_ref()
-            .map(|issue| issue.due_date.clone())
-            .unwrap_or_else(|| "—".to_owned());
-        let labels = issue
-            .as_ref()
-            .map(|issue| issue.labels.clone())
-            .unwrap_or_default();
+        let assignee = issue.assignee.clone();
+        let reporter = issue.reporter.clone();
+        let status_category = issue.status_category.clone();
+        let parent = issue.parent.clone().unwrap_or_else(|| "None".to_owned());
+        let created = issue.created.clone();
+        let updated = issue.updated.clone();
+        let due_date = issue.due_date.clone();
+        let labels = issue.labels.clone();
         v_flex()
             .id("issue-detail")
-            .h_full()
             .flex_1()
             .min_w_0()
             .overflow_y_scrollbar()
@@ -4607,7 +4246,7 @@ impl Dashboard {
                             .min_w_0()
                             .gap_2()
                             .child(self.pill(issue_type, cx))
-                            .child(self.status_control(issue.as_ref(), status, cx))
+                            .child(self.status_control(Some(&issue), status, cx))
                             .child(self.priority_badge(priority, cx)),
                     )
                     .when(
@@ -4622,7 +4261,7 @@ impl Dashboard {
                         },
                     ),
             )
-            .child(self.render_issue_edit_controls(issue.as_ref(), layout, cx))
+            .child(self.render_issue_edit_controls(Some(&issue), layout, cx))
             .child(
                 v_flex()
                     .gap_2()
@@ -4665,6 +4304,7 @@ impl Dashboard {
                 )
             })
             .child(self.render_detail_state_for(&detail_state, layout, cx))
+            .into_any_element()
     }
 
     fn render_detail_state_for(
@@ -6295,22 +5935,36 @@ impl Dashboard {
         let mobile = layout.is_mobile();
         let issue_id = group.issue_id.clone();
         let clicked_issue_id = issue_id.clone();
+        let keyboard_issue_id = issue_id.clone();
         let expanded = self.expanded_update_groups.contains(&group.issue_id);
         let rows = compact_update_rows(&group.events);
         let visible_row_count = visible_update_row_count(rows.len(), expanded);
         let hidden_row_count = hidden_update_row_count(rows.len(), expanded);
-        let open_area = Button::new(("update-open", index))
-            .ghost()
+        let accessible_label = format!("Open {}: {}", group.issue_key, group.issue_summary);
+        let open_area = div()
+            .id(("update-open", index))
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(accessible_label)
+            .tab_index(0)
+            .flex()
             .flex_1()
             .h_auto()
             .items_start()
             .min_w_0()
             .gap_3()
-            .p_3()
+            .p_2()
+            .cursor_pointer()
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
             }))
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if is_activation_key(event) {
+                    window.prevent_default();
+                    this.open_update_issue(keyboard_issue_id.clone(), mobile, cx);
+                }
+            }))
+            .focus(|style| style.border_1().border_color(cx.theme().primary))
             .child(
                 div()
                     .mt_1()
@@ -6325,10 +5979,15 @@ impl Dashboard {
                     .min_w_0()
                     .flex_1()
                     .gap_1()
+                    .text_base()
+                    .text_color(cx.theme().foreground)
                     .child(
                         h_flex()
                             .min_w_0()
                             .justify_between()
+                            .when(mobile, |this| {
+                                this.flex_col().w_full().items_start().gap_1()
+                            })
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -6350,7 +6009,8 @@ impl Dashboard {
                             )
                             .child(
                                 div()
-                                    .flex_shrink_0()
+                                    .when(!mobile, |this| this.flex_shrink_0())
+                                    .when(mobile, |this| this.w_full())
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(group.latest_occurred_at.clone()),
@@ -6370,6 +6030,7 @@ impl Dashboard {
             .min_w_0()
             .items_start()
             .gap_2()
+            .when(mobile, |this| this.flex_col())
             .rounded(cx.theme().radius)
             .border_1()
             .border_color(cx.theme().border)
@@ -6378,9 +6039,10 @@ impl Dashboard {
             .child(
                 v_flex()
                     .flex_shrink_0()
-                    .items_end()
+                    .when(!mobile, |this| this.items_end())
+                    .when(mobile, |this| this.w_full().flex_wrap().items_start())
                     .gap_1()
-                    .p_2()
+                    .p_1()
                     .when(hidden_row_count > 0, |this| {
                         let issue_id = issue_id.clone();
                         this.child(
@@ -6447,12 +6109,16 @@ impl Dashboard {
             .h(px(48.))
             .flex_shrink_0()
             .px_2()
+            .gap_1()
             .items_center()
+            .overflow_x_scrollbar()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
                 Button::new("mobile-issues")
                     .compact()
+                    .flex_1()
+                    .min_w(px(76.))
                     .when(self.section == Section::Issues, |this| this.primary())
                     .label(format!("Issues · {}", self.issues.len()))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -6464,6 +6130,8 @@ impl Dashboard {
             .child(
                 Button::new("mobile-updates")
                     .compact()
+                    .flex_1()
+                    .min_w(px(76.))
                     .when(self.section == Section::Updates, |this| this.primary())
                     .label(format!("Updates · {}", self.unread_count()))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -6475,9 +6143,23 @@ impl Dashboard {
             .child(
                 Button::new("mobile-team")
                     .compact()
+                    .flex_1()
+                    .min_w(px(76.))
                     .when(self.section == Section::Team, |this| this.primary())
-                    .label(format!("Team · {}", self.team_issues.len()))
+                    .label(format!("Team · {}", team_issue_counts(&self.team_issues).1))
                     .on_click(cx.listener(|this, _, _, cx| {
+                        if this.selected_issue.as_ref().is_some_and(|selected| {
+                            !this.team_issues.iter().any(|issue| &issue.id == selected)
+                        }) {
+                            if matches!(this.issue_edit_state, IssueEditState::Submitting { .. }) {
+                                this.sync_message =
+                                    "Finish the confirmed Jira change before changing views"
+                                        .to_owned();
+                                cx.notify();
+                                return;
+                            }
+                            this.clear_selection_for_team_scope(cx);
+                        }
                         this.section = Section::Team;
                         this.mobile_detail_open = false;
                         cx.notify();
@@ -6486,6 +6168,8 @@ impl Dashboard {
             .child(
                 Button::new("mobile-settings")
                     .compact()
+                    .flex_1()
+                    .min_w(px(76.))
                     .when(self.section == Section::Settings, |this| this.primary())
                     .label("Settings")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -6506,10 +6190,25 @@ impl Render for Dashboard {
         self.ensure_team_input(window, cx);
         self.ensure_team_table(window, cx);
         let layout = layout_for_width(f32::from(window.viewport_size().width));
+        let table_mode = team_table_mode_for_width(f32::from(window.viewport_size().width));
+        if !layout.is_mobile() {
+            self.detail_sidebar_width = px(clamped_team_detail_width(
+                f32::from(self.detail_sidebar_width),
+                f32::from(window.viewport_size().width),
+                layout,
+                table_mode,
+            ));
+        }
         let content = match self.section {
             Section::Issues => self.render_issues(layout, cx).into_any_element(),
             Section::Updates => self.render_updates(layout, cx).into_any_element(),
-            Section::Team => self.render_team(layout, cx).into_any_element(),
+            Section::Team => self
+                .render_team(
+                    layout,
+                    team_table_mode_for_width(f32::from(window.viewport_size().width)),
+                    cx,
+                )
+                .into_any_element(),
             Section::Settings => self.render_settings(layout, cx).into_any_element(),
         };
 
@@ -6550,6 +6249,7 @@ mod tests {
     use jira_application::{
         ErrorKind, IssueFetchRequest, IssuePage, PortFuture, UserSearchRequest,
     };
+    use jira_domain::JiraSiteId;
     use time::macros::datetime;
 
     struct EmptyJira;
@@ -6952,52 +6652,6 @@ mod tests {
     }
 
     #[test]
-    fn inline_attachment_download_requires_one_nonempty_exact_id() {
-        let attachment = |id: &str| crate::presentation::AttachmentViewModel {
-            id: id.to_owned(),
-            filename: "report.csv".to_owned(),
-            mime_type: "text/csv".to_owned(),
-            size_bytes: 12,
-            size: "12 B".to_owned(),
-        };
-        let attachments = vec![attachment("attachment-1"), attachment("attachment-2")];
-        let current_issue = IssueId::new("100").expect("issue");
-        let stale_issue = IssueId::new("200").expect("issue");
-        assert_eq!(
-            inline_attachment_for_download(
-                &current_issue,
-                &current_issue,
-                &attachments,
-                "attachment-1",
-            )
-            .expect("current issue attachment")
-            .id,
-            "attachment-1"
-        );
-        assert!(
-            inline_attachment_for_download(
-                &current_issue,
-                &stale_issue,
-                &attachments,
-                "attachment-1",
-            )
-            .is_none()
-        );
-        assert_eq!(
-            unique_attachment_for_id(&attachments, "attachment-1")
-                .expect("exact attachment")
-                .id,
-            "attachment-1"
-        );
-        assert!(unique_attachment_for_id(&attachments, "").is_none());
-        assert!(unique_attachment_for_id(&attachments, "missing").is_none());
-        let duplicate = vec![attachment("attachment-1"), attachment("attachment-1")];
-        assert!(unique_attachment_for_id(&duplicate, "attachment-1").is_none());
-        let empty_id = vec![attachment("")];
-        assert!(unique_attachment_for_id(&empty_id, "").is_none());
-    }
-
-    #[test]
     fn authenticated_user_is_seeded_for_display_mapping_and_account_filtering() {
         let authenticated_user = sample_users().into_iter().next().expect("sample user");
         let display_name = authenticated_user.display_name.clone();
@@ -7198,6 +6852,79 @@ mod tests {
             mobile_table_bounds.size.height > px(300.),
             "mobile team table body collapsed: {mobile_table_bounds:?}"
         );
+    }
+
+    #[test]
+    fn team_only_selected_issue_still_resolves_detail_identity() {
+        let team_issue = sample_issues().into_iter().next().expect("team issue");
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.domain_issues.clear();
+        dashboard.issues.clear();
+        dashboard.team_issues = vec![team_issue.clone()];
+        dashboard.selected_issue = Some(team_issue.id.clone());
+
+        let view = dashboard
+            .selected_issue_view()
+            .expect("team issue should resolve in detail");
+        assert_eq!(view.id, team_issue.id);
+        assert_eq!(view.key, team_issue.key.to_string());
+    }
+
+    #[test]
+    fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
+        for (width, layout) in [
+            (720., LayoutMode::Compact),
+            (959., LayoutMode::Compact),
+            (960., LayoutMode::Standard),
+            (1_199., LayoutMode::Standard),
+            (1_200., LayoutMode::Wide),
+            (1_880., LayoutMode::Wide),
+        ] {
+            let mode = team_table_mode_for_width(width);
+            let clamped =
+                clamped_team_detail_width(DETAIL_SIDEBAR_DEFAULT_WIDTH, width, layout, mode);
+            let content = width - layout.sidebar_width() - 2. * layout.list_padding();
+            let table_min = team_table_min_width(mode, layout);
+            assert!(clamped >= 0.);
+            assert!(clamped + TEAM_DETAIL_RESIZE_HANDLE_WIDTH + table_min <= content + 0.01);
+            assert!(clamped <= content / 2. + 0.01);
+        }
+    }
+
+    #[test]
+    fn team_table_mode_defers_wide_columns_until_the_table_can_fit() {
+        assert_eq!(team_table_mode_for_width(1_199.), TeamTableMode::Cards);
+        assert_eq!(team_table_mode_for_width(1_200.), TeamTableMode::DenseTable);
+        assert_eq!(team_table_mode_for_width(1_919.), TeamTableMode::DenseTable);
+        assert_eq!(team_table_mode_for_width(1_920.), TeamTableMode::WideTable);
+    }
+
+    #[test]
+    fn team_feedback_distinguishes_refreshing_from_loaded_empty_results() {
+        assert!(team_feedback_is_loading(Some("Refreshing team tracker…")));
+        assert!(team_feedback_is_loading(Some(
+            "Resolving team members and refreshing Jira…"
+        )));
+        assert!(!team_feedback_is_loading(Some(
+            "Team tracker refreshed · fetched 0 · displaying 0 in-progress tickets"
+        )));
+        assert!(!team_feedback_is_loading(None));
+    }
+
+    #[test]
+    fn semantic_ticket_controls_activate_only_on_plain_enter_or_space() {
+        let event = |key| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).expect("keystroke"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        assert!(is_activation_key(&event("enter")));
+        assert!(is_activation_key(&event("space")));
+        assert!(!is_activation_key(&event("ctrl-enter")));
+        assert!(!is_activation_key(&KeyDownEvent {
+            is_held: true,
+            ..event("enter")
+        }));
     }
 
     #[test]
@@ -7516,386 +7243,6 @@ mod tests {
             &local_id
         ));
         assert!(comment_target_is_current(None, Some(&local_id), &local_id));
-    }
-
-    fn test_image(id: &str) -> RichImage {
-        RichImage {
-            attachment_id: id.to_owned(),
-            filename: format!("{id}.png"),
-            mime_type: "image/png".to_owned(),
-            alt_text: None,
-            width: None,
-            height: None,
-        }
-    }
-
-    #[test]
-    fn rich_image_collection_is_recursive_deduplicated_and_capped() {
-        let mut blocks = vec![RichBlock::Panel {
-            kind: jira_domain::PanelKind::Info,
-            content: vec![RichBlock::BlockQuote(vec![RichBlock::Image(test_image(
-                "nested",
-            ))])],
-        }];
-        blocks.extend((0..20).map(|index| RichBlock::Image(test_image(&format!("image-{index}")))));
-        blocks.push(RichBlock::Image(test_image("nested")));
-        let document = RichTextDocument::new(blocks, false);
-        let images = collect_rich_images(&document);
-
-        assert_eq!(images.len(), MAX_RICH_IMAGES);
-        assert_eq!(images[0].attachment_id, "nested");
-        assert_eq!(
-            images
-                .iter()
-                .filter(|image| image.attachment_id == "nested")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn rich_image_collection_appends_fallback_candidates_after_resolved_images() {
-        let document = RichTextDocument::new(vec![RichBlock::Image(test_image("resolved"))], false)
-            .with_fallback_images(vec![
-                test_image("resolved"),
-                test_image("candidate-a"),
-                test_image("candidate-b"),
-            ]);
-
-        let images = collect_rich_images(&document);
-        assert_eq!(
-            images
-                .iter()
-                .map(|image| image.attachment_id.as_str())
-                .collect::<Vec<_>>(),
-            ["resolved", "candidate-a", "candidate-b"]
-        );
-    }
-
-    #[test]
-    fn rich_image_context_preserves_surface_and_source_markers() {
-        let document = RichTextDocument::new(vec![RichBlock::Image(test_image("resolved"))], false)
-            .with_fallback_images(vec![test_image("candidate")]);
-        let images = collect_rich_images_with_context(&document, 3);
-        assert_eq!(images.len(), 2);
-        assert_eq!(images[0].surface_ordinal, 3);
-        assert_eq!(images[0].source, ImageSource::ResolvedAdf);
-        assert_eq!(images[1].surface_ordinal, 3);
-        assert_eq!(images[1].source, ImageSource::FallbackCandidate);
-    }
-
-    #[test]
-    fn fallback_image_candidates_obey_the_global_image_cap() {
-        let candidates = (0..(MAX_RICH_IMAGES + 4))
-            .map(|index| test_image(&format!("candidate-{index}")))
-            .collect();
-        let document = RichTextDocument::new(Vec::new(), false).with_fallback_images(candidates);
-
-        let images = collect_rich_images(&document);
-        assert_eq!(images.len(), MAX_RICH_IMAGES);
-        assert_eq!(images[0].attachment_id, "candidate-0");
-        assert_eq!(
-            images.last().map(|image| image.attachment_id.as_str()),
-            Some("candidate-15")
-        );
-    }
-
-    #[test]
-    fn image_aggregate_limit_accepts_boundary_and_rejects_overflow() {
-        assert!(image_bytes_fit_aggregate(0, MAX_RICH_IMAGE_BYTES));
-        assert!(!image_bytes_fit_aggregate(1, MAX_RICH_IMAGE_BYTES));
-        assert!(!image_bytes_fit_aggregate(MAX_RICH_IMAGE_BYTES, 1));
-    }
-
-    #[test]
-    fn image_response_preflight_distinguishes_rejection_causes() {
-        assert_eq!(
-            image_response_preflight("application/pdf", "image/png", b"", 0),
-            ImagePreflight::UnsupportedCachedMime
-        );
-        assert_eq!(
-            image_response_preflight("image/png", "text/html", b"not image", 0),
-            ImagePreflight::ResponseMimeRejected
-        );
-        assert_eq!(
-            image_response_preflight("image/png", "image/png", b"not image", 0),
-            ImagePreflight::SignatureRejected
-        );
-        assert_eq!(
-            image_response_preflight(
-                "image/png",
-                "image/png",
-                b"\x89PNG\r\n\x1a\n",
-                MAX_RICH_IMAGE_BYTES,
-            ),
-            ImagePreflight::AggregateRejected
-        );
-    }
-
-    #[test]
-    fn image_response_preflight_accepts_authenticated_thumbnail_mime_variants() {
-        assert_eq!(
-            image_response_preflight(
-                "image/png",
-                "application/octet-stream",
-                b"\x89PNG\r\n\x1a\nvalid png",
-                0,
-            ),
-            ImagePreflight::Accepted,
-            "authenticated original-content responses may be octet-stream when bytes are PNG"
-        );
-        assert_eq!(
-            image_response_preflight("image/jpg", "image/jpg", b"\xff\xd8\xff\xe0valid jpeg", 0,),
-            ImagePreflight::Accepted,
-            "Jira's image/jpg response must be accepted when bytes are JPEG"
-        );
-    }
-
-    #[test]
-    fn image_response_preflight_rejects_unsupported_mime_or_bad_signature() {
-        assert_eq!(
-            image_response_preflight(
-                "image/png",
-                "application/pdf",
-                b"\x89PNG\r\n\x1a\nvalid png",
-                0,
-            ),
-            ImagePreflight::ResponseMimeRejected
-        );
-        assert_eq!(
-            image_response_preflight("image/jpg", "image/jpg", b"not a jpeg", 0,),
-            ImagePreflight::SignatureRejected
-        );
-    }
-
-    #[test]
-    fn image_mime_mapping_accepts_only_supported_render_formats() {
-        assert_eq!(image_format_for_mime(" image/png "), Some(ImageFormat::Png));
-        assert_eq!(image_format_for_mime("image/jpg"), Some(ImageFormat::Jpeg));
-        assert_eq!(image_format_for_mime("image/jpeg"), Some(ImageFormat::Jpeg));
-        assert_eq!(image_format_for_mime("image/svg+xml"), None);
-        assert_eq!(image_format_for_mime("application/pdf"), None);
-    }
-
-    #[test]
-    fn fetched_image_format_uses_bytes_after_mime_preflight() {
-        assert_eq!(
-            fetched_image_format("image/jpeg", " image/png ", b"\x89PNG\r\n\x1a\nrest of png",),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "image/svg+xml", b"\x89PNG\r\n\x1a\n"),
-            None,
-            "unsupported authenticated responses must not be decoded"
-        );
-        assert_eq!(
-            fetched_image_format("application/pdf", "image/png", b"\x89PNG\r\n\x1a\n"),
-            None,
-            "non-image ADF metadata must still fail preflight"
-        );
-    }
-
-    #[test]
-    fn image_bytes_are_strictly_signature_detected() {
-        assert_eq!(
-            image_format_from_bytes(b"\x89PNG\r\n\x1a\nfixture"),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            image_format_from_bytes(b"\xff\xd8\xff\xe0fixture"),
-            Some(ImageFormat::Jpeg)
-        );
-        assert_eq!(
-            image_format_from_bytes(b"GIF87afixture"),
-            Some(ImageFormat::Gif)
-        );
-        assert_eq!(
-            image_format_from_bytes(b"GIF89afixture"),
-            Some(ImageFormat::Gif)
-        );
-
-        let mut webp = b"RIFFxxxxWEBP".to_vec();
-        webp.extend_from_slice(b"fixture");
-        assert_eq!(image_format_from_bytes(&webp), Some(ImageFormat::Webp));
-        assert_eq!(image_format_from_bytes(b"not an image"), None);
-    }
-
-    #[test]
-    fn fetched_image_format_accepts_bytes_when_response_mime_differs() {
-        assert_eq!(
-            fetched_image_format(
-                "image/png",
-                "image/jpeg",
-                b"\x89PNG\r\n\x1a\nvalid signature",
-            ),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "image/png", b"not an image"),
-            None
-        );
-    }
-
-    #[test]
-    fn fetched_image_format_allows_octet_stream_only_for_known_images() {
-        assert_eq!(
-            fetched_image_format(
-                "image/png",
-                " application/octet-stream ",
-                b"\x89PNG\r\n\x1a\nvalid signature",
-            ),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "application/octet-stream", b"not an image"),
-            None,
-            "octet-stream responses must have a strict image signature"
-        );
-        assert_eq!(
-            fetched_image_format(
-                "application/octet-stream",
-                "application/octet-stream",
-                b"\x89PNG\r\n\x1a\nvalid signature",
-            ),
-            None,
-            "cached attachment metadata must be an allowlisted image"
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "application/pdf", b"\x89PNG\r\n\x1a\n"),
-            None,
-            "only octet-stream may use the original-content MIME exception"
-        );
-    }
-
-    #[test]
-    fn filename_sanitization_strips_paths_controls_and_bounds_utf8_bytes() {
-        let filename = format!("/private/..\\{}\0", "é".repeat(200));
-        let sanitized = sanitized_attachment_filename(&filename);
-        assert!(!sanitized.contains('/'));
-        assert!(!sanitized.contains('\\'));
-        assert!(!sanitized.chars().any(char::is_control));
-        assert!(sanitized.len() <= 255);
-        assert!(sanitized.is_char_boundary(sanitized.len()));
-    }
-
-    #[test]
-    fn image_results_reject_stale_selection_generation() {
-        let first = IssueId::new("first").expect("issue");
-        let second = IssueId::new("second").expect("issue");
-        assert!(!image_result_is_current(Some(&first), &first, 3, 2));
-        assert!(!image_result_is_current(Some(&second), &first, 2, 2));
-        assert!(image_result_is_current(Some(&first), &first, 2, 2));
-    }
-
-    #[test]
-    fn attachment_download_state_and_labels_reflect_busy_operation() {
-        assert_eq!(attachment_download_button_label(false), "Download");
-        assert_eq!(attachment_download_button_label(true), "Saving…");
-        let state = AttachmentDownloadState::Saving {
-            attachment_id: "att-1".to_owned(),
-        };
-        assert!(!matches!(state, AttachmentDownloadState::Idle));
-    }
-
-    #[test]
-    fn attachment_download_commit_requires_current_generation_and_live_token() {
-        let cancellation = CancellationToken::new();
-        assert!(attachment_download_is_current(4, 4, &cancellation));
-        assert!(!attachment_download_is_current(5, 4, &cancellation));
-        cancellation.cancel();
-        assert!(!attachment_download_is_current(4, 4, &cancellation));
-    }
-
-    #[test]
-    fn attachment_temp_path_is_unique_and_stays_with_destination() {
-        let destination = Path::new("/tmp/downloads/report.pdf");
-        let temporary = attachment_temp_path(destination, "unique-token");
-        assert_eq!(temporary.parent(), destination.parent());
-        assert_ne!(temporary, destination);
-        assert_eq!(
-            temporary.file_name().and_then(|name| name.to_str()),
-            Some(".report.pdf.jira-desk-unique-token.part")
-        );
-    }
-
-    #[test]
-    fn attachment_temp_write_never_overwrites_an_existing_path() {
-        let root = std::env::temp_dir().join(format!(
-            "jira-gpui-temp-write-test-{}-{}",
-            std::process::id(),
-            attachment_temp_token()
-        ));
-        std::fs::create_dir_all(&root).expect("temp root");
-        let path = root.join("attachment.part");
-        std::fs::write(&path, b"existing").expect("existing file");
-
-        assert!(write_attachment_temp(&path, b"replacement", &CancellationToken::new()).is_err());
-        assert_eq!(std::fs::read(&path).expect("existing bytes"), b"existing");
-
-        cleanup_attachment_temp(&path);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn cancelled_attachment_temp_write_leaves_no_file() {
-        let root = std::env::temp_dir().join(format!(
-            "jira-gpui-cancelled-temp-write-test-{}-{}",
-            std::process::id(),
-            attachment_temp_token()
-        ));
-        std::fs::create_dir_all(&root).expect("temp root");
-        let path = root.join("attachment.part");
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-
-        assert_eq!(
-            write_attachment_temp(&path, b"should not be written", &cancellation),
-            Err("Download cancelled".to_owned())
-        );
-        assert!(!path.exists());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn attachment_issue_id_prefers_loaded_remote_issue() {
-        let local = IssueId::new("local").expect("issue");
-        let remote = IssueId::new("remote").expect("issue");
-        assert_eq!(
-            attachment_issue_id(Some(&local), Some(&remote)),
-            Some(remote.clone())
-        );
-        assert_eq!(attachment_issue_id(Some(&local), None), Some(local));
-        assert_eq!(attachment_issue_id(None, None), None);
-    }
-
-    #[test]
-    fn portal_directory_prefers_existing_downloads_then_home_then_current() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "jira-gpui-portal-test-{}-{nonce}",
-            std::process::id()
-        ));
-        let downloads = root.join("Downloads");
-        let home = root.join("home");
-        std::fs::create_dir_all(&downloads).expect("downloads");
-        std::fs::create_dir_all(&home).expect("home");
-        assert_eq!(
-            choose_portal_download_directory(Some(&home), Some(&downloads), Path::new(".")),
-            downloads
-        );
-        assert_eq!(
-            choose_portal_download_directory(Some(&home), None, Path::new(".")),
-            home
-        );
-        assert_eq!(
-            choose_portal_download_directory(None, None, Path::new(".")),
-            PathBuf::from(".")
-        );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

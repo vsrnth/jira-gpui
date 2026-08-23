@@ -3,12 +3,19 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, Styled as _, Window, div, px,
+    Pixels, Render, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Root, Sizable as _, StyledExt as _, Theme,
-    ThemeMode, TitleBar, button::Button, button::ButtonVariants as _, checkbox::Checkbox, h_flex,
-    input::Input, input::InputState, scroll::ScrollableElement as _, v_flex,
+    ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
+    TitleBar,
+    button::Button,
+    button::ButtonVariants as _,
+    checkbox::Checkbox,
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    scroll::ScrollableElement as _,
+    spinner::Spinner,
+    v_flex,
 };
 
 use crate::Dashboard;
@@ -26,11 +33,44 @@ fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) ->
     preferred_width.min(available_width)
 }
 
-fn opposite_theme_mode(mode: ThemeMode) -> ThemeMode {
-    if mode.is_dark() {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppearancePreference {
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearancePreference {
+    fn next(self) -> Self {
+        match self {
+            Self::System => Self::Light,
+            Self::Light => Self::Dark,
+            Self::Dark => Self::System,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    fn next_action(self) -> &'static str {
+        match self {
+            Self::System => "Use light mode",
+            Self::Light => "Use dark mode",
+            Self::Dark => "Follow system appearance",
+        }
+    }
+
+    fn manual_theme_mode(self) -> Option<ThemeMode> {
+        match self {
+            Self::System => None,
+            Self::Light => Some(ThemeMode::Light),
+            Self::Dark => Some(ThemeMode::Dark),
+        }
     }
 }
 
@@ -41,6 +81,19 @@ const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
 const SCOPED_TOKEN_PLACEHOLDER: &str = "Paste your scoped Jira API token";
 const SCOPED_TOKEN_SCOPES: &str =
     "For full functionality, select exactly: read:jira-user, read:jira-work, write:jira-work.";
+
+const ONBOARDING_MAX_WIDTH: f32 = 600.0;
+const ONBOARDING_CARD_PADDING: f32 = 16.0;
+
+fn is_submit_event(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        }
+    )
+}
 
 fn should_check_saved_credentials(startup: &StartupSelection) -> bool {
     matches!(startup, StartupSelection::Preview)
@@ -69,10 +122,18 @@ pub struct AppShell {
     connection_status: Option<String>,
     connecting: bool,
     notification_width: Pixels,
+    input_subscriptions: Vec<Subscription>,
+    api_token_subscription: Option<Subscription>,
+    appearance_preference: AppearancePreference,
+    appearance_subscription: Option<Subscription>,
 }
 
 impl AppShell {
     pub fn new(startup: StartupSelection, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // gpui-component initializes its theme to light. Resolve the system appearance before
+        // constructing inputs or capturing theme-dependent state so dark launches do not flash
+        // or remain light until the first platform appearance event.
+        Theme::sync_system_appearance(Some(window), cx);
         let diagnostics = DiagnosticsSink::from_environment();
         diagnostics.session_started();
         let base_url =
@@ -103,7 +164,19 @@ impl AppShell {
             connection_status,
             connecting: preview,
             notification_width: cx.theme().notification.width,
+            input_subscriptions: Vec::new(),
+            api_token_subscription: None,
+            appearance_preference: AppearancePreference::System,
+            appearance_subscription: None,
         };
+        shell.install_submit_shortcuts(window, cx);
+        shell.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |this, window, cx| {
+                if this.appearance_preference == AppearancePreference::System {
+                    Theme::sync_system_appearance(Some(window), cx);
+                    cx.notify();
+                }
+            }));
         if preview {
             shell.connection_status = Some(CHECKING_KEYRING_STATUS.to_owned());
             shell.start_saved_login_check(cx);
@@ -124,6 +197,26 @@ impl AppShell {
             InputState::new(window, cx)
                 .masked(true)
                 .placeholder(SCOPED_TOKEN_PLACEHOLDER)
+        })
+    }
+
+    fn install_submit_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input_subscriptions
+            .push(Self::submit_subscription(&self.base_url, window, cx));
+        self.input_subscriptions
+            .push(Self::submit_subscription(&self.email, window, cx));
+        self.api_token_subscription = Some(Self::submit_subscription(&self.api_token, window, cx));
+    }
+
+    fn submit_subscription(
+        input: &Entity<InputState>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
+            if is_submit_event(event) {
+                this.connect(window, cx);
+            }
         })
     }
 
@@ -198,8 +291,11 @@ impl AppShell {
         // Replace the control before dispatching the async request. This drops
         // the masked input's edit history even when connection fails; a retry
         // must enter a fresh token.
-        let old_api_token = std::mem::replace(&mut self.api_token, Self::new_api_token(window, cx));
+        let fresh_api_token = Self::new_api_token(window, cx);
+        drop(self.api_token_subscription.take());
+        let old_api_token = std::mem::replace(&mut self.api_token, fresh_api_token);
         drop(old_api_token);
+        self.api_token_subscription = Some(Self::submit_subscription(&self.api_token, window, cx));
         self.connection_error = None;
         self.connection_status = Some(VERIFYING_SCOPED_TOKEN_STATUS.to_owned());
         self.connecting = true;
@@ -265,9 +361,11 @@ impl AppShell {
         let layout = layout_for_width(f32::from(window.viewport_size().width));
         let mobile = layout.is_mobile();
         let error = self.connection_error.as_ref().map(|message| {
-            div()
+            h_flex()
                 .min_w_0()
                 .w_full()
+                .items_start()
+                .gap_2()
                 .rounded(cx.theme().radius)
                 .border_1()
                 .border_color(cx.theme().danger)
@@ -276,12 +374,15 @@ impl AppShell {
                 .py_2()
                 .text_sm()
                 .text_color(cx.theme().danger)
-                .child(message.clone())
+                .child(div().flex_shrink_0().font_semibold().child("!"))
+                .child(div().min_w_0().child(message.clone()))
         });
         let warning = self.connection_warning.as_ref().map(|message| {
-            div()
+            h_flex()
                 .min_w_0()
                 .w_full()
+                .items_start()
+                .gap_2()
                 .rounded(cx.theme().radius)
                 .border_1()
                 .border_color(cx.theme().warning)
@@ -290,12 +391,14 @@ impl AppShell {
                 .py_2()
                 .text_sm()
                 .text_color(cx.theme().warning)
-                .child(message.clone())
+                .child(div().flex_shrink_0().font_semibold().child("i"))
+                .child(div().min_w_0().child(message.clone()))
         });
 
         v_flex()
             .id("connection-form-scroll")
             .size_full()
+            .bg(cx.theme().background)
             .when(!mobile, |this| this.items_center())
             .when(mobile, |this| this.items_start())
             .overflow_y_scrollbar()
@@ -303,13 +406,18 @@ impl AppShell {
                 v_flex()
                     .min_w_0()
                     .w_full()
-                    .max_w(px(560.))
-                    .gap_5()
+                    .max_w(px(ONBOARDING_MAX_WIDTH))
+                    .gap_3()
                     .p(px(layout.onboarding_padding()))
                     .child(
                         v_flex()
                             .min_w_0()
-                            .gap_2()
+                            .gap_3()
+                            .p(px(ONBOARDING_CARD_PADDING))
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary.opacity(0.22))
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -334,9 +442,9 @@ impl AppShell {
                                             .child(
                                                 div()
                                                     .min_w_0()
-                                                    .text_sm()
+                                                    .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
-                                            .child("Configure a Jira workspace"),
+                                                    .child("Secure workspace connection"),
                                             ),
                                     ),
                             )
@@ -345,23 +453,36 @@ impl AppShell {
                                     .min_w_0()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira Desk discovers the authenticated user's assigned or watched issues from Jira; no project name is required. Jira changes are limited to explicitly confirmed comments, assignee changes, and status transitions."),
+                                    .child("Loads issues assigned to or watched by your Jira account. No project name is required."),
                             ),
                     )
                     .when_some(error, |this, error| this.child(error))
                     .when_some(warning, |this, warning| this.child(warning))
                     .child(
                         v_flex()
-                            .gap_4()
+                            .min_w_0()
+                            .gap_3()
+                            .p(px(ONBOARDING_CARD_PADDING))
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().primary).child("WORKSPACE CREDENTIALS"))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Required")),
+                            )
                             .child(Self::labeled_input(
                                 "Jira URL",
-                                "Your Atlassian Cloud site URL, including https://. Cloud ID is discovered automatically.",
+                                "Atlassian Cloud URL, including https://. Cloud ID is discovered automatically.",
                                 &self.base_url,
                                 cx.theme().muted_foreground,
                             ))
                             .child(Self::labeled_input(
                                 "Atlassian email",
-                                "The email address associated with your Jira account",
+                                "Email associated with your Jira account.",
                                 &self.email,
                                 cx.theme().muted_foreground,
                             ))
@@ -384,42 +505,55 @@ impl AppShell {
                                         div()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("Create an API token with scopes in your Atlassian account security settings."),
+                                            .child("Create this token in Atlassian account security settings."),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_color(cx.theme().foreground)
                                             .child(SCOPED_TOKEN_SCOPES),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("Jira project permissions still apply. After successful authentication, the token is stored only in the system keyring when enabled—never in SQLite, preferences, or logs."),
+                                            .child("Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs."),
                                     ),
                             )
                     )
                     .child(
-                        Checkbox::new("remember-jira-login")
-                            .checked(self.remember_credentials)
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.remember_credentials = *checked;
-                                cx.notify();
-                            }))
-                            .label("Remember securely in system keyring")
-                            .text_sm(),
-                    )
-                    .child(
                         v_flex()
-                            .gap_2()
+                            .min_w_0()
+                            .gap_3()
+                            .p(px(ONBOARDING_CARD_PADDING))
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary.opacity(0.12))
+                            .child(
+                                Checkbox::new("remember-jira-login")
+                                    .checked(self.remember_credentials)
+                                    .on_click(cx.listener(|this, checked, _, cx| {
+                                        this.remember_credentials = *checked;
+                                        cx.notify();
+                                    }))
+                                    .label("Remember securely in system keyring")
+                                    .text_sm(),
+                            )
                             .when_some(self.connection_status.as_ref(), |this, status| {
-                                this.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(status.clone()),
-                                )
+                                this.child(h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .px_3()
+                                    .py_2()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .when(self.connecting, |this| this.child(Spinner::new().xsmall()))
+                                    .child(div().min_w_0().child(status.clone())))
                             })
                             .child(
                                 Button::new("connect-jira")
@@ -439,7 +573,7 @@ impl AppShell {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Jira read access is required; write permissions are used only after explicit confirmation. Jira permissions still apply to the selected token scopes."),
+                                    .child("Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions."),
                             ),
                     ),
             )
@@ -461,7 +595,9 @@ impl Render for AppShell {
                 .flex_1()
                 .when_some(self.connection_warning.as_ref(), |this, warning| {
                     this.child(
-                        div()
+                        h_flex()
+                            .items_start()
+                            .gap_2()
                             .mx_4()
                             .mb_3()
                             .rounded(cx.theme().radius)
@@ -472,7 +608,8 @@ impl Render for AppShell {
                             .py_2()
                             .text_sm()
                             .text_color(cx.theme().warning)
-                            .child(warning.clone()),
+                            .child(div().flex_shrink_0().font_semibold().child("i"))
+                            .child(div().min_w_0().child(warning.clone())),
                     )
                 })
                 .child(div().min_w_0().min_h_0().flex_1().child(dashboard.clone()))
@@ -486,28 +623,29 @@ impl Render for AppShell {
                 .into_any_element()
         };
 
-        let current_mode = cx.theme().mode;
-        let dark_mode = current_mode.is_dark();
-        let (theme_icon, theme_tooltip, theme_accessibility_id) = if dark_mode {
-            (
-                IconName::Sun,
-                "Switch to light mode",
-                "switch-to-light-mode",
-            )
-        } else {
-            (IconName::Moon, "Switch to dark mode", "switch-to-dark-mode")
-        };
-        let destination_mode = opposite_theme_mode(current_mode);
+        let appearance_preference = self.appearance_preference;
+        let next_appearance = appearance_preference.next();
         let theme_toggle = Button::new("theme-toggle")
             .compact()
             .ghost()
             .xsmall()
-            .icon(theme_icon)
-            .tooltip(theme_tooltip)
-            .accessibility_id(theme_accessibility_id)
-            .on_click(move |_, window, cx| {
-                Theme::change(destination_mode, Some(window), cx);
-            });
+            .label(appearance_preference.label())
+            .tooltip(appearance_preference.next_action())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.appearance_preference = next_appearance;
+                if let Some(mode) = next_appearance.manual_theme_mode() {
+                    Theme::change(mode, Some(window), cx);
+                } else {
+                    Theme::sync_system_appearance(Some(window), cx);
+                }
+                cx.notify();
+            }));
+
+        let shell_context = if self.dashboard.is_some() {
+            "Workspace operations"
+        } else {
+            "Secure connection"
+        };
 
         v_flex()
             .size_full()
@@ -518,8 +656,41 @@ impl Render for AppShell {
                         .w_full()
                         .items_center()
                         .justify_between()
+                        .gap_3()
                         .pr_2()
-                        .child(div().text_sm().font_semibold().child("Jira Desk"))
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .size_6()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(cx.theme().radius)
+                                        .bg(cx.theme().primary)
+                                        .text_color(cx.theme().primary_foreground)
+                                        .text_xs()
+                                        .font_bold()
+                                        .child("JD"),
+                                )
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .gap_0p5()
+                                        .child(div().text_sm().font_semibold().child("Jira Desk"))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(shell_context),
+                                        ),
+                                ),
+                        )
                         .child(theme_toggle),
                 ),
             )
@@ -532,14 +703,16 @@ impl Render for AppShell {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECKING_KEYRING_STATUS, REMEMBER_CREDENTIALS_DEFAULT, SCOPED_TOKEN_LABEL,
-        SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS,
-        notification_width_for_viewport, opposite_theme_mode, save_credentials_warning,
-        saved_login_warning, should_check_saved_credentials,
+        AppearancePreference, CHECKING_KEYRING_STATUS, REMEMBER_CREDENTIALS_DEFAULT,
+        SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES,
+        VERIFYING_SCOPED_TOKEN_STATUS, is_submit_event, notification_width_for_viewport,
+        save_credentials_warning, saved_login_warning, should_check_saved_credentials,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
+    use gpui::WindowAppearance;
     use gpui_component::ThemeMode;
+    use gpui_component::input::InputEvent;
 
     #[test]
     fn saved_credentials_are_checked_only_for_preview() {
@@ -576,9 +749,73 @@ mod tests {
     }
 
     #[test]
-    fn opposite_theme_mode_switches_between_light_and_dark() {
-        assert_eq!(opposite_theme_mode(ThemeMode::Light), ThemeMode::Dark);
-        assert_eq!(opposite_theme_mode(ThemeMode::Dark), ThemeMode::Light);
+    fn appearance_preference_cycles_back_to_system() {
+        assert_eq!(
+            AppearancePreference::System.next(),
+            AppearancePreference::Light
+        );
+        assert_eq!(
+            AppearancePreference::Light.next(),
+            AppearancePreference::Dark
+        );
+        assert_eq!(
+            AppearancePreference::Dark.next(),
+            AppearancePreference::System
+        );
+    }
+
+    #[test]
+    fn system_is_the_only_preference_without_a_manual_theme_mode() {
+        assert_eq!(AppearancePreference::System.manual_theme_mode(), None);
+        assert_eq!(
+            AppearancePreference::Light.manual_theme_mode(),
+            Some(ThemeMode::Light)
+        );
+        assert_eq!(
+            AppearancePreference::Dark.manual_theme_mode(),
+            Some(ThemeMode::Dark)
+        );
+    }
+
+    #[test]
+    fn appearance_preference_tooltips_describe_the_next_transition() {
+        assert_eq!(AppearancePreference::System.next_action(), "Use light mode");
+        assert_eq!(AppearancePreference::Light.next_action(), "Use dark mode");
+        assert_eq!(
+            AppearancePreference::Dark.next_action(),
+            "Follow system appearance"
+        );
+    }
+
+    #[test]
+    fn system_appearance_maps_vibrant_modes_to_their_base_theme() {
+        assert_eq!(ThemeMode::from(WindowAppearance::Light), ThemeMode::Light);
+        assert_eq!(
+            ThemeMode::from(WindowAppearance::VibrantLight),
+            ThemeMode::Light
+        );
+        assert_eq!(ThemeMode::from(WindowAppearance::Dark), ThemeMode::Dark);
+        assert_eq!(
+            ThemeMode::from(WindowAppearance::VibrantDark),
+            ThemeMode::Dark
+        );
+    }
+
+    #[test]
+    fn only_plain_enter_submits_the_connection_form() {
+        assert!(is_submit_event(&InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        }));
+        assert!(!is_submit_event(&InputEvent::PressEnter {
+            secondary: true,
+            shift: false,
+        }));
+        assert!(!is_submit_event(&InputEvent::PressEnter {
+            secondary: false,
+            shift: true,
+        }));
+        assert!(!is_submit_event(&InputEvent::Change));
     }
 
     #[test]
