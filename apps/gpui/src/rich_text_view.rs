@@ -42,6 +42,10 @@ const RENDER_SURFACE_STRIDE: usize = MAX_RENDER_NODES + 1;
 const RENDER_OMITTED_LABEL: &str = "Some content was omitted by Jira Desk.";
 const FALLBACK_IMAGE_GALLERY_LABEL: &str = "Image attachments";
 const FALLBACK_IMAGE_GALLERY_NOTE: &str = "Candidate attachments · exact placement unavailable.";
+const UNSUPPORTED_CONTENT_SENTINEL: &str = "[unsupported Jira content]";
+const UNSUPPORTED_CONTENT_LABEL: &str = "Some Jira content isn't supported yet.";
+const UNAVAILABLE_IMAGE_SENTINEL: &str = "[Jira image unavailable]";
+const UNAVAILABLE_IMAGE_LABEL: &str = "Image unavailable.";
 
 /// The application-owned state for a Jira attachment image.
 ///
@@ -389,7 +393,7 @@ fn render_block(
             .text_sm()
             .italic()
             .text_color(context.palette.muted)
-            .child(budget.text(label))
+            .child(budget.text(presentation_placeholder_label(label)))
             .into_any_element(),
     }
 }
@@ -746,7 +750,7 @@ fn inline_text_flow(
             }
             RichInline::Placeholder { label } => append_inline_text(
                 &mut flow,
-                &budget.text(label),
+                &budget.text(presentation_placeholder_label(label)),
                 HighlightStyle {
                     color: Some(palette.muted),
                     font_style: Some(FontStyle::Italic),
@@ -885,7 +889,7 @@ fn render_inline(
         RichInline::Placeholder { label } => div()
             .italic()
             .text_color(context.palette.muted)
-            .child(budget.text(label))
+            .child(budget.text(presentation_placeholder_label(label)))
             .into_any_element(),
         RichInline::HardBreak => div().into_any_element(),
     }
@@ -1010,6 +1014,16 @@ fn omitted_element(palette: RichTextPalette) -> AnyElement {
         .into_any_element()
 }
 
+/// Translate transport-layer sentinels into calm presentation copy without changing
+/// generic placeholder labels or the domain model's durable representation.
+fn presentation_placeholder_label(label: &str) -> &str {
+    match label {
+        UNSUPPORTED_CONTENT_SENTINEL => UNSUPPORTED_CONTENT_LABEL,
+        UNAVAILABLE_IMAGE_SENTINEL => UNAVAILABLE_IMAGE_LABEL,
+        _ => label,
+    }
+}
+
 #[derive(Default)]
 struct RenderBudget {
     nodes: usize,
@@ -1131,9 +1145,11 @@ mod tests {
     use super::{
         HeadingSize, MAX_RENDER_CHILDREN, MAX_RENDER_DEPTH, MAX_RENDER_NODES,
         MAX_RENDER_TEXT_BYTES, RenderBudget, RichAttachmentCardAction, RichImageRenderState,
-        RichImageRenderStates, RichTextPalette, bounded_attachment_filename,
-        bounded_inline_content, heading_size, image_render_state, inline_line_count,
-        inline_text_flow, normalize_attachment_filename, render_element_ordinal, render_rich_text,
+        RichImageRenderStates, RichTextPalette, UNAVAILABLE_IMAGE_LABEL,
+        UNAVAILABLE_IMAGE_SENTINEL, UNSUPPORTED_CONTENT_LABEL, UNSUPPORTED_CONTENT_SENTINEL,
+        bounded_attachment_filename, bounded_inline_content, heading_size, image_render_state,
+        inline_line_count, inline_text_flow, normalize_attachment_filename,
+        presentation_placeholder_label, render_element_ordinal, render_rich_text,
         render_rich_text_with_actions, rich_image_name,
     };
     use crate::diagnostics::{
@@ -1150,6 +1166,27 @@ mod tests {
         assert_eq!(heading_size(5), HeadingSize::Sm);
         assert_eq!(heading_size(6), HeadingSize::Sm);
         assert_eq!(heading_size(0), HeadingSize::Sm);
+    }
+
+    #[test]
+    fn presentation_placeholder_labels_translate_domain_sentinels() {
+        assert_eq!(
+            presentation_placeholder_label(UNSUPPORTED_CONTENT_SENTINEL),
+            UNSUPPORTED_CONTENT_LABEL
+        );
+        assert_eq!(
+            presentation_placeholder_label(UNAVAILABLE_IMAGE_SENTINEL),
+            UNAVAILABLE_IMAGE_LABEL
+        );
+        assert!(!presentation_placeholder_label(UNSUPPORTED_CONTENT_SENTINEL).contains('['));
+        assert!(!presentation_placeholder_label(UNAVAILABLE_IMAGE_SENTINEL).contains('['));
+    }
+
+    #[test]
+    fn presentation_placeholder_labels_preserve_generic_labels() {
+        for label in ["Status", "", "[custom placeholder]"] {
+            assert_eq!(presentation_placeholder_label(label), label);
+        }
     }
 
     #[test]
