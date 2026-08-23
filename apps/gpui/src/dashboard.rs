@@ -3028,13 +3028,13 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .min_w_0()
+            .debug_selector(|| "update-key".to_owned())
+            .flex_shrink_0()
             .gap_1()
             .child(Icon::new(issue_type_icon(issue_type)).text_color(cx.theme().link))
             .child(
                 div()
-                    .min_w_0()
-                    .truncate()
+                    .flex_shrink_0()
                     .text_xs()
                     .font_semibold()
                     .text_color(cx.theme().link)
@@ -6016,6 +6016,7 @@ impl Dashboard {
                             .child(
                                 h_flex()
                                     .min_w_0()
+                                    .when(!mobile, |this| this.flex_1())
                                     .when(layout.is_mobile(), |this| this.flex_col())
                                     .gap_2()
                                     .child(self.issue_key_with_icon(
@@ -6026,6 +6027,8 @@ impl Dashboard {
                                     .child(
                                         div()
                                             .min_w_0()
+                                            .when(!mobile, |this| this.flex_1())
+                                            .when(mobile, |this| this.w_full())
                                             .line_clamp(2)
                                             .text_sm()
                                             .font_semibold()
@@ -6051,6 +6054,8 @@ impl Dashboard {
             )
             .into_any_element();
         h_flex()
+            .id(("update-card", index))
+            .debug_selector(move || format!("update-card-{index}"))
             .w_full()
             .min_w_0()
             .items_start()
@@ -6063,6 +6068,8 @@ impl Dashboard {
             .child(open_area)
             .child(
                 v_flex()
+                    .id(("update-actions", index))
+                    .debug_selector(move || format!("update-actions-{index}"))
                     .flex_shrink_0()
                     .when(!mobile, |this| this.items_end())
                     .when(mobile, |this| this.w_full().flex_wrap().items_start())
@@ -6907,6 +6914,71 @@ mod tests {
             status_bounds.origin.x + status_bounds.size.width
                 <= detail_bounds.origin.x + detail_bounds.size.width + px(1.),
             "empty detail status escapes right edge: detail={detail_bounds:?}, status={status_bounds:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let issue_id = IssueId::new("100").expect("issue");
+        let event_id = jira_domain::EventId::new("event-1").expect("event");
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.section = Section::Updates;
+        dashboard.update_groups = vec![UpdateGroupViewModel {
+            issue_id: issue_id.clone(),
+            issue_key: "PLATFORM-12345".to_owned(),
+            issue_summary: "A deliberately long summary that must give up width to the stable issue key while retaining the timestamp and controls".to_owned(),
+            latest_occurred_at: "2026-08-23 14:35 IST".to_owned(),
+            unread_count: 1,
+            unread: true,
+            events: vec![UpdateViewModel {
+                event_id,
+                issue_id,
+                issue_key: "PLATFORM-12345".to_owned(),
+                issue_summary: "A deliberately long summary".to_owned(),
+                change: "Status changed to In Progress".to_owned(),
+                occurred_at: "2026-08-23 14:35 IST".to_owned(),
+                unread: true,
+            }],
+        }];
+
+        let window = cx.open_window(gpui::size(px(1095.), px(700.)), |_, _| dashboard);
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let card_bounds = visual
+            .debug_bounds("update-card-0")
+            .expect("update card should be laid out");
+        let key_bounds = visual
+            .debug_bounds("update-key")
+            .expect("issue key should be laid out");
+        let actions_bounds = visual
+            .debug_bounds("update-actions-0")
+            .expect("update actions should be laid out");
+        assert!(
+            key_bounds.size.width >= px(90.),
+            "full issue key was allowed to shrink: key={key_bounds:?}"
+        );
+        assert!(
+            key_bounds.origin.x >= card_bounds.origin.x,
+            "issue key escapes card left edge: card={card_bounds:?}, key={key_bounds:?}"
+        );
+        assert!(
+            key_bounds.origin.x + key_bounds.size.width
+                <= card_bounds.origin.x + card_bounds.size.width + px(1.),
+            "issue key escapes card right edge: card={card_bounds:?}, key={key_bounds:?}"
+        );
+        assert!(
+            actions_bounds.size.width > px(1.) && actions_bounds.size.height > px(1.),
+            "update actions collapsed: {actions_bounds:?}"
+        );
+        assert!(
+            actions_bounds.origin.x + actions_bounds.size.width
+                <= card_bounds.origin.x + card_bounds.size.width + px(1.),
+            "update actions escape card right edge: card={card_bounds:?}, actions={actions_bounds:?}"
         );
     }
 
