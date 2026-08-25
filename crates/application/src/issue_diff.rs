@@ -9,8 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jira_domain::{
-    ChangeValue, Issue, IssueKey, IssueLifecycle, JiraSiteId, Timestamp, UpdateEvent, UpdateKind,
-    UserSetId,
+    ChangeValue, Issue, IssueLifecycle, JiraSiteId, Timestamp, UpdateEvent, UpdateKind, UserSetId,
 };
 
 use crate::{
@@ -428,7 +427,7 @@ fn new_event(
     update_boundary: Timestamp,
     field: &str,
 ) -> UpdateEvent {
-    let id = event_id(
+    let id = crate::event_identity::snapshot_event_id(
         site_id,
         &issue.id,
         transition,
@@ -445,149 +444,6 @@ fn new_event(
         occurred_at,
         vec![user_set_id.clone()],
     )
-}
-
-/// Event IDs use the versioned `v1-<32 hex digits>` format. Each canonical
-/// component is length-prefixed before hashing, avoiding delimiter ambiguity.
-/// Two independent FNV-1a 64-bit lanes provide a fixed-width 128-bit digest
-/// without depending on a randomized or implementation-defined hasher.
-///
-/// `update_boundary` is the Jira issue's `updated_at` for field/add events and
-/// the cached issue's `updated_at` for remove events. It is deliberately not
-/// `detected_at`, which is a local observation time and changes across retries.
-fn event_id(
-    site_id: &JiraSiteId,
-    issue_id: &jira_domain::IssueId,
-    transition: &str,
-    update_boundary: Timestamp,
-    field: &str,
-    kind: &UpdateKind,
-) -> jira_domain::EventId {
-    let boundary = update_boundary.unix_timestamp_nanos().to_string();
-    let mut parts = vec![
-        site_id.as_str(),
-        issue_id.as_str(),
-        transition,
-        &boundary,
-        field,
-    ];
-    let kind_parts = canonical_kind(kind);
-    parts.extend(kind_parts.iter().map(String::as_str));
-    let left = digest(&parts, 0xcbf29ce484222325);
-    let right = digest(&parts, 0x84222325cbf29ce4);
-    // Components are bounded by domain constructors, so this cannot exceed
-    // EventId's 255-character limit.
-    jira_domain::EventId::new(format!("v1-{left:016x}{right:016x}")).expect("event ID length")
-}
-
-/// Returns the complete, version-independent payload of an update kind as
-/// canonical fields. This deliberately avoids `Debug`/serde formatting so an
-/// event ID remains stable if presentation derives or serializer details
-/// change. The comment arm is exhaustive for future callers even though the
-/// snapshot differ currently emits no comment events.
-fn canonical_kind(kind: &UpdateKind) -> Vec<String> {
-    let mut fields = Vec::new();
-    match kind {
-        UpdateKind::IssueAddedToView => fields.push("issue_added_to_view".into()),
-        UpdateKind::IssueRemovedFromView => fields.push("issue_removed_from_view".into()),
-        UpdateKind::IssueUpdated => fields.push("issue_updated".into()),
-        UpdateKind::FieldChanged { field, old, new } => {
-            fields.push("field_changed".into());
-            fields.push(field.clone());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::StatusChanged { old, new } => {
-            fields.push("status_changed".into());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::AssigneeChanged { old, new } => {
-            fields.push("assignee_changed".into());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::PriorityChanged { old, new } => {
-            fields.push("priority_changed".into());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::DueDateChanged { old, new } => {
-            fields.push("due_date_changed".into());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::SummaryChanged { old, new } => {
-            fields.push("summary_changed".into());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::ParentChanged { old, new } => {
-            fields.push("parent_changed".into());
-            canonical_change_value(&mut fields, old);
-            canonical_change_value(&mut fields, new);
-        }
-        UpdateKind::CommentAdded {
-            comment_id,
-            author,
-            excerpt,
-        } => {
-            fields.push("comment_added".into());
-            fields.push(comment_id.clone());
-            fields.push("author".into());
-            match author {
-                Some(account) => {
-                    fields.push("some".into());
-                    fields.push(account.as_str().into());
-                }
-                None => fields.push("none".into()),
-            }
-            fields.push(excerpt.clone());
-        }
-    }
-    fields
-}
-
-fn canonical_change_value(fields: &mut Vec<String>, value: &ChangeValue) {
-    match value {
-        ChangeValue::Text(value) => {
-            fields.push("text".into());
-            fields.push(value.clone());
-        }
-        ChangeValue::Account(value) => {
-            fields.push("account".into());
-            fields.push(value.as_str().into());
-        }
-        ChangeValue::Date(value) => {
-            fields.push("date".into());
-            fields.push(value.as_deref().unwrap_or("none").into());
-        }
-        ChangeValue::Parent(value) => {
-            fields.push("parent".into());
-            fields.push(
-                value
-                    .as_ref()
-                    .map(IssueKey::as_str)
-                    .unwrap_or("none")
-                    .into(),
-            );
-        }
-        ChangeValue::Empty => fields.push("empty".into()),
-    }
-}
-
-fn digest(parts: &[&str], mut hash: u64) -> u64 {
-    for part in parts {
-        for byte in (part.len() as u64)
-            .to_be_bytes()
-            .into_iter()
-            .chain(part.bytes())
-        {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    hash
 }
 
 #[cfg(test)]
@@ -1038,21 +894,6 @@ mod tests {
                 .expect("parent metadata should diff")
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn canonical_comment_author_distinguishes_none_from_account_named_none() {
-        let without_author = canonical_kind(&UpdateKind::CommentAdded {
-            comment_id: "comment-1".into(),
-            author: None,
-            excerpt: "excerpt".into(),
-        });
-        let with_account_named_none = canonical_kind(&UpdateKind::CommentAdded {
-            comment_id: "comment-1".into(),
-            author: Some(AccountId::new("none").expect("valid test account")),
-            excerpt: "excerpt".into(),
-        });
-        assert_ne!(without_author, with_account_named_none);
     }
 
     #[test]

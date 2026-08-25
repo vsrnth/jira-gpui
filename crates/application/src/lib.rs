@@ -9,6 +9,7 @@ mod cancellation;
 mod comment;
 mod comment_pagination;
 mod error;
+mod event_identity;
 mod feed;
 mod issue_detail;
 mod issue_diff;

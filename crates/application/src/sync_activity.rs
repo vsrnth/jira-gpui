@@ -171,7 +171,12 @@ async fn mention_events(
                 excerpt: comment_excerpt(&comment),
             };
             events.push(UpdateEvent::new(
-                comment_event_id(site_id, new_issue, &comment, activity_at),
+                crate::event_identity::comment_event_id(
+                    site_id,
+                    &new_issue.id,
+                    comment.id.as_str(),
+                    activity_at,
+                ),
                 site_id.clone(),
                 new_issue.id.clone(),
                 new_issue.key.clone(),
@@ -252,39 +257,6 @@ fn comment_excerpt(comment: &IssueComment) -> String {
     }
     excerpt.truncate(excerpt.floor_char_boundary(MAX_COMMENT_EXCERPT_BYTES));
     excerpt.trim().to_owned()
-}
-
-pub(crate) fn comment_event_id(
-    site_id: &JiraSiteId,
-    issue: &Issue,
-    comment: &IssueComment,
-    activity_at: Timestamp,
-) -> jira_domain::EventId {
-    let activity = activity_at.unix_timestamp_nanos().to_string();
-    let parts = [
-        site_id.as_str(),
-        issue.id.as_str(),
-        comment.id.as_str(),
-        &activity,
-    ];
-    let left = stable_digest(&parts, 0xcbf29ce484222325);
-    let right = stable_digest(&parts, 0x84222325cbf29ce4);
-    jira_domain::EventId::new(format!("v1-comment-{left:016x}{right:016x}"))
-        .expect("event ID length")
-}
-
-fn stable_digest(parts: &[&str], mut hash: u64) -> u64 {
-    for part in parts {
-        for byte in (part.len() as u64)
-            .to_le_bytes()
-            .into_iter()
-            .chain(part.as_bytes().iter().copied())
-        {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    hash
 }
 
 #[cfg(test)]

@@ -694,6 +694,81 @@ where
     );
 }
 
+pub(crate) fn update_event_identity_formats_are_opaque_and_deduplicated<S>(store: S)
+where
+    S: IssueCachePort + UpdateFeedPort + UserSetPort,
+{
+    const SNAPSHOT_ID: &str = "v1-f7c343a8639b995e61431f1ac84575d9";
+    const COMMENT_ID: &str = "v1-comment-66bae53b96dfa491611148a3ee34ba0e";
+
+    let site_id = site("site-a");
+    let first_set = set(&store, site_id.clone(), "first");
+    let second_set = set(&store, site_id.clone(), "second");
+    let cached_issue = issue(
+        site_id.clone(),
+        "10001",
+        "APP-10001",
+        "identity",
+        datetime!(2026-08-16 11:00 UTC),
+    );
+    let snapshot_event = event(
+        SNAPSHOT_ID,
+        &cached_issue,
+        UpdateKind::SummaryChanged {
+            old: ChangeValue::Text("old summary".into()),
+            new: ChangeValue::Text("new summary".into()),
+        },
+        datetime!(2026-08-16 11:00 UTC),
+        vec![first_set.clone()],
+    );
+    let comment_event = event(
+        COMMENT_ID,
+        &cached_issue,
+        UpdateKind::CommentAdded {
+            comment_id: "comment-1".into(),
+            author: None,
+            excerpt: "mentioned".into(),
+        },
+        datetime!(2026-08-16 11:00 UTC),
+        vec![first_set.clone()],
+    );
+    commit(
+        &store,
+        site_id.clone(),
+        first_set.clone(),
+        vec![cached_issue],
+        vec![snapshot_event.clone(), comment_event.clone()],
+        true,
+        SyncState::new(site_id.clone(), first_set),
+    );
+
+    let mut replay_snapshot = snapshot_event;
+    replay_snapshot.matching_user_set_ids = vec![second_set.clone()];
+    let mut replay_comment = comment_event;
+    replay_comment.matching_user_set_ids = vec![second_set.clone()];
+    let replay = block_on(store.commit_sync(SyncCommit {
+        site_id: site_id.clone(),
+        user_set_id: second_set.clone(),
+        issues: vec![],
+        update_events: vec![replay_snapshot, replay_comment],
+        replace_membership: false,
+        state: SyncState::new(site_id.clone(), second_set),
+    }))
+    .expect("opaque IDs deduplicate");
+    assert!(replay.inserted_events.is_empty());
+
+    let mut ids = block_on(UpdateFeedPort::list(
+        &store,
+        &feed_query(site_id, false, vec![], 10),
+    ))
+    .expect("round-trip feed")
+    .into_iter()
+    .map(|event| event.id.as_str().to_owned())
+    .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(ids, vec![COMMENT_ID, SNAPSHOT_ID]);
+}
+
 pub(crate) fn update_event_conflict_rejects_without_partial_mutation<S>(store: S)
 where
     S: IssueCachePort + UpdateFeedPort + UserSetPort,
@@ -1349,6 +1424,16 @@ mod tests {
         sqlite_update_event_idempotency_and_association_union,
         SqliteStore::in_memory().expect("open store"),
         update_event_idempotency_and_association_union
+    );
+    contract_test!(
+        in_memory_update_event_identity_formats_are_opaque_and_deduplicated,
+        InMemoryStore::new(),
+        update_event_identity_formats_are_opaque_and_deduplicated
+    );
+    contract_test!(
+        sqlite_update_event_identity_formats_are_opaque_and_deduplicated,
+        SqliteStore::in_memory().expect("open store"),
+        update_event_identity_formats_are_opaque_and_deduplicated
     );
     contract_test!(
         in_memory_update_event_conflict_rejects_without_partial_mutation,

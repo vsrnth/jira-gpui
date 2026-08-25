@@ -1286,10 +1286,18 @@ mod tests {
             Vec::new(),
         )
         .expect("comment");
-        let first =
-            crate::sync_activity::comment_event_id(&site_id, &issue, &comment, comment.created_at);
-        let retry =
-            crate::sync_activity::comment_event_id(&site_id, &issue, &comment, comment.created_at);
+        let first = crate::event_identity::comment_event_id(
+            &site_id,
+            &issue.id,
+            comment.id.as_str(),
+            comment.created_at,
+        );
+        let retry = crate::event_identity::comment_event_id(
+            &site_id,
+            &issue.id,
+            comment.id.as_str(),
+            comment.created_at,
+        );
         assert_eq!(first, retry);
     }
 
