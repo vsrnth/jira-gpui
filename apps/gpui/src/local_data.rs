@@ -1,4 +1,4 @@
-//! Secure Linux-local persistence bootstrap for the Phase 1 shell.
+//! Secure platform-local persistence bootstrap for the Phase 1 shell.
 
 use std::{
     env, fs,
@@ -16,6 +16,8 @@ use jira_domain::AccountId;
 use jira_storage::SqliteStore;
 
 const APP_DIRECTORY: &str = "jira-desk";
+const MACOS_APP_DIRECTORY: &str = "dev.jiradesk.JiraDesk";
+const MACOS_STATE_DIRECTORY: &str = "dev.jiradesk.JiraDesk";
 const DATABASE_FILENAME: &str = "jira-desk.sqlite3";
 const PREFERENCES_FILENAME: &str = "preferences.json";
 const MAX_PREFERENCES_BYTES: usize = 64 * 1024;
@@ -289,9 +291,23 @@ fn restricted_create_options() -> fs::OpenOptions {
     options
 }
 
+/// Resolve the private data directory used for preferences and the database.
+///
+/// An explicit absolute XDG data root always takes precedence. When it is not
+/// set, Linux keeps its XDG-compatible location while macOS uses the app's
+/// native Application Support directory. The platform choice is passed to the
+/// pure helper so path policy can be tested without running on that platform.
 pub(crate) fn resolve_app_directory(
     xdg_data_home: Option<&Path>,
     home: Option<&Path>,
+) -> Result<PathBuf, LocalDataError> {
+    resolve_app_directory_for_platform(xdg_data_home, home, cfg!(target_os = "macos"))
+}
+
+fn resolve_app_directory_for_platform(
+    xdg_data_home: Option<&Path>,
+    home: Option<&Path>,
+    native_macos: bool,
 ) -> Result<PathBuf, LocalDataError> {
     if let Some(xdg_data_home) = xdg_data_home.filter(|path| !path.as_os_str().is_empty()) {
         if !xdg_data_home.is_absolute() {
@@ -306,7 +322,14 @@ pub(crate) fn resolve_app_directory(
     if !home.is_absolute() {
         return Err(LocalDataError);
     }
-    Ok(home.join(".local").join("share").join(APP_DIRECTORY))
+    if native_macos {
+        Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join(MACOS_APP_DIRECTORY))
+    } else {
+        Ok(home.join(".local").join("share").join(APP_DIRECTORY))
+    }
 }
 
 fn prepare_app_directory(
@@ -319,13 +342,21 @@ fn prepare_app_directory(
 
 /// Resolve the private state directory used for bounded diagnostics.
 ///
-/// The XDG state root takes precedence when it is present. An empty variable
-/// is treated as unset, matching the data-directory resolver above. Both roots
-/// must be absolute so a malformed process environment cannot redirect local
-/// state into the process working directory.
+/// An explicit absolute XDG state root always takes precedence. When it is
+/// not set, Linux keeps its XDG-compatible location while macOS uses the app's
+/// native Logs directory. Both roots must be absolute so a malformed process
+/// environment cannot redirect local state into the process working directory.
 pub(crate) fn resolve_state_directory(
     xdg_state_home: Option<&Path>,
     home: Option<&Path>,
+) -> Result<PathBuf, LocalDataError> {
+    resolve_state_directory_for_platform(xdg_state_home, home, cfg!(target_os = "macos"))
+}
+
+fn resolve_state_directory_for_platform(
+    xdg_state_home: Option<&Path>,
+    home: Option<&Path>,
+    native_macos: bool,
 ) -> Result<PathBuf, LocalDataError> {
     if let Some(xdg_state_home) = xdg_state_home.filter(|path| !path.as_os_str().is_empty()) {
         if !xdg_state_home.is_absolute() {
@@ -340,7 +371,14 @@ pub(crate) fn resolve_state_directory(
     if !home.is_absolute() {
         return Err(LocalDataError);
     }
-    Ok(home.join(".local").join("state").join(APP_DIRECTORY))
+    if native_macos {
+        Ok(home
+            .join("Library")
+            .join("Logs")
+            .join(MACOS_STATE_DIRECTORY))
+    } else {
+        Ok(home.join(".local").join("state").join(APP_DIRECTORY))
+    }
 }
 
 pub(crate) fn prepare_state_directory(
@@ -409,15 +447,45 @@ mod tests {
 
     #[test]
     fn xdg_data_home_takes_precedence_over_home() {
-        let app = resolve_app_directory(Some(Path::new("/xdg/data")), Some(Path::new("/home")))
-            .expect("path");
+        let app = resolve_app_directory_for_platform(
+            Some(Path::new("/xdg/data")),
+            Some(Path::new("/home")),
+            false,
+        )
+        .expect("path");
         assert_eq!(app, PathBuf::from("/xdg/data/jira-desk"));
     }
 
     #[test]
     fn home_fallback_uses_local_share() {
-        let app = resolve_app_directory(None, Some(Path::new("/home/developer"))).expect("path");
+        let app =
+            resolve_app_directory_for_platform(None, Some(Path::new("/home/developer")), false)
+                .expect("path");
         assert_eq!(app, PathBuf::from("/home/developer/.local/share/jira-desk"));
+    }
+
+    #[test]
+    fn macos_home_fallback_uses_application_support() {
+        let app =
+            resolve_app_directory_for_platform(None, Some(Path::new("/Users/developer")), true)
+                .expect("path");
+        assert_eq!(
+            app,
+            PathBuf::from("/Users/developer/Library/Application Support/dev.jiradesk.JiraDesk")
+        );
+    }
+
+    #[test]
+    fn explicit_data_root_overrides_both_platform_defaults() {
+        for native_macos in [false, true] {
+            let app = resolve_app_directory_for_platform(
+                Some(Path::new("/private/xdg/data")),
+                Some(Path::new("/home/developer")),
+                native_macos,
+            )
+            .expect("path");
+            assert_eq!(app, PathBuf::from("/private/xdg/data/jira-desk"));
+        }
     }
 
     #[test]
@@ -465,20 +533,48 @@ mod tests {
 
     #[test]
     fn xdg_state_home_takes_precedence_over_home() {
-        let state =
-            resolve_state_directory(Some(Path::new("/xdg/state")), Some(Path::new("/home")))
-                .expect("path");
+        let state = resolve_state_directory_for_platform(
+            Some(Path::new("/xdg/state")),
+            Some(Path::new("/home")),
+            false,
+        )
+        .expect("path");
         assert_eq!(state, PathBuf::from("/xdg/state/jira-desk"));
     }
 
     #[test]
     fn home_fallback_uses_local_state() {
         let state =
-            resolve_state_directory(None, Some(Path::new("/home/developer"))).expect("path");
+            resolve_state_directory_for_platform(None, Some(Path::new("/home/developer")), false)
+                .expect("path");
         assert_eq!(
             state,
             PathBuf::from("/home/developer/.local/state/jira-desk")
         );
+    }
+
+    #[test]
+    fn macos_home_fallback_uses_logs() {
+        let state =
+            resolve_state_directory_for_platform(None, Some(Path::new("/Users/developer")), true)
+                .expect("path");
+        assert_eq!(
+            state,
+            PathBuf::from("/Users/developer/Library/Logs/dev.jiradesk.JiraDesk")
+        );
+    }
+
+    #[test]
+    fn explicit_state_root_overrides_both_platform_defaults() {
+        for native_macos in [false, true] {
+            let state = resolve_state_directory_for_platform(
+                Some(Path::new("/private/xdg/state")),
+                Some(Path::new("/home/developer")),
+                native_macos,
+            )
+            .expect("path");
+            assert_eq!(state, PathBuf::from("/private/xdg/state/jira-desk"));
+        }
     }
 
     #[test]

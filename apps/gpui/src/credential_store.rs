@@ -210,7 +210,12 @@ fn serialize_credentials(
     Ok(secret)
 }
 
-fn deserialize_credentials(secret: SecretBytes) -> Result<SavedCredentials, CredentialStoreError> {
+fn deserialize_credentials(
+    secret: SecretBytes,
+) -> Result<Option<SavedCredentials>, CredentialStoreError> {
+    if secret.as_slice().is_empty() {
+        return Ok(None);
+    }
     if secret.as_slice().len() > MAX_SECRET_BYTES {
         return Err(CredentialStoreError::Oversized);
     }
@@ -219,7 +224,7 @@ fn deserialize_credentials(secret: SecretBytes) -> Result<SavedCredentials, Cred
     if payload.schema_version != SUPPORTED_SCHEMA_VERSION {
         return Err(CredentialStoreError::UnsupportedVersion);
     }
-    payload.into_credentials()
+    payload.into_credentials().map(Some)
 }
 
 #[derive(Clone, Copy)]
@@ -277,9 +282,7 @@ fn load_from_keyring() -> BackendResult<Option<SavedCredentials>> {
         Err(keyring::Error::NoEntry) => return Ok(None),
         Err(_) => return Err(BackendError::Unavailable),
     };
-    deserialize_credentials(secret)
-        .map(Some)
-        .map_err(BackendError::Rejected)
+    deserialize_credentials(secret).map_err(BackendError::Rejected)
 }
 
 fn delete_from_keyring() -> BackendResult<DeleteOutcome> {
@@ -350,8 +353,18 @@ mod tests {
     fn json_round_trip_preserves_consumed_values() {
         let original = credentials();
         let secret = serialize_credentials(&original).expect("serialize");
-        let restored = deserialize_credentials(secret).expect("deserialize");
+        let restored = deserialize_credentials(secret)
+            .expect("deserialize")
+            .expect("saved credentials");
         assert_eq!(restored.into_parts(), credentials().into_parts());
+    }
+
+    #[test]
+    fn empty_secret_is_treated_as_no_saved_credential() {
+        assert_eq!(
+            deserialize_credentials(SecretBytes::new(Vec::new())),
+            Ok(None)
+        );
     }
 
     #[test]
