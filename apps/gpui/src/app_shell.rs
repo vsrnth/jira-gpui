@@ -3,11 +3,12 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, Styled as _, Subscription, Window, div, px,
+    Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    relative,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
-    TitleBar,
+    ActiveTheme as _, Disableable as _, IconName, Root, Sizable as _, StyledExt as _, Theme,
+    ThemeMode, TitleBar,
     button::Button,
     button::ButtonVariants as _,
     checkbox::Checkbox,
@@ -51,9 +52,9 @@ impl AppearancePreference {
 
     fn label(self) -> &'static str {
         match self {
-            Self::System => "System",
-            Self::Light => "Light",
-            Self::Dark => "Dark",
+            Self::System => "Theme: System",
+            Self::Light => "Theme: Light",
+            Self::Dark => "Theme: Dark",
         }
     }
 
@@ -75,6 +76,7 @@ impl AppearancePreference {
 }
 
 const REMEMBER_CREDENTIALS_DEFAULT: bool = true;
+const REMEMBER_CREDENTIALS_LABEL: &str = "Remember securely in system keyring";
 const CHECKING_KEYRING_STATUS: &str = "Checking system keyring…";
 const VERIFYING_SCOPED_TOKEN_STATUS: &str = "Resolving Jira site and verifying scoped token…";
 const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
@@ -537,8 +539,15 @@ impl AppShell {
                                         this.remember_credentials = *checked;
                                         cx.notify();
                                     }))
-                                    .label("Remember securely in system keyring")
-                                    .text_sm(),
+                                    .aria_label(REMEMBER_CREDENTIALS_LABEL)
+                                    .text_sm()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .w_full()
+                                            .line_height(relative(1.2))
+                                            .child(REMEMBER_CREDENTIALS_LABEL),
+                                    ),
                             )
                             .when_some(self.connection_status.as_ref(), |this, status| {
                                 this.child(h_flex()
@@ -626,9 +635,11 @@ impl Render for AppShell {
         let appearance_preference = self.appearance_preference;
         let next_appearance = appearance_preference.next();
         let theme_toggle = Button::new("theme-toggle")
+            .secondary()
+            .outline()
             .compact()
-            .ghost()
             .xsmall()
+            .icon(IconName::Palette)
             .label(appearance_preference.label())
             .tooltip(appearance_preference.next_action())
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -692,9 +703,10 @@ impl Render for AppShell {
 mod tests {
     use super::{
         AppearancePreference, CHECKING_KEYRING_STATUS, REMEMBER_CREDENTIALS_DEFAULT,
-        SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES,
-        VERIFYING_SCOPED_TOKEN_STATUS, is_submit_event, notification_width_for_viewport,
-        save_credentials_warning, saved_login_warning, should_check_saved_credentials,
+        REMEMBER_CREDENTIALS_LABEL, SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER,
+        SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS, is_submit_event,
+        notification_width_for_viewport, save_credentials_warning, saved_login_warning,
+        should_check_saved_credentials,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
@@ -716,6 +728,14 @@ mod tests {
     }
 
     #[test]
+    fn remembered_login_copy_is_stable_and_is_the_accessibility_label() {
+        assert_eq!(
+            REMEMBER_CREDENTIALS_LABEL,
+            "Remember securely in system keyring"
+        );
+    }
+
+    #[test]
     fn onboarding_uses_scoped_token_copy_and_statuses() {
         assert_eq!(SCOPED_TOKEN_LABEL, "Scoped API token");
         assert_eq!(SCOPED_TOKEN_PLACEHOLDER, "Paste your scoped Jira API token");
@@ -734,6 +754,13 @@ mod tests {
         assert!(save_warning.contains("session remains connected"));
         assert!(!load_warning.contains("token"));
         assert!(!save_warning.contains("token"));
+    }
+
+    #[test]
+    fn appearance_preference_labels_identify_the_current_theme() {
+        assert_eq!(AppearancePreference::System.label(), "Theme: System");
+        assert_eq!(AppearancePreference::Light.label(), "Theme: Light");
+        assert_eq!(AppearancePreference::Dark.label(), "Theme: Dark");
     }
 
     #[test]
