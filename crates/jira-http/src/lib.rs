@@ -5,11 +5,7 @@
 //! future Tauri shell can poll the application ports without having to install or drive a Tokio
 //! reactor of their own. Credentials are held only in memory and are never persisted here.
 
-use std::{
-    fmt,
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+use std::{fmt, sync::Arc, time::Duration};
 
 use jira_adapter::{
     EnhancedSearchPage, IssueMapper, JiraBulkChangelogResponse, JiraCommentPage, JiraIssue,
@@ -17,21 +13,32 @@ use jira_adapter::{
 };
 use jira_application::{
     AddCommentRequest, ApplicationError, AssignIssueRequest, AssignableUserSearchRequest,
-    AttachmentBodyClass, AttachmentContent, AttachmentDownloadRequest, AttachmentImage,
-    AttachmentImageRequest, AttachmentMimeClass, AttachmentReadAttempt, AttachmentReadDiagnostic,
-    AttachmentTransportClass, CancellationToken, DEFAULT_ATTACHMENT_IMAGE_HEIGHT,
-    DEFAULT_ATTACHMENT_IMAGE_WIDTH, DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES,
-    DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind, IssueChangelog, IssueChangelogRequest,
-    IssueCommentsPage, IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest,
-    IssueLocator, IssuePage, IssueTransition, IssueTransitionsRequest, JiraCommentWritePort,
-    JiraIssueEditPort, JiraReadPort, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture,
-    RecentIssueCommentsRequest, TransitionIssueRequest, UserSearchRequest,
+    AttachmentContent, AttachmentDownloadRequest, AttachmentImage, AttachmentImageRequest,
+    CancellationToken, DEFAULT_ATTACHMENT_IMAGE_HEIGHT, DEFAULT_ATTACHMENT_IMAGE_WIDTH,
+    DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind,
+    IssueChangelog, IssueChangelogRequest, IssueCommentsPage, IssueCommentsPageRequest,
+    IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, IssueTransition,
+    IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort,
+    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture, RecentIssueCommentsRequest,
+    TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, Status, User};
-use reqwest::{Client, Response, StatusCode, header};
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::{runtime::Builder, sync::oneshot};
+use reqwest::{Client, header};
+use serde::Serialize;
 use url::Url;
+
+mod attachment_response;
+mod read_response;
+mod runtime_bridge;
+mod write_response;
+
+use attachment_response::AttachmentReadOptions;
+use read_response::{read_json, transport_error};
+use runtime_bridge::RuntimeBridge;
+use write_response::{
+    comment_transport_error, read_created_comment, read_write_response, submit_write,
+    write_transport_error,
+};
 
 const DEFAULT_USER_AGENT: &str = "jira-gpui/0.1 (Jira Cloud client)";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,20 +47,6 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TENANT_INFO_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
 const MAX_CHANGELOG_PAGES: usize = 8;
-
-struct AttachmentReadOptions {
-    attachment_id: String,
-    cancellation: CancellationToken,
-    max_bytes: usize,
-    width: usize,
-    height: usize,
-    thumbnail: bool,
-}
-
-enum AttachmentMimeResolution {
-    Declared(String),
-    InferFromBody,
-}
 
 #[derive(Debug, Serialize)]
 struct JiraCommentCreateRequest {
@@ -452,16 +445,7 @@ impl JiraHttpClient {
         T: Send + 'static,
         F: std::future::Future<Output = Result<T, ApplicationError>> + Send + 'static,
     {
-        if let Err(error) = cancellation.check() {
-            return Box::pin(std::future::ready(Err(error)));
-        }
-        let runtime = Arc::clone(&self.runtime);
-        Box::pin(async move {
-            runtime
-                .dispatch(operation)
-                .await
-                .map_err(write_dispatch_error)?
-        })
+        submit_write(Arc::clone(&self.runtime), cancellation, operation)
     }
 
     async fn search_users_request(
@@ -857,93 +841,13 @@ impl JiraHttpClient {
             })
     }
 
-    fn attachment_request_builder(
-        client: &Client,
-        url: Url,
-        credentials: &ApiTokenCredentials,
-    ) -> reqwest::RequestBuilder {
-        client
-            .get(url)
-            .basic_auth(&credentials.email, Some(&credentials.token))
-            .header(header::ACCEPT, "*/*")
-    }
-
     async fn attachment_image_request(
         client: Client,
         url: Url,
         credentials: ApiTokenCredentials,
         options: AttachmentReadOptions,
     ) -> Result<AttachmentContent, ApplicationError> {
-        if options.max_bytes == 0 {
-            return Err(ApplicationError::invalid_input(
-                "attachment response limit must be positive",
-            ));
-        }
-        let url = attachment_url_with_query(url, options.width, options.height, options.thumbnail);
-
-        options.cancellation.check()?;
-        let response = Self::attachment_request_builder(&client, url, &credentials)
-            .send()
-            .await
-            .map_err(|error| attachment_transport_error(error, attachment_attempt(&options)))?;
-        let attempt = attachment_attempt(&options);
-        let status = response.status();
-        if !status.is_success() {
-            return Err(attachment_status_error(status, response.headers(), attempt));
-        }
-        let mime_type = if options.thumbnail {
-            attachment_thumbnail_mime_type(response.headers(), attempt)?
-        } else {
-            AttachmentMimeResolution::Declared(attachment_mime_type(
-                response.headers(),
-                attempt,
-                false,
-            )?)
-        };
-        if response
-            .content_length()
-            .is_some_and(|length| length > options.max_bytes as u64)
-        {
-            return Err(attachment_body_error(
-                attempt,
-                AttachmentBodyClass::TooLarge,
-            ));
-        }
-
-        let mut response = response;
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| {
-            ApplicationError::new(ErrorKind::Offline, "could not read Jira attachment")
-                .with_attachment_diagnostic(AttachmentReadDiagnostic::body(
-                    attempt,
-                    AttachmentBodyClass::ReadFailed,
-                ))
-        })? {
-            options.cancellation.check()?;
-            if body.len().saturating_add(chunk.len()) > options.max_bytes {
-                return Err(attachment_body_error(
-                    attempt,
-                    AttachmentBodyClass::TooLarge,
-                ));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        options.cancellation.check()?;
-        if body.is_empty() {
-            return Err(attachment_body_error(attempt, AttachmentBodyClass::Empty));
-        }
-        let body = finish_attachment_body(body, options.max_bytes, &options.cancellation)?;
-        let mime_type = match mime_type {
-            AttachmentMimeResolution::Declared(mime_type) => mime_type,
-            AttachmentMimeResolution::InferFromBody => image_mime_from_signature(&body)
-                .map(str::to_owned)
-                .ok_or_else(|| attachment_signature_error(attempt))?,
-        };
-        Ok(AttachmentContent {
-            attachment_id: options.attachment_id,
-            mime_type,
-            bytes: body,
-        })
+        attachment_response::read_attachment(client, url, credentials, options).await
     }
 
     fn create_comment_request_builder(
@@ -1675,316 +1579,6 @@ fn invalid_transition_response() -> ApplicationError {
     ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid transition data")
 }
 
-async fn read_write_response(response: Response) -> Result<(), ApplicationError> {
-    let status = response.status();
-    if status == StatusCode::NO_CONTENT {
-        Ok(())
-    } else {
-        Err(write_status_error(status, response.headers()))
-    }
-}
-
-fn transport_error(error: reqwest::Error) -> ApplicationError {
-    if error.is_timeout() || error.is_connect() {
-        ApplicationError::new(ErrorKind::Offline, "could not connect to Jira")
-    } else {
-        ApplicationError::new(ErrorKind::Upstream, "Jira request failed")
-    }
-}
-
-fn attachment_attempt(options: &AttachmentReadOptions) -> AttachmentReadAttempt {
-    if options.thumbnail {
-        AttachmentReadAttempt::Thumbnail
-    } else {
-        AttachmentReadAttempt::ExplicitDownload
-    }
-}
-
-fn attachment_transport_error(
-    error: reqwest::Error,
-    attempt: AttachmentReadAttempt,
-) -> ApplicationError {
-    let transport_class = if error.is_timeout() {
-        AttachmentTransportClass::TimedOut
-    } else if error.is_connect() {
-        AttachmentTransportClass::ConnectFailed
-    } else {
-        AttachmentTransportClass::RequestFailed
-    };
-    transport_error(error).with_attachment_diagnostic(AttachmentReadDiagnostic::transport(
-        attempt,
-        transport_class,
-    ))
-}
-
-fn attachment_status_error(
-    status: StatusCode,
-    headers: &header::HeaderMap,
-    attempt: AttachmentReadAttempt,
-) -> ApplicationError {
-    status_error(status, headers)
-        .with_attachment_diagnostic(AttachmentReadDiagnostic::status(attempt, status.as_u16()))
-}
-
-fn attachment_body_error(
-    attempt: AttachmentReadAttempt,
-    body_class: AttachmentBodyClass,
-) -> ApplicationError {
-    ApplicationError::new(
-        ErrorKind::Upstream,
-        match body_class {
-            AttachmentBodyClass::Empty => "Jira returned an empty attachment",
-            AttachmentBodyClass::TooLarge => "Jira attachment exceeded the size limit",
-            AttachmentBodyClass::ReadFailed => "could not read Jira attachment",
-        },
-    )
-    .with_attachment_diagnostic(AttachmentReadDiagnostic::body(attempt, body_class))
-}
-
-fn attachment_mime_type(
-    headers: &header::HeaderMap,
-    attempt: AttachmentReadAttempt,
-    thumbnail: bool,
-) -> Result<String, ApplicationError> {
-    let mime_type = parsed_attachment_mime_type(headers, attempt)?;
-    if thumbnail && !is_allowed_image_mime(&mime_type) {
-        return Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira attachment response was not an image",
-        )
-        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
-            attempt,
-            AttachmentMimeClass::Other,
-        )));
-    }
-    Ok(mime_type)
-}
-
-fn attachment_thumbnail_mime_type(
-    headers: &header::HeaderMap,
-    attempt: AttachmentReadAttempt,
-) -> Result<AttachmentMimeResolution, ApplicationError> {
-    let mime_type = parsed_attachment_mime_type(headers, attempt)?;
-    if is_allowed_image_mime(&mime_type) {
-        Ok(AttachmentMimeResolution::Declared(mime_type))
-    } else {
-        Ok(AttachmentMimeResolution::InferFromBody)
-    }
-}
-
-fn parsed_attachment_mime_type(
-    headers: &header::HeaderMap,
-    attempt: AttachmentReadAttempt,
-) -> Result<String, ApplicationError> {
-    let Some(value) = headers.get(header::CONTENT_TYPE) else {
-        return Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira attachment response had an invalid media type",
-        )
-        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
-            attempt,
-            AttachmentMimeClass::Missing,
-        )));
-    };
-    let raw_value = value.to_str().map_err(|_| {
-        ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira attachment response had an invalid media type",
-        )
-        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
-            attempt,
-            AttachmentMimeClass::Malformed,
-        ))
-    })?;
-    let mime_type = media_type(raw_value).ok_or_else(|| {
-        ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira attachment response had an invalid media type",
-        )
-        .with_attachment_diagnostic(AttachmentReadDiagnostic::content_type(
-            attempt,
-            AttachmentMimeClass::Malformed,
-        ))
-    })?;
-    Ok(mime_type)
-}
-
-fn attachment_signature_error(attempt: AttachmentReadAttempt) -> ApplicationError {
-    ApplicationError::new(
-        ErrorKind::NotFound,
-        "Jira attachment response bytes did not match an image format",
-    )
-    .with_attachment_diagnostic(AttachmentReadDiagnostic::validation(attempt))
-}
-
-fn image_mime_from_signature(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Some("image/png");
-    }
-    if bytes.starts_with(b"\xff\xd8\xff") {
-        return Some("image/jpeg");
-    }
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("image/gif");
-    }
-    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    None
-}
-
-fn media_type(value: &str) -> Option<String> {
-    let media_type = value.split(';').next()?.trim().to_ascii_lowercase();
-    let (kind, subtype) = media_type.split_once('/')?;
-    if kind.is_empty()
-        || subtype.is_empty()
-        || subtype.contains('/')
-        || !kind.bytes().all(is_media_type_token)
-        || !subtype.bytes().all(is_media_type_token)
-    {
-        return None;
-    }
-    Some(media_type)
-}
-
-fn is_media_type_token(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
-}
-
-fn attachment_url_with_query(mut url: Url, width: usize, height: usize, thumbnail: bool) -> Url {
-    if thumbnail {
-        url.query_pairs_mut()
-            .append_pair("redirect", "false")
-            .append_pair("width", &width.to_string())
-            .append_pair("height", &height.to_string())
-            .append_pair("fallbackToDefault", "false");
-    } else {
-        url.query_pairs_mut().append_pair("redirect", "false");
-    }
-    url
-}
-
-fn is_allowed_image_mime(value: &str) -> bool {
-    matches!(
-        value,
-        "application/octet-stream"
-            | "image/gif"
-            | "image/jpg"
-            | "image/jpeg"
-            | "image/png"
-            | "image/webp"
-    )
-}
-
-fn finish_attachment_body(
-    body: Vec<u8>,
-    max_bytes: usize,
-    cancellation: &CancellationToken,
-) -> Result<Vec<u8>, ApplicationError> {
-    cancellation.check()?;
-    if body.is_empty() {
-        return Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira returned an empty attachment",
-        ));
-    }
-    if body.len() > max_bytes {
-        return Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira attachment exceeded the size limit",
-        ));
-    }
-    Ok(body)
-}
-
-fn comment_transport_error(error: reqwest::Error) -> ApplicationError {
-    write_transport_error(error)
-}
-
-fn write_dispatch_error(_error: ApplicationError) -> ApplicationError {
-    write_unknown_outcome()
-}
-
-fn comment_status_error(status: StatusCode, headers: &header::HeaderMap) -> ApplicationError {
-    write_status_error(status, headers)
-}
-
-fn write_transport_error(error: reqwest::Error) -> ApplicationError {
-    if error.is_connect() && !error.is_timeout() {
-        ApplicationError::new(ErrorKind::Offline, "could not connect to Jira")
-    } else {
-        write_unknown_outcome()
-    }
-}
-
-fn write_unknown_outcome() -> ApplicationError {
-    ApplicationError::new(ErrorKind::UnknownOutcome, "Jira write outcome is unknown")
-}
-
-fn write_status_error(status: StatusCode, headers: &header::HeaderMap) -> ApplicationError {
-    match status {
-        StatusCode::BAD_REQUEST
-        | StatusCode::PAYLOAD_TOO_LARGE
-        | StatusCode::UNPROCESSABLE_ENTITY => {
-            ApplicationError::invalid_input("Jira rejected the write request")
-        }
-        StatusCode::UNAUTHORIZED => {
-            ApplicationError::new(ErrorKind::Authentication, "Jira authentication failed")
-        }
-        StatusCode::FORBIDDEN => {
-            ApplicationError::new(ErrorKind::Authorization, "Jira authorization was denied")
-        }
-        StatusCode::NOT_FOUND => {
-            ApplicationError::new(ErrorKind::NotFound, "Jira issue was not found")
-        }
-        StatusCode::CONFLICT => ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira rejected the write due to a conflict",
-        ),
-        StatusCode::TOO_MANY_REQUESTS => {
-            ApplicationError::rate_limited("Jira rate limit exceeded", retry_after(headers))
-        }
-        _ => write_unknown_outcome(),
-    }
-}
-
-async fn read_created_comment(
-    response: Response,
-    max_bytes: usize,
-) -> Result<IssueComment, ApplicationError> {
-    let status = response.status();
-    if status != StatusCode::CREATED {
-        return Err(comment_status_error(status, response.headers()));
-    }
-    let mut response = response;
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(write_unknown_outcome());
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| write_unknown_outcome())?
-    {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(write_unknown_outcome());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    map_created_comment_body(&body)
-}
-
-fn map_created_comment_body(body: &[u8]) -> Result<IssueComment, ApplicationError> {
-    let comment: jira_adapter::JiraComment =
-        serde_json::from_slice(body).map_err(|_| write_unknown_outcome())?;
-    IssueMapper
-        .map_comment(comment)
-        .map_err(|_| write_unknown_outcome())
-}
-
 fn recent_issue_comments_url(
     mut url: Url,
     requested_limit: usize,
@@ -2002,129 +1596,20 @@ fn recent_issue_comments_url(
     Ok(url)
 }
 
-async fn read_json<T: DeserializeOwned>(
-    response: Response,
-    max_bytes: usize,
-) -> Result<T, ApplicationError> {
-    let status = response.status();
-    if !status.is_success() {
-        return Err(status_error(status, response.headers()));
-    }
-    let mut response = response;
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira response exceeded the size limit",
-        ));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| ApplicationError::new(ErrorKind::Offline, "could not read Jira response"))?
-    {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(ApplicationError::new(
-                ErrorKind::Upstream,
-                "Jira response exceeded the size limit",
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&body)
-        .map_err(|_| ApplicationError::new(ErrorKind::Upstream, "Jira returned malformed JSON"))
-}
-
-fn status_error(status: StatusCode, headers: &header::HeaderMap) -> ApplicationError {
-    match status {
-        StatusCode::UNAUTHORIZED => {
-            ApplicationError::new(ErrorKind::Authentication, "Jira authentication failed")
-        }
-        StatusCode::FORBIDDEN => {
-            ApplicationError::new(ErrorKind::Authorization, "Jira authorization was denied")
-        }
-        StatusCode::NOT_FOUND => {
-            ApplicationError::new(ErrorKind::NotFound, "Jira resource was not found")
-        }
-        StatusCode::TOO_MANY_REQUESTS => {
-            ApplicationError::rate_limited("Jira rate limit exceeded", retry_after(headers))
-        }
-        _ => ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira returned an unsuccessful response",
-        ),
-    }
-}
-
-fn retry_after(headers: &header::HeaderMap) -> Option<Duration> {
-    headers
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-}
-
-type RuntimeJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
-
-struct RuntimeBridge {
-    sender: mpsc::Sender<RuntimeJob>,
-}
-
-impl RuntimeBridge {
-    fn new() -> Result<Self, ()> {
-        let (sender, receiver) = mpsc::channel::<RuntimeJob>();
-        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
-        std::thread::Builder::new()
-            .name("jira-http-runtime".to_owned())
-            .spawn(move || {
-                let runtime = match Builder::new_current_thread().enable_all().build() {
-                    Ok(runtime) => {
-                        let _ = startup_sender.send(Ok(()));
-                        runtime
-                    }
-                    Err(_) => {
-                        let _ = startup_sender.send(Err(()));
-                        return;
-                    }
-                };
-                while let Ok(job) = receiver.recv() {
-                    job(&runtime);
-                }
-            })
-            .map_err(|_| ())?;
-        startup_receiver.recv().map_err(|_| ())??;
-        Ok(Self { sender })
-    }
-
-    async fn dispatch<T, F>(
-        &self,
-        operation: F,
-    ) -> Result<Result<T, ApplicationError>, ApplicationError>
-    where
-        T: Send + 'static,
-        F: std::future::Future<Output = Result<T, ApplicationError>> + Send + 'static,
-    {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Box::new(move |runtime| {
-                let result = runtime.block_on(operation);
-                let _ = sender.send(result);
-            }))
-            .map_err(|_| {
-                ApplicationError::new(ErrorKind::Internal, "Jira runtime is unavailable")
-            })?;
-        receiver
-            .await
-            .map_err(|_| ApplicationError::new(ErrorKind::Internal, "Jira runtime stopped"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attachment_response::{
+        attachment_body_error, attachment_mime_type, attachment_status_error,
+        attachment_url_with_query, finish_attachment_body, image_mime_from_signature,
+        is_allowed_image_mime, media_type,
+    };
+    use crate::read_response::status_error;
+    use crate::write_response::{
+        comment_status_error, map_created_comment_body, write_dispatch_error, write_status_error,
+    };
+    use jira_application::{AttachmentBodyClass, AttachmentMimeClass, AttachmentReadAttempt};
+    use reqwest::StatusCode;
 
     fn test_gateway_url() -> Url {
         gateway_base_url(&JiraCloudId::parse("cloud-id").unwrap()).unwrap()
@@ -2812,7 +2297,7 @@ mod tests {
             .attachment_endpoint("rest/api/3/attachment/thumbnail", "att/42?url=evil")
             .unwrap();
         thumbnail = attachment_url_with_query(thumbnail, 640, 480, true);
-        let request = JiraHttpClient::attachment_request_builder(
+        let request = attachment_response::attachment_request_builder(
             &client.client,
             thumbnail,
             &client.credentials,
@@ -2836,7 +2321,7 @@ mod tests {
         let content = client
             .attachment_endpoint("rest/api/3/attachment/content", "42")
             .unwrap();
-        let mut content_request = JiraHttpClient::attachment_request_builder(
+        let mut content_request = attachment_response::attachment_request_builder(
             &client.client,
             content,
             &client.credentials,
