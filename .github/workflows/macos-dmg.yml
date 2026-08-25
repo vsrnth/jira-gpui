@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
+          rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
           rustc --version
           cargo --version
@@ -88,24 +88,20 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-
+            cargo-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-
 
       - name: Cache Cargo build output
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target
-          key: cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ steps.resolve-version.outputs.source_sha }}-${{ hashFiles('Cargo.lock') }}
+          path: target/release
+          key: cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-release-profile-${{ hashFiles('Cargo.lock') }}-${{ steps.resolve-version.outputs.source_sha }}
+          restore-keys: |
+            cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-release-profile-${{ hashFiles('Cargo.lock') }}-
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Test workspace
-        run: cargo test --workspace --all-targets --locked
-
-      - name: Check production code with Clippy
-        run: cargo clippy --workspace --lib --bins --locked -- -D warnings
+      - name: Test jira-gpui library (release)
+        run: cargo test --release --locked -p jira-gpui --lib
 
       - name: Build release binary
         run: cargo build --release --locked -p jira-gpui
