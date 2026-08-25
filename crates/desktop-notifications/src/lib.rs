@@ -1,7 +1,11 @@
 #[cfg(any(target_os = "linux", test))]
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use jira_application::{
     ApplicationError, ErrorKind, NotificationPort, NotificationRequest, PortFuture,
@@ -36,6 +40,23 @@ impl DesktopNotificationReceipt {
         self.notification_id
     }
 }
+
+/// A private handle abstraction lets deterministic tests exercise retention
+/// without constructing a live D-Bus handle.
+#[cfg(target_os = "linux")]
+trait RetainedNotificationHandle: Send + std::fmt::Debug {}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct NotifyRustHandle {
+    // The handle is intentionally held for its Drop/lifetime behavior; callers
+    // only need the daemon ID, not access to this private backend value.
+    #[allow(dead_code)]
+    handle: notify_rust::NotificationHandle,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedNotificationHandle for NotifyRustHandle {}
 
 /// A strictly bounded FIFO retention queue. Retaining notification handles is
 /// required by some desktop environments to keep the D-Bus connection alive;
@@ -72,19 +93,58 @@ impl<T> BoundedRetention<T> {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct BackendNotification {
+    notification_id: u32,
+    handle: Box<dyn RetainedNotificationHandle>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct BackendError;
+
+#[cfg(target_os = "linux")]
+type BackendFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BackendNotification, BackendError>> + Send + 'a>>;
+
+#[cfg(target_os = "linux")]
+trait NotificationBackend: Send + Sync + std::fmt::Debug {
+    fn show<'a>(&'a self, notification: notify_rust::Notification) -> BackendFuture<'a>;
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct NotifyRustBackend;
+
+#[cfg(target_os = "linux")]
+impl NotificationBackend for NotifyRustBackend {
+    fn show<'a>(&'a self, notification: notify_rust::Notification) -> BackendFuture<'a> {
+        Box::pin(async move {
+            let handle = notification.show_async().await.map_err(|_| BackendError)?;
+            Ok(BackendNotification {
+                notification_id: handle.id(),
+                handle: Box::new(NotifyRustHandle { handle }),
+            })
+        })
+    }
+}
+
 #[cfg_attr(not(target_os = "linux"), derive(Default))]
 #[derive(Debug, Clone)]
 pub struct FreedesktopNotificationPort {
     #[cfg(target_os = "linux")]
-    retained_handles: Arc<Mutex<BoundedRetention<notify_rust::NotificationHandle>>>,
+    retained_handles: Arc<Mutex<BoundedRetention<Box<dyn RetainedNotificationHandle>>>>,
+    #[cfg(target_os = "linux")]
+    backend: Arc<dyn NotificationBackend>,
 }
 
 #[cfg(target_os = "linux")]
 impl Default for FreedesktopNotificationPort {
     fn default() -> Self {
         Self {
-            #[cfg(target_os = "linux")]
             retained_handles: Arc::new(Mutex::new(BoundedRetention::new(MAX_RETAINED_HANDLES))),
+            backend: Arc::new(NotifyRustBackend),
         }
     }
 }
@@ -108,12 +168,29 @@ impl FreedesktopNotificationPort {
     }
 
     #[cfg(target_os = "linux")]
-    fn retain_handle(&self, handle: notify_rust::NotificationHandle) {
+    fn retain_handle(&self, handle: Box<dyn RetainedNotificationHandle>) {
         let mut retained_handles = match self.retained_handles.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         retained_handles.retain(handle);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn with_backend(backend: Arc<dyn NotificationBackend>) -> Self {
+        Self {
+            retained_handles: Arc::new(Mutex::new(BoundedRetention::new(MAX_RETAINED_HANDLES))),
+            backend,
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn retained_handle_count(&self) -> usize {
+        let retained_handles = match self.retained_handles.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        retained_handles.len()
     }
 }
 
@@ -184,11 +261,12 @@ impl FreedesktopNotificationPort {
     async fn deliver_notification(&self, event: UpdateEvent) -> Result<(), ApplicationError> {
         #[cfg(target_os = "linux")]
         {
-            let handle = event_notification(&event)
-                .show_async()
+            let result = self
+                .backend
+                .show(event_notification(&event))
                 .await
                 .map_err(|_| notification_error())?;
-            self.retain_handle(handle);
+            self.retain_handle(result.handle);
             Ok(())
         }
 
@@ -202,14 +280,15 @@ impl FreedesktopNotificationPort {
     async fn send_test_notification(&self) -> Result<DesktopNotificationReceipt, ApplicationError> {
         #[cfg(target_os = "linux")]
         {
-            let handle = test_notification()
-                .show_async()
+            let result = self
+                .backend
+                .show(test_notification())
                 .await
                 .map_err(|_| notification_error())?;
             let receipt = DesktopNotificationReceipt {
-                notification_id: handle.id(),
+                notification_id: result.notification_id,
             };
-            self.retain_handle(handle);
+            self.retain_handle(result.handle);
             Ok(receipt)
         }
 
@@ -329,6 +408,186 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct TestHandle {
+        id: u32,
+        dropped_ids: Arc<Mutex<Vec<u32>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl TestHandle {
+        fn new(id: u32, dropped_ids: Arc<Mutex<Vec<u32>>>) -> Self {
+            Self { id, dropped_ids }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for TestHandle {
+        fn drop(&mut self) {
+            let mut dropped_ids = self
+                .dropped_ids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            dropped_ids.push(self.id);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl RetainedNotificationHandle for TestHandle {}
+
+    #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct TestBackend {
+        calls: Arc<AtomicUsize>,
+        result: Mutex<Option<Result<BackendNotification, BackendError>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl NotificationBackend for TestBackend {
+        fn show<'a>(&'a self, _notification: notify_rust::Notification) -> BackendFuture<'a> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let mut result = match self.result.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                result
+                    .take()
+                    .unwrap_or_else(|| panic!("test backend called more than once"))
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn successful_backend_notification(
+        notification_id: u32,
+        dropped_ids: Arc<Mutex<Vec<u32>>>,
+    ) -> BackendNotification {
+        BackendNotification {
+            notification_id,
+            handle: Box::new(TestHandle::new(notification_id, dropped_ids)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn snapshot_drop_ids(dropped_ids: &Arc<Mutex<Vec<u32>>>) -> Vec<u32> {
+        dropped_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backend_success_through_notification_port_is_one_call_and_retains_handle() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped_ids = Arc::new(Mutex::new(Vec::new()));
+        let backend = Arc::new(TestBackend {
+            calls: calls.clone(),
+            result: Mutex::new(Some(Ok(successful_backend_notification(
+                41,
+                dropped_ids.clone(),
+            )))),
+        });
+        let port = FreedesktopNotificationPort::with_backend(backend);
+        let request = NotificationRequest {
+            event: event(UpdateKind::IssueUpdated),
+        };
+
+        let result = futures_lite::future::block_on(
+            <FreedesktopNotificationPort as jira_application::NotificationPort>::deliver(
+                &port, request,
+            ),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(port.retained_handle_count(), 1);
+        assert!(snapshot_drop_ids(&dropped_ids).is_empty());
+        drop(port);
+        assert_eq!(snapshot_drop_ids(&dropped_ids), vec![41]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backend_failure_through_notification_port_is_redacted_and_not_retried() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(TestBackend {
+            calls: calls.clone(),
+            result: Mutex::new(Some(Err(BackendError))),
+        });
+        let port = FreedesktopNotificationPort::with_backend(backend);
+        let request = NotificationRequest {
+            event: event(UpdateKind::IssueAddedToView),
+        };
+
+        let error = futures_lite::future::block_on(
+            <FreedesktopNotificationPort as jira_application::NotificationPort>::deliver(
+                &port, request,
+            ),
+        )
+        .expect_err("test backend should fail");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(error.kind(), ErrorKind::Notification);
+        assert_eq!(error.message(), FAILURE_MESSAGE);
+        assert_eq!(port.retained_handle_count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backend_success_returns_daemon_id_for_test_notification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped_ids = Arc::new(Mutex::new(Vec::new()));
+        let backend = Arc::new(TestBackend {
+            calls: calls.clone(),
+            result: Mutex::new(Some(Ok(successful_backend_notification(
+                41,
+                dropped_ids.clone(),
+            )))),
+        });
+        let port = FreedesktopNotificationPort::with_backend(backend);
+
+        let receipt = futures_lite::future::block_on(port.test_notification())
+            .expect("test backend should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(receipt.notification_id(), 41);
+        assert_eq!(port.retained_handle_count(), 1);
+        assert!(snapshot_drop_ids(&dropped_ids).is_empty());
+        drop(port);
+        assert_eq!(snapshot_drop_ids(&dropped_ids), vec![41]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn port_retention_evicts_oldest_handle_and_keeps_newer_handles() {
+        let dropped_ids = Arc::new(Mutex::new(Vec::new()));
+        let port = FreedesktopNotificationPort::new();
+
+        for id in 0..MAX_RETAINED_HANDLES as u32 {
+            port.retain_handle(Box::new(TestHandle::new(id, dropped_ids.clone())));
+        }
+        assert_eq!(port.retained_handle_count(), MAX_RETAINED_HANDLES);
+        assert!(snapshot_drop_ids(&dropped_ids).is_empty());
+
+        port.retain_handle(Box::new(TestHandle::new(
+            MAX_RETAINED_HANDLES as u32,
+            dropped_ids.clone(),
+        )));
+        assert_eq!(port.retained_handle_count(), MAX_RETAINED_HANDLES);
+        assert_eq!(snapshot_drop_ids(&dropped_ids), vec![0]);
+
+        drop(port);
+        let mut all_dropped = snapshot_drop_ids(&dropped_ids);
+        all_dropped.sort_unstable();
+        assert_eq!(
+            all_dropped,
+            (0..=MAX_RETAINED_HANDLES as u32).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn retained_handles_are_fifo_bounded_and_live_until_eviction() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -377,7 +636,7 @@ mod tests {
         };
         let port = FreedesktopNotificationPort::new();
         let result = futures_lite::future::block_on(port.deliver(request));
-        let error = result.unwrap_err();
+        let error = result.expect_err("non-Linux delivery should be unavailable");
         assert_eq!(error.kind(), ErrorKind::Notification);
         assert_eq!(error.message(), FAILURE_MESSAGE);
     }
@@ -387,7 +646,7 @@ mod tests {
     fn non_linux_test_notification_is_redacted_unavailable() {
         let port = FreedesktopNotificationPort::new();
         let result = futures_lite::future::block_on(port.test_notification());
-        let error = result.unwrap_err();
+        let error = result.expect_err("non-Linux test notification should be unavailable");
         assert_eq!(error.kind(), ErrorKind::Notification);
         assert_eq!(error.message(), FAILURE_MESSAGE);
     }
