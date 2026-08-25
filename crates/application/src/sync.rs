@@ -5,12 +5,11 @@ use time::Duration;
 
 use crate::{
     ApplicationError, ApplicationEvent, ApplicationEventSink, CancellationToken, ChangeSet, Clock,
-    IssueCachePort, IssueDiffer, IssueFetchRequest, JiraSyncReadPort, NotificationPolicy,
-    NotificationPort, NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest,
-    SyncState,
+    IssueCachePort, IssueDiffer, JiraSyncReadPort, NotificationPolicy, NotificationPort,
+    NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest, SyncState,
+    issue_fetch_scope::IssueFetchScope,
     issue_pagination::IssuePagination,
     sync_activity::{SyncActivityEnricher, SyncActivityRequest},
-    validate_jql_scope,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -76,7 +75,7 @@ impl SyncService {
         request: SyncRequest,
         cancellation: &CancellationToken,
     ) -> Result<SyncOutcome, ApplicationError> {
-        self.validate(&request)?;
+        let fetch_scope = self.validate(&request)?;
         cancellation.check()?;
         self.events.publish(ApplicationEvent::SyncStarted {
             site_id: request.site_id.clone(),
@@ -84,7 +83,7 @@ impl SyncService {
             mode: request.mode,
         });
 
-        let result = self.run_inner(&request, cancellation).await;
+        let result = self.run_inner(&request, &fetch_scope, cancellation).await;
         match result {
             Ok(outcome) => {
                 self.events.publish(ApplicationEvent::SyncCompleted {
@@ -112,6 +111,7 @@ impl SyncService {
     async fn run_inner(
         &self,
         request: &SyncRequest,
+        fetch_scope: &IssueFetchScope,
         cancellation: &CancellationToken,
     ) -> Result<SyncOutcome, ApplicationError> {
         let started_at = self.clock.now();
@@ -139,15 +139,11 @@ impl SyncService {
             let page = self
                 .jira
                 .fetch_issue_page(
-                    &IssueFetchRequest {
-                        site_id: request.site_id.clone(),
-                        assignees: request.assignees.clone(),
-                        watchers: request.watchers.clone(),
-                        jql_scope: request.jql_scope.clone(),
+                    &fetch_scope.issue_fetch_request(
                         updated_since,
                         page_cursor,
-                        page_size: self.config.page_size,
-                    },
+                        self.config.page_size,
+                    ),
                     cancellation,
                 )
                 .await?;
@@ -326,23 +322,15 @@ impl SyncService {
         stats
     }
 
-    fn validate(&self, request: &SyncRequest) -> Result<(), ApplicationError> {
-        validate_jql_scope(request.jql_scope.as_deref())
-            .map_err(ApplicationError::invalid_input)?;
-        if let Some(assignees) = &request.assignees
-            && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
-        {
-            return Err(ApplicationError::invalid_input(
-                "sync assignees must be unique",
-            ));
-        }
-        if let Some(watchers) = &request.watchers
-            && watchers.iter().collect::<HashSet<_>>().len() != watchers.len()
-        {
-            return Err(ApplicationError::invalid_input(
-                "sync watchers must be unique",
-            ));
-        }
+    fn validate(&self, request: &SyncRequest) -> Result<IssueFetchScope, ApplicationError> {
+        let fetch_scope = IssueFetchScope::new(
+            request.site_id.clone(),
+            request.assignees.clone(),
+            request.watchers.clone(),
+            request.jql_scope.clone(),
+            "sync assignees must be unique",
+            "sync watchers must be unique",
+        )?;
         if let Some(assignees) = &request.notification_assignees
             && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
         {
@@ -355,7 +343,7 @@ impl SyncService {
             self.config.max_pages,
             "invalid sync pagination configuration",
         )?;
-        Ok(())
+        Ok(fetch_scope)
     }
 }
 
@@ -375,9 +363,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        CommitOutcome, DefaultDesktopNotificationPolicy, ErrorKind, IssueListQuery, IssuePage,
-        JiraIssueActivityPort, JiraIssueSearchPort, PageCursor, PortFuture, SyncCommit,
-        test_support::block_on,
+        CommitOutcome, DefaultDesktopNotificationPolicy, ErrorKind, IssueFetchRequest,
+        IssueListQuery, IssuePage, JiraIssueActivityPort, JiraIssueSearchPort, PageCursor,
+        PortFuture, SyncCommit, test_support::block_on,
     };
 
     #[derive(Default)]

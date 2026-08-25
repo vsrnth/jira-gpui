@@ -1,10 +1,10 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp};
 
 use crate::{
-    ApplicationError, CancellationToken, IssueFetchRequest, JiraIssueSearchPort,
-    issue_pagination::IssuePagination, validate_jql_scope,
+    ApplicationError, CancellationToken, JiraIssueSearchPort, issue_fetch_scope::IssueFetchScope,
+    issue_pagination::IssuePagination,
 };
 
 /// Safety limits for a manual issue pull.
@@ -69,7 +69,7 @@ impl IssuePullService {
         request: IssuePullRequest,
         cancellation: &CancellationToken,
     ) -> Result<IssuePullOutcome, ApplicationError> {
-        self.validate(&request)?;
+        let fetch_scope = self.validate(&request)?;
         cancellation.check()?;
 
         let mut pagination = IssuePagination::new(
@@ -83,15 +83,11 @@ impl IssuePullService {
             let page = self
                 .jira
                 .fetch_issue_page(
-                    &IssueFetchRequest {
-                        site_id: request.site_id.clone(),
-                        assignees: request.assignees.clone(),
-                        watchers: request.watchers.clone(),
-                        jql_scope: request.jql_scope.clone(),
-                        updated_since: request.updated_since,
+                    &fetch_scope.issue_fetch_request(
+                        request.updated_since,
                         page_cursor,
-                        page_size: self.config.page_size,
-                    },
+                        self.config.page_size,
+                    ),
                     cancellation,
                 )
                 .await?;
@@ -110,29 +106,21 @@ impl IssuePullService {
         })
     }
 
-    fn validate(&self, request: &IssuePullRequest) -> Result<(), ApplicationError> {
-        validate_jql_scope(request.jql_scope.as_deref())
-            .map_err(ApplicationError::invalid_input)?;
-        if let Some(assignees) = &request.assignees
-            && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
-        {
-            return Err(ApplicationError::invalid_input(
-                "issue pull assignees must be unique",
-            ));
-        }
-        if let Some(watchers) = &request.watchers
-            && watchers.iter().collect::<HashSet<_>>().len() != watchers.len()
-        {
-            return Err(ApplicationError::invalid_input(
-                "issue pull watchers must be unique",
-            ));
-        }
+    fn validate(&self, request: &IssuePullRequest) -> Result<IssueFetchScope, ApplicationError> {
+        let fetch_scope = IssueFetchScope::new(
+            request.site_id.clone(),
+            request.assignees.clone(),
+            request.watchers.clone(),
+            request.jql_scope.clone(),
+            "issue pull assignees must be unique",
+            "issue pull watchers must be unique",
+        )?;
         crate::issue_pagination::validate_pagination_config(
             self.config.page_size,
             self.config.max_pages,
             "issue pull pagination configuration is invalid",
         )?;
-        Ok(())
+        Ok(fetch_scope)
     }
 }
 
@@ -147,7 +135,9 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::{ErrorKind, IssuePage, PageCursor, PortFuture, test_support::block_on};
+    use crate::{
+        ErrorKind, IssueFetchRequest, IssuePage, PageCursor, PortFuture, test_support::block_on,
+    };
 
     struct FakeJira {
         pages: Mutex<VecDeque<Result<IssuePage, ApplicationError>>>,
