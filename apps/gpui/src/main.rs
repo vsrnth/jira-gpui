@@ -5,7 +5,7 @@ mod desktop_integration;
 use gpui::{App, AppContext as _, Bounds, Pixels, Size, WindowBounds, px, size};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const INITIAL_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(780.));
+const INITIAL_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const INITIAL_WINDOW_MARGIN: f32 = 24.;
@@ -95,7 +95,7 @@ mod tests {
     fn preserves_desired_size_when_display_has_room() {
         assert_eq!(
             initial_window_size(size(px(1920.), px(1080.))),
-            INITIAL_WINDOW_SIZE
+            size(px(1240.), px(900.))
         );
     }
 
