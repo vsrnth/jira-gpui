@@ -4,10 +4,12 @@
 //! It owns the boundary between Jira's enhanced-search JSON representation and a stable,
 //! UI-independent set of records used by the application layer.
 
+mod adf;
 mod jql;
 mod mapping;
 mod models;
 
+pub use adf::adf_to_plain_text;
 pub use jql::{
     AccountId as JqlAccountId, DEFAULT_JQL_SCOPE, JqlError, MAX_ISSUE_IDS, MAX_JQL_SCOPE_LENGTH,
     assigned_issues_for_account_ids, assigned_issues_jql,
@@ -17,7 +19,7 @@ pub use jql::{
 };
 pub use mapping::{
     DomainIssuePage, IssueMapper, MappingError, RemoteIssue, RemoteIssuePage, RemoteNamedEntity,
-    RemoteProject, RemoteUser, adf_to_plain_text,
+    RemoteProject, RemoteUser,
 };
 pub use models::{
     EnhancedSearchPage, EnhancedSearchRequest, JiraAttachment, JiraBulkChangelogRequest,
