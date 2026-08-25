@@ -13,6 +13,7 @@ mod feed;
 mod issue_detail;
 mod issue_diff;
 mod issue_edit;
+mod issue_edit_policy;
 mod issue_media;
 mod issue_pagination;
 mod issue_pull;

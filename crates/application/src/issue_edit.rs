@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
 use time::Duration;
 
@@ -12,6 +9,8 @@ use crate::{
     IssueEditCachePort, IssueTransition, IssueTransitionsRequest, JiraIssueEditPort,
     TransitionIssueRequest,
 };
+
+use super::issue_edit_policy::IssueEditCachePolicy;
 
 /// Jira's assignable-user search is intentionally bounded at the application
 /// boundary. The empty query is allowed so a picker can load initial candidates.
@@ -30,7 +29,7 @@ pub struct IssueEditService {
     editor: Arc<dyn JiraIssueEditPort>,
     cache: Option<Arc<dyn IssueEditCachePort>>,
     clock: Option<Arc<dyn Clock>>,
-    invalidated_transitions: Arc<RwLock<HashSet<String>>>,
+    cache_policy: IssueEditCachePolicy,
 }
 
 impl IssueEditService {
@@ -39,7 +38,7 @@ impl IssueEditService {
             editor,
             cache: None,
             clock: None,
-            invalidated_transitions: Arc::new(RwLock::new(HashSet::new())),
+            cache_policy: IssueEditCachePolicy::default(),
         }
     }
 
@@ -55,7 +54,7 @@ impl IssueEditService {
             editor,
             cache: Some(cache),
             clock: Some(clock),
-            invalidated_transitions: Arc::new(RwLock::new(HashSet::new())),
+            cache_policy: IssueEditCachePolicy::default(),
         }
     }
 
@@ -80,7 +79,9 @@ impl IssueEditService {
             let cached = cache
                 .cached_assignable_users(&request.site_id, &request.locator)
                 .await?;
-            match cached.filter(|cached| cache_is_fresh(cached.fetched_at, now)) {
+            match cached.filter(|cached| {
+                IssueEditCachePolicy::cache_is_fresh(cached.fetched_at, now, ISSUE_EDIT_CACHE_TTL)
+            }) {
                 Some(cached) => {
                     validate_assignable_users(&cached.users, &request.site_id)?;
                     cached.users
@@ -117,7 +118,7 @@ impl IssueEditService {
         };
         cancellation.check()?;
         if self.cache.is_some() {
-            Ok(filter_assignable_users(
+            Ok(IssueEditCachePolicy::filter_assignable_users(
                 users,
                 &request.query,
                 request.limit,
@@ -142,17 +143,17 @@ impl IssueEditService {
         cancellation.check()?;
         let transitions = if let (Some(cache), Some(clock)) = (&self.cache, &self.clock) {
             let now = clock.now();
-            let cache_key = edit_cache_key(&request.site_id, &request.locator);
-            let transition_was_invalidated = self
-                .invalidated_transitions
-                .read()
-                .map(|keys| keys.contains(&cache_key))
-                .unwrap_or(true);
             let cached = cache
                 .cached_issue_transitions(&request.site_id, &request.locator)
                 .await?;
             match cached.filter(|cached| {
-                !transition_was_invalidated && cache_is_fresh(cached.fetched_at, now)
+                self.cache_policy.transitions_are_fresh(
+                    &request.site_id,
+                    &request.locator,
+                    cached.fetched_at,
+                    now,
+                    ISSUE_EDIT_CACHE_TTL,
+                )
             }) {
                 Some(cached) => cached.transitions,
                 None => {
@@ -175,9 +176,8 @@ impl IssueEditService {
                             now,
                         )
                         .await?;
-                    if let Ok(mut keys) = self.invalidated_transitions.write() {
-                        keys.remove(&cache_key);
-                    }
+                    self.cache_policy
+                        .mark_transitions_refreshed(&request.site_id, &request.locator);
                     transitions
                 }
             }
@@ -226,10 +226,8 @@ impl IssueEditService {
         {
             // A definite success makes every previously displayed transition
             // stale. Do not leave old-state choices available to the picker.
-            let cache_key = edit_cache_key(&request.site_id, &request.locator);
-            if let Ok(mut keys) = self.invalidated_transitions.write() {
-                keys.insert(cache_key);
-            }
+            self.cache_policy
+                .mark_transitions_invalidated(&request.site_id, &request.locator);
             // Invalidation is best effort after a successful remote write. A
             // local guard above prevents this service from using stale values
             // even if the adapter is temporarily unavailable.
@@ -238,20 +236,6 @@ impl IssueEditService {
                 .await;
         }
         result
-    }
-}
-
-fn cache_is_fresh(fetched_at: jira_domain::Timestamp, now: jira_domain::Timestamp) -> bool {
-    now >= fetched_at
-        && fetched_at
-            .checked_add(ISSUE_EDIT_CACHE_TTL)
-            .is_some_and(|expires_at| now < expires_at)
-}
-
-fn edit_cache_key(site_id: &jira_domain::JiraSiteId, locator: &crate::IssueLocator) -> String {
-    match locator {
-        crate::IssueLocator::Id(id) => format!("{}\0id\0{}", site_id.as_str(), id.as_str()),
-        crate::IssueLocator::Key(key) => format!("{}\0key\0{}", site_id.as_str(), key.as_str()),
     }
 }
 
@@ -270,19 +254,6 @@ fn validate_assignable_users(
         ));
     }
     Ok(())
-}
-
-fn filter_assignable_users(users: Vec<User>, query: &str, limit: usize) -> Vec<User> {
-    let query = query.trim().to_lowercase();
-    users
-        .into_iter()
-        .filter(|user| {
-            query.is_empty()
-                || user.display_name.to_lowercase().contains(&query)
-                || user.account_id.as_str().to_lowercase().contains(&query)
-        })
-        .take(limit)
-        .collect()
 }
 
 fn validate_user_search_request(
@@ -552,20 +523,6 @@ mod tests {
             query: query.into(),
             limit,
         }
-    }
-
-    #[test]
-    fn cache_freshness_excludes_future_and_exactly_expired_entries() {
-        let fetched_at = datetime!(2026-01-01 00:00 UTC);
-        assert!(cache_is_fresh(
-            fetched_at,
-            datetime!(2026-01-01 23:59:59.999999999 UTC)
-        ));
-        assert!(!cache_is_fresh(fetched_at, datetime!(2026-01-02 00:00 UTC)));
-        assert!(!cache_is_fresh(
-            datetime!(2026-01-02 00:00 UTC),
-            datetime!(2026-01-01 00:00 UTC)
-        ));
     }
 
     fn assignment() -> AssignIssueRequest {
