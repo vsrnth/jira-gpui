@@ -83,8 +83,7 @@ impl IssueDetailService {
             }
         };
 
-        IssueDetail::new(core, comments)
-            .map_err(|_| ApplicationError::invalid_input("invalid Jira issue detail payload"))
+        Ok(IssueDetail::new(core, comments))
     }
 
     pub async fn load(
@@ -304,7 +303,6 @@ mod tests {
             ),
             Vec::new(),
         )
-        .expect("core")
     }
 
     fn comment(id: &str) -> IssueComment {

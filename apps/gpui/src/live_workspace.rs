@@ -1722,16 +1722,13 @@ mod tests {
         let jira = Arc::new(FakeJira::default());
         let mut detailed_issue = issue("Detailed summary");
         detailed_issue.description_text = Some("Detailed description".to_owned());
-        jira.push_detail(
-            IssueDetailCore::new(
-                detailed_issue,
-                vec![
-                    AttachmentMetadata::new("attachment-1", "notes.txt", 42, Some("text/plain"))
-                        .expect("attachment"),
-                ],
-            )
-            .expect("detail core"),
-        );
+        jira.push_detail(IssueDetailCore::new(
+            detailed_issue,
+            vec![
+                AttachmentMetadata::new("attachment-1", "notes.txt", 42, Some("text/plain"))
+                    .expect("attachment"),
+            ],
+        ));
         jira.push_comment_page(IssueCommentsPage {
             comments: vec![
                 IssueComment::new(

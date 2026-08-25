@@ -207,8 +207,7 @@ fn maps_issue_detail_comments_and_attachment_metadata_for_display() {
                 AttachmentMetadata::new("attachment-1", "report.txt", 1024, Some("text/plain"))
                     .expect("attachment"),
             ],
-        )
-        .expect("detail core"),
+        ),
         vec![
             IssueComment::new(
                 "comment-1",
@@ -226,8 +225,7 @@ fn maps_issue_detail_comments_and_attachment_metadata_for_display() {
             )
             .expect("comment"),
         ],
-    )
-    .expect("detail");
+    );
 
     let view = IssueDetailViewModel::from_domain(&detail, &[]);
 
@@ -246,7 +244,7 @@ fn maps_comment_author_to_authenticated_catalog_display_name() {
     let account = jira_domain::AccountId::new("account-1").expect("account");
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let detail = IssueDetail::new(
-        IssueDetailCore::new(issue, Vec::new()).expect("detail core"),
+        IssueDetailCore::new(issue, Vec::new()),
         vec![
             IssueComment::new(
                 "comment-1",
@@ -258,8 +256,7 @@ fn maps_comment_author_to_authenticated_catalog_display_name() {
             )
             .expect("comment"),
         ],
-    )
-    .expect("detail");
+    );
     let user = User::new(
         detail.core.issue.site_id.clone(),
         account,
@@ -278,7 +275,7 @@ fn maps_comment_author_to_authenticated_catalog_display_name() {
 fn maps_comment_embedded_display_name_without_a_user_catalog() {
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let detail = IssueDetail::new(
-        IssueDetailCore::new(issue, Vec::new()).expect("detail core"),
+        IssueDetailCore::new(issue, Vec::new()),
         vec![
             IssueComment::new(
                 "comment-1",
@@ -296,8 +293,7 @@ fn maps_comment_embedded_display_name_without_a_user_catalog() {
             )
             .expect("comment"),
         ],
-    )
-    .expect("detail");
+    );
 
     let view = IssueDetailViewModel::from_domain(&detail, &[]);
 
@@ -398,10 +394,9 @@ fn propagates_structured_issue_and_comment_content_with_plain_text_compatibility
     );
     comment.rich_body = Some(rich_body.clone());
     let detail = IssueDetail::new(
-        IssueDetailCore::new(issue.clone(), Vec::new()).expect("detail core"),
+        IssueDetailCore::new(issue.clone(), Vec::new()),
         vec![comment],
-    )
-    .expect("detail");
+    );
 
     let issue_view = IssueViewModel::from_domain(&issue, &[]);
     let detail_view = IssueDetailViewModel::from_domain(&detail, &[]);

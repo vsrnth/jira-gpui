@@ -42,7 +42,7 @@ impl IssueMapper {
         let mut domain_issue = self.map_domain_issue(site_id, issue)?;
         domain_issue.description_text = description;
         domain_issue.rich_description = rich_description;
-        IssueDetailCore::new(domain_issue, attachments).map_err(MappingError::InvalidDomainValue)
+        Ok(IssueDetailCore::new(domain_issue, attachments))
     }
 
     pub fn map_comment_page(

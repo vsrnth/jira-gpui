@@ -141,8 +141,8 @@ pub struct IssueDetailCore {
 }
 
 impl IssueDetailCore {
-    pub fn new(issue: Issue, attachments: Vec<AttachmentMetadata>) -> Result<Self, DomainError> {
-        Ok(Self { issue, attachments })
+    pub fn new(issue: Issue, attachments: Vec<AttachmentMetadata>) -> Self {
+        Self { issue, attachments }
     }
 }
 
@@ -154,8 +154,8 @@ pub struct IssueDetail {
 }
 
 impl IssueDetail {
-    pub fn new(core: IssueDetailCore, comments: Vec<IssueComment>) -> Result<Self, DomainError> {
-        Ok(Self { core, comments })
+    pub fn new(core: IssueDetailCore, comments: Vec<IssueComment>) -> Self {
+        Self { core, comments }
     }
 }
 
@@ -226,11 +226,7 @@ mod tests {
         )
         .expect("comment");
 
-        let detail = IssueDetail::new(
-            IssueDetailCore::new(issue, vec![attachment]).expect("core"),
-            vec![comment],
-        )
-        .expect("detail");
+        let detail = IssueDetail::new(IssueDetailCore::new(issue, vec![attachment]), vec![comment]);
 
         assert_eq!(detail.comments.len(), 1);
         assert_eq!(detail.core.attachments[0].filename, "notes.txt");
