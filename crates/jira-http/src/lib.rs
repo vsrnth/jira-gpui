@@ -23,9 +23,8 @@ use jira_application::{
     JiraSyncReadPort, JiraUserReadPort, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture,
     RecentIssueCommentsRequest, TransitionIssueRequest, UserSearchRequest,
 };
-use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, Status, User};
+use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, User};
 use reqwest::{Client, header};
-use serde::Serialize;
 use url::Url;
 
 mod attachment_response;
@@ -48,96 +47,6 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TENANT_INFO_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
 const MAX_CHANGELOG_PAGES: usize = 8;
-
-#[derive(Debug, Serialize)]
-struct JiraCommentCreateRequest {
-    body: JiraAdfDocument,
-}
-
-#[derive(Debug, Serialize)]
-struct JiraAdfDocument {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    version: u8,
-    content: Vec<JiraAdfBlock>,
-}
-
-#[derive(Debug, Serialize)]
-struct JiraAdfBlock {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    content: Vec<JiraAdfText>,
-}
-
-#[derive(Debug, Serialize)]
-struct JiraAdfText {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JiraTransitionsResponse {
-    transitions: Vec<JiraTransitionResponse>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct JiraTransitionResponse {
-    id: String,
-    name: String,
-    to: JiraTransitionStatusResponse,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JiraTransitionStatusResponse {
-    id: String,
-    name: String,
-    #[serde(default)]
-    status_category: Option<JiraStatusCategoryResponse>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JiraStatusCategoryResponse {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    key: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct JiraAssigneeRequest {
-    #[serde(rename = "accountId")]
-    account_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct JiraTransitionRequest {
-    transition: JiraTransitionIdRequest,
-}
-
-#[derive(Debug, Serialize)]
-struct JiraTransitionIdRequest {
-    id: String,
-}
-
-fn jira_comment_create_body(text: &str) -> JiraCommentCreateRequest {
-    JiraCommentCreateRequest {
-        body: JiraAdfDocument {
-            kind: "doc",
-            version: 1,
-            content: vec![JiraAdfBlock {
-                kind: "paragraph",
-                content: vec![JiraAdfText {
-                    kind: "text",
-                    text: text.to_owned(),
-                }],
-            }],
-        },
-    }
-}
 
 /// Credentials for Jira Cloud basic authentication (email + API token).
 ///
@@ -538,12 +447,8 @@ impl JiraHttpClient {
             .send()
             .await
             .map_err(transport_error)?;
-        let payload: JiraTransitionsResponse = read_json(response, max_response_bytes).await?;
-        payload
-            .transitions
-            .into_iter()
-            .map(map_transition)
-            .collect()
+        let body = read_response::read_body(response, max_response_bytes).await?;
+        map_transition_response(&body)
     }
 
     async fn assign_issue_request(
@@ -552,9 +457,7 @@ impl JiraHttpClient {
         credentials: ApiTokenCredentials,
         assignee: Option<jira_domain::AccountId>,
     ) -> Result<(), ApplicationError> {
-        let body = JiraAssigneeRequest {
-            account_id: assignee.map(jira_domain::AccountId::into_inner),
-        };
+        let body = jira_adapter::assignee_request_body(assignee.as_ref().map(|id| id.as_str()));
         let response = Self::assign_issue_request_builder(&client, url, &credentials, body)
             .send()
             .await
@@ -566,7 +469,7 @@ impl JiraHttpClient {
         client: &Client,
         url: Url,
         credentials: &ApiTokenCredentials,
-        body: JiraAssigneeRequest,
+        body: serde_json::Value,
     ) -> reqwest::RequestBuilder {
         client
             .put(url)
@@ -582,9 +485,7 @@ impl JiraHttpClient {
         credentials: ApiTokenCredentials,
         transition_id: String,
     ) -> Result<(), ApplicationError> {
-        let body = JiraTransitionRequest {
-            transition: JiraTransitionIdRequest { id: transition_id },
-        };
+        let body = jira_adapter::transition_request_body(&transition_id);
         let response = Self::transition_issue_request_builder(&client, url, &credentials, body)
             .send()
             .await
@@ -596,7 +497,7 @@ impl JiraHttpClient {
         client: &Client,
         url: Url,
         credentials: &ApiTokenCredentials,
-        body: JiraTransitionRequest,
+        body: serde_json::Value,
     ) -> reqwest::RequestBuilder {
         client
             .post(url)
@@ -855,7 +756,7 @@ impl JiraHttpClient {
         client: &Client,
         url: Url,
         credentials: &ApiTokenCredentials,
-        body: JiraCommentCreateRequest,
+        body: serde_json::Value,
     ) -> reqwest::RequestBuilder {
         client
             .post(url)
@@ -876,7 +777,7 @@ impl JiraHttpClient {
             &client,
             url,
             &credentials,
-            jira_comment_create_body(&body),
+            jira_adapter::comment_create_request_body(&body),
         )
         .send()
         .await
@@ -1555,35 +1456,12 @@ fn append_issue_locator_query(
     Ok(())
 }
 
-fn map_transition(transition: JiraTransitionResponse) -> Result<IssueTransition, ApplicationError> {
-    validate_string_id(&transition.id, "transition ID")
-        .map_err(|_| invalid_transition_response())?;
-    validate_string_id(&transition.name, "transition name")
-        .map_err(|_| invalid_transition_response())?;
-    validate_string_id(&transition.to.id, "transition status ID")
-        .map_err(|_| invalid_transition_response())?;
-    validate_string_id(&transition.to.name, "transition status name")
-        .map_err(|_| invalid_transition_response())?;
-    let category = transition.to.status_category.and_then(|category| {
-        category
-            .name
-            .filter(|value| !value.trim().is_empty())
-            .or(category.key.filter(|value| !value.trim().is_empty()))
-    });
-    if category
-        .as_ref()
-        .is_some_and(|value| value.chars().count() > 255 || value.chars().any(char::is_control))
-    {
-        return Err(invalid_transition_response());
-    }
-    Ok(IssueTransition {
-        id: transition.id,
-        name: transition.name,
-        to: Status {
-            id: transition.to.id,
-            name: transition.to.name,
-            category,
-        },
+fn map_transition_response(body: &[u8]) -> Result<Vec<IssueTransition>, ApplicationError> {
+    jira_adapter::decode_transitions_response(body).map_err(|error| match error {
+        jira_adapter::JiraCodecError::MalformedJson => {
+            ApplicationError::new(ErrorKind::Upstream, "Jira returned malformed JSON")
+        }
+        jira_adapter::JiraCodecError::InvalidData => invalid_transition_response(),
     })
 }
 
@@ -1936,9 +1814,7 @@ mod tests {
             &Client::new(),
             assign_url,
             &credentials,
-            JiraAssigneeRequest {
-                account_id: Some("557058:abc-123".to_owned()),
-            },
+            jira_adapter::assignee_request_body(Some("557058:abc-123")),
         )
         .build()
         .unwrap();
@@ -1952,14 +1828,14 @@ mod tests {
                 assigned.body().and_then(reqwest::Body::as_bytes).unwrap(),
             )
             .unwrap(),
-            serde_json::json!({"accountId": "557058:abc-123"})
+            jira_adapter::assignee_request_body(Some("557058:abc-123"))
         );
 
         let unassigned = JiraHttpClient::assign_issue_request_builder(
             &Client::new(),
             Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/assignee").unwrap(),
             &credentials,
-            JiraAssigneeRequest { account_id: None },
+            jira_adapter::assignee_request_body(None),
         )
         .build()
         .unwrap();
@@ -1968,7 +1844,7 @@ mod tests {
                 unassigned.body().and_then(reqwest::Body::as_bytes).unwrap(),
             )
             .unwrap(),
-            serde_json::json!({"accountId": null})
+            jira_adapter::assignee_request_body(None)
         );
 
         let transitioned = JiraHttpClient::transition_issue_request_builder(
@@ -1976,11 +1852,7 @@ mod tests {
             Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/transitions")
                 .unwrap(),
             &credentials,
-            JiraTransitionRequest {
-                transition: JiraTransitionIdRequest {
-                    id: "31".to_owned(),
-                },
-            },
+            jira_adapter::transition_request_body("31"),
         )
         .build()
         .unwrap();
@@ -1993,63 +1865,22 @@ mod tests {
                     .unwrap(),
             )
             .unwrap(),
-            serde_json::json!({"transition": {"id": "31"}})
+            jira_adapter::transition_request_body("31")
         );
     }
 
     #[test]
-    fn transition_response_maps_to_transport_neutral_status_and_rejects_invalid_values() {
-        let payload: JiraTransitionsResponse = serde_json::from_value(serde_json::json!({
-            "transitions": [{
-                "id": "31",
-                "name": "In progress",
-                "to": {
-                    "id": "3",
-                    "name": "In Progress",
-                    "statusCategory": {"key": "indeterminate"}
-                }
-            }]
-        }))
-        .unwrap();
-        let transitions = payload
-            .transitions
-            .into_iter()
-            .map(map_transition)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(transitions[0].id, "31");
-        assert_eq!(transitions[0].name, "In progress");
-        assert_eq!(transitions[0].to.id, "3");
-        assert_eq!(transitions[0].to.name, "In Progress");
-        assert_eq!(transitions[0].to.category.as_deref(), Some("indeterminate"));
+    fn transition_response_codec_errors_are_classified_at_the_http_boundary() {
+        let malformed = map_transition_response(br#"{"transitions": [}"#).unwrap_err();
+        assert_eq!(malformed.kind(), ErrorKind::Upstream);
+        assert_eq!(malformed.message(), "Jira returned malformed JSON");
 
-        let invalid = map_transition(JiraTransitionResponse {
-            id: String::new(),
-            name: "In progress".to_owned(),
-            to: JiraTransitionStatusResponse {
-                id: "3".to_owned(),
-                name: "In Progress".to_owned(),
-                status_category: None,
-            },
-        })
+        let invalid = map_transition_response(
+            br#"{"transitions":[{"id":"","name":"In progress","to":{"id":"3","name":"In Progress"}}]}"#,
+        )
         .unwrap_err();
         assert_eq!(invalid.kind(), ErrorKind::Upstream);
         assert_eq!(invalid.message(), "Jira returned invalid transition data");
-
-        let invalid_category = map_transition(JiraTransitionResponse {
-            id: "31".to_owned(),
-            name: "In progress".to_owned(),
-            to: JiraTransitionStatusResponse {
-                id: "3".to_owned(),
-                name: "In Progress".to_owned(),
-                status_category: Some(JiraStatusCategoryResponse {
-                    name: Some("bad\ncategory".to_owned()),
-                    key: Some("indeterminate".to_owned()),
-                }),
-            },
-        })
-        .unwrap_err();
-        assert_eq!(invalid_category.kind(), ErrorKind::Upstream);
     }
 
     #[test]
@@ -2787,7 +2618,7 @@ mod tests {
             &Client::new(),
             Url::parse("https://example.atlassian.net/rest/api/3/issue/IX-123/comment").unwrap(),
             &credentials,
-            jira_comment_create_body("<b>hello & goodbye</b>\nsecond"),
+            jira_adapter::comment_create_request_body("<b>hello & goodbye</b>\nsecond"),
         )
         .build()
         .unwrap();
@@ -2814,19 +2645,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({
-                "body": {
-                    "type": "doc",
-                    "version": 1,
-                    "content": [{
-                        "type": "paragraph",
-                        "content": [{
-                            "type": "text",
-                            "text": "<b>hello & goodbye</b>\nsecond"
-                        }]
-                    }]
-                }
-            })
+            jira_adapter::comment_create_request_body("<b>hello & goodbye</b>\nsecond")
         );
         assert!(json.get("visibility").is_none());
         assert!(json.get("properties").is_none());
@@ -2836,7 +2655,7 @@ mod tests {
     #[test]
     fn comment_body_is_trimmed_before_adf_serialization() {
         let body = "  hello\nworld  ".trim();
-        let json = serde_json::to_value(jira_comment_create_body(body)).unwrap();
+        let json = jira_adapter::comment_create_request_body(body);
 
         assert_eq!(
             json["body"]["content"][0]["content"][0]["text"],

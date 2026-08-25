@@ -14,24 +14,29 @@ pub(super) async fn read_json<T: DeserializeOwned>(
     response: Response,
     max_bytes: usize,
 ) -> Result<T, ApplicationError> {
+    let body = read_body(response, max_bytes).await?;
+    serde_json::from_slice(&body)
+        .map_err(|_| ApplicationError::new(ErrorKind::Upstream, "Jira returned malformed JSON"))
+}
+
+pub(super) async fn read_body(
+    response: Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ApplicationError> {
     let status = response.status();
     if !status.is_success() {
         return Err(status_error(status, response.headers()));
     }
-    let body =
-        collect_bounded_body(response, max_bytes)
-            .await
-            .map_err(|failure| match failure {
-                BodyReadFailure::Read => {
-                    ApplicationError::new(ErrorKind::Offline, "could not read Jira response")
-                }
-                BodyReadFailure::TooLarge => ApplicationError::new(
-                    ErrorKind::Upstream,
-                    "Jira response exceeded the size limit",
-                ),
-            })?;
-    serde_json::from_slice(&body)
-        .map_err(|_| ApplicationError::new(ErrorKind::Upstream, "Jira returned malformed JSON"))
+    collect_bounded_body(response, max_bytes)
+        .await
+        .map_err(|failure| match failure {
+            BodyReadFailure::Read => {
+                ApplicationError::new(ErrorKind::Offline, "could not read Jira response")
+            }
+            BodyReadFailure::TooLarge => {
+                ApplicationError::new(ErrorKind::Upstream, "Jira response exceeded the size limit")
+            }
+        })
 }
 
 async fn collect_bounded_body(

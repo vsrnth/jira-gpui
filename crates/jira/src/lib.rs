@@ -1,15 +1,20 @@
-//! Read-only Jira Cloud adapter.
+//! Jira Cloud transport adapter.
 //!
 //! This crate deliberately contains no UI state, persistence, credentials, or HTTP client.
-//! It owns the boundary between Jira's enhanced-search JSON representation and a stable,
-//! UI-independent set of records used by the application layer.
+//! It owns Jira JSON representations and their mapping to stable, UI-independent records used by
+//! the application layer.
 
 mod adf;
+mod codec;
 mod jql;
 mod mapping;
 mod models;
 
 pub use adf::adf_to_plain_text;
+pub use codec::{
+    JiraCodecError, assignee_request_body, comment_create_request_body,
+    decode_created_comment_response, decode_transitions_response, transition_request_body,
+};
 pub use jql::{
     AccountId as JqlAccountId, DEFAULT_JQL_SCOPE, JqlError, MAX_ISSUE_IDS, MAX_JQL_SCOPE_LENGTH,
     assigned_issues_for_account_ids, assigned_issues_jql,

@@ -4,7 +4,7 @@ use jira_application::{ApplicationError, CancellationToken, ErrorKind, PortFutur
 use jira_domain::IssueComment;
 use reqwest::{Response, StatusCode, header};
 
-use super::{IssueMapper, read_response, runtime_bridge::RuntimeBridge};
+use super::{read_response, runtime_bridge::RuntimeBridge};
 
 pub(super) fn submit_write<T, F>(
     runtime: Arc<RuntimeBridge>,
@@ -123,9 +123,5 @@ pub(super) async fn read_created_comment(
 }
 
 pub(super) fn map_created_comment_body(body: &[u8]) -> Result<IssueComment, ApplicationError> {
-    let comment: jira_adapter::JiraComment =
-        serde_json::from_slice(body).map_err(|_| write_unknown_outcome())?;
-    IssueMapper
-        .map_comment(comment)
-        .map_err(|_| write_unknown_outcome())
+    jira_adapter::decode_created_comment_response(body).map_err(|_| write_unknown_outcome())
 }
