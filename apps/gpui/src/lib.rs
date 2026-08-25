@@ -2,8 +2,8 @@
 //!
 //! The binary entry point only performs native window composition. Keeping the
 //! view in this library lets its mapping and render code compile independently
-//! of a platform renderer, which is useful while Linux is the only release
-//! target and macOS remains a later phase.
+//! of a platform renderer, which keeps the application logic independent from
+//! the native window entry points.
 
 mod app_shell;
 mod config;
