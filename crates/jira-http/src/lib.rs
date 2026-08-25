@@ -48,6 +48,86 @@ const MAX_TENANT_INFO_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_ISSUE_ID_PAGES: usize = 128;
 const MAX_CHANGELOG_PAGES: usize = 8;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TokenPageKind {
+    IssueIds,
+    Changelog,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TokenPageProgression {
+    Complete,
+    Continue,
+}
+
+/// Tracks pagination owned by this transport without imposing one endpoint's token policy on
+/// another. Issue-ID search deliberately accepts any continuation token; bulk changelog requires
+/// a non-blank token that differs from the previous token.
+#[derive(Debug)]
+struct TokenPageProgress {
+    kind: TokenPageKind,
+    next_page_token: Option<String>,
+    pages_fetched: usize,
+}
+
+impl TokenPageProgress {
+    fn issue_ids() -> Self {
+        Self {
+            kind: TokenPageKind::IssueIds,
+            next_page_token: None,
+            pages_fetched: 0,
+        }
+    }
+
+    fn changelog() -> Self {
+        Self {
+            kind: TokenPageKind::Changelog,
+            next_page_token: None,
+            pages_fetched: 0,
+        }
+    }
+
+    fn next_page_token(&self) -> Option<String> {
+        self.next_page_token.clone()
+    }
+
+    fn advance(
+        &mut self,
+        next_page_token: Option<String>,
+        is_last: bool,
+    ) -> Result<TokenPageProgression, ApplicationError> {
+        self.pages_fetched += 1;
+        if is_last {
+            return Ok(TokenPageProgression::Complete);
+        }
+        let Some(token) = next_page_token else {
+            return Ok(TokenPageProgression::Complete);
+        };
+        if self.kind == TokenPageKind::Changelog
+            && (token.trim().is_empty() || self.next_page_token.as_deref() == Some(token.as_str()))
+        {
+            return Err(ApplicationError::new(
+                ErrorKind::Upstream,
+                "Jira changelog pagination did not advance",
+            ));
+        }
+        if self.pages_fetched
+            >= match self.kind {
+                TokenPageKind::IssueIds => MAX_ISSUE_ID_PAGES,
+                TokenPageKind::Changelog => MAX_CHANGELOG_PAGES,
+            }
+        {
+            let message = match self.kind {
+                TokenPageKind::IssueIds => "Jira issue pagination exceeded the safety limit",
+                TokenPageKind::Changelog => "Jira changelog pagination exceeded the safety limit",
+            };
+            return Err(ApplicationError::new(ErrorKind::Upstream, message));
+        }
+        self.next_page_token = Some(token);
+        Ok(TokenPageProgression::Continue)
+    }
+}
+
 /// Credentials for Jira Cloud basic authentication (email + API token).
 ///
 /// The identity and token are deliberately not exposed through `Debug`, `Display`, or an error
@@ -583,12 +663,12 @@ impl JiraHttpClient {
         // boundary so this transport never interpolates persisted issue IDs itself.
         let base_body = jira_adapter::enhanced_search_request_for_issue_ids(&issue_ids)
             .map_err(|_| ApplicationError::invalid_input("invalid Jira issue IDs"))?;
-        let mut next_page_token = None;
+        let mut progress = TokenPageProgress::issue_ids();
         let mut issues = Vec::new();
-        for _ in 0..MAX_ISSUE_ID_PAGES {
+        loop {
             cancellation.check()?;
             let mut body = base_body.clone();
-            body.next_page_token = next_page_token.clone();
+            body.next_page_token = progress.next_page_token();
             let response = client
                 .post(url.clone())
                 .basic_auth(&credentials.email, Some(&credentials.token))
@@ -605,18 +685,12 @@ impl JiraHttpClient {
                     ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid issue data")
                 })?;
             issues.extend(mapped.issues);
-            if mapped.is_last {
+            if progress.advance(mapped.next_page_token, mapped.is_last)?
+                == TokenPageProgression::Complete
+            {
                 return Ok(issues);
             }
-            let Some(token) = mapped.next_page_token else {
-                return Ok(issues);
-            };
-            next_page_token = Some(token);
         }
-        Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira issue pagination exceeded the safety limit",
-        ))
     }
 
     async fn issue_changelog_request(
@@ -627,11 +701,12 @@ impl JiraHttpClient {
         cancellation: CancellationToken,
         max_response_bytes: usize,
     ) -> Result<Vec<IssueChangelog>, ApplicationError> {
-        let mut next_page_token = None;
+        let mut progress = TokenPageProgress::changelog();
         let mut changelogs = Vec::new();
-        for _ in 0..MAX_CHANGELOG_PAGES {
+        loop {
             cancellation.check()?;
-            let body = jira_adapter::bulk_changelog_request(&request, next_page_token.clone())
+            let next_page_token = progress.next_page_token();
+            let body = jira_adapter::bulk_changelog_request(&request, next_page_token)
                 .map_err(|_| ApplicationError::invalid_input("invalid Jira changelog request"))?;
             let response = client
                 .post(url.clone())
@@ -648,21 +723,11 @@ impl JiraHttpClient {
                 ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid changelog data")
             })?;
             changelogs.extend(mapped.changelogs);
-            let Some(token) = mapped.next_page_token else {
-                return Ok(changelogs);
-            };
-            if token.trim().is_empty() || next_page_token.as_deref() == Some(token.as_str()) {
-                return Err(ApplicationError::new(
-                    ErrorKind::Upstream,
-                    "Jira changelog pagination did not advance",
-                ));
+            match progress.advance(mapped.next_page_token, false)? {
+                TokenPageProgression::Complete => return Ok(changelogs),
+                TokenPageProgression::Continue => {}
             }
-            next_page_token = Some(token);
         }
-        Err(ApplicationError::new(
-            ErrorKind::Upstream,
-            "Jira changelog pagination exceeded the safety limit",
-        ))
     }
 
     async fn issue_detail_request(
@@ -1641,9 +1706,87 @@ mod tests {
     }
 
     #[test]
-    fn issue_id_pagination_has_a_finite_safety_bound() {
+    fn issue_id_token_progress_preserves_terminal_repeat_blank_and_safety_behavior() {
         assert!(MAX_ISSUE_ID_PAGES >= 2);
         assert!(MAX_ISSUE_ID_PAGES * 100 >= 1_000);
+
+        let mut terminal = TokenPageProgress::issue_ids();
+        assert_eq!(
+            terminal.advance(Some("ignored".to_owned()), true),
+            Ok(TokenPageProgression::Complete)
+        );
+        let mut missing = TokenPageProgress::issue_ids();
+        assert_eq!(
+            missing.advance(None, false),
+            Ok(TokenPageProgression::Complete)
+        );
+
+        let mut repeated = TokenPageProgress::issue_ids();
+        for _ in 0..(MAX_ISSUE_ID_PAGES - 1) {
+            assert_eq!(
+                repeated.advance(Some("same-token".to_owned()), false),
+                Ok(TokenPageProgression::Continue)
+            );
+        }
+        let error = repeated
+            .advance(Some("same-token".to_owned()), false)
+            .expect_err("issue-ID pagination safety cap");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+        assert_eq!(
+            error.message(),
+            "Jira issue pagination exceeded the safety limit"
+        );
+
+        let mut blank = TokenPageProgress::issue_ids();
+        assert_eq!(
+            blank.advance(Some("   ".to_owned()), false),
+            Ok(TokenPageProgression::Continue)
+        );
+    }
+
+    #[test]
+    fn changelog_token_progress_preserves_terminal_repeat_blank_and_safety_behavior() {
+        assert!(MAX_CHANGELOG_PAGES >= 2);
+
+        let mut missing = TokenPageProgress::changelog();
+        assert_eq!(
+            missing.advance(None, false),
+            Ok(TokenPageProgression::Complete)
+        );
+
+        let mut blank = TokenPageProgress::changelog();
+        let error = blank
+            .advance(Some(" \t".to_owned()), false)
+            .expect_err("blank changelog token");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+        assert_eq!(error.message(), "Jira changelog pagination did not advance");
+
+        let mut repeated = TokenPageProgress::changelog();
+        assert_eq!(
+            repeated.advance(Some("page-1".to_owned()), false),
+            Ok(TokenPageProgression::Continue)
+        );
+        let error = repeated
+            .advance(Some("page-1".to_owned()), false)
+            .expect_err("repeated changelog token");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+        assert_eq!(error.message(), "Jira changelog pagination did not advance");
+
+        let mut safety = TokenPageProgress::changelog();
+        for index in 0..(MAX_CHANGELOG_PAGES - 1) {
+            assert_eq!(
+                safety.advance(Some(format!("page-{index}")), false),
+                Ok(TokenPageProgression::Continue)
+            );
+        }
+        let error = safety
+            .advance(Some("last-page".to_owned()), false)
+            .expect_err("changelog pagination safety cap");
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+        assert_eq!(
+            error.message(),
+            "Jira changelog pagination exceeded the safety limit"
+        );
     }
 
     #[test]
