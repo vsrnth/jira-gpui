@@ -45,8 +45,12 @@ milestone is an internal/local build, not a public release. See
   daemon-assigned ID/error category and timestamp, and writes privacy-safe
   fixed-schema start/result entries to bounded `diagnostics.jsonl`; API
   acceptance does not prove GNOME rendered a banner.
-- Credentials are session-only in the current API-token path. Public OAuth and
-  secret-store integration remain release work.
+- Credentials remain in memory for the session unless the user leaves **Remember
+  securely in system keyring** enabled (the default); after successful
+  authentication, the validated URL, email, and scoped API token are stored only
+  in the system keyring. They are never written to SQLite, preferences, or logs.
+  Public OAuth 2.0 3LO and broader credential lifecycle controls remain release
+  work.
 
 ## Remaining release work
 

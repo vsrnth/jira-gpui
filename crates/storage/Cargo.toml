@@ -16,7 +16,7 @@ serde_json.workspace = true
 time.workspace = true
 
 [dev-dependencies]
-futures-lite = "2.6.1"
+futures-lite.workspace = true
 tempfile = "3.26.0"
 
 [lints]

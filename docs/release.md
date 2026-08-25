@@ -66,9 +66,11 @@ the source commit.
 
 ## Validation baseline
 
-The current local milestone has 199 workspace tests and a `0.1.4-local`
-Wayland smoke run. The exact count is a snapshot, not a compatibility promise;
-run the commands below against the current tree:
+Validation is command-based rather than tied to a fixed test-count snapshot.
+Run the commands below against the current tree to establish the workspace test
+total and validation status; test totals and smoke-artifact versions are expected
+to change as the project evolves. The `0.1.4-local` Wayland smoke run noted under
+Known limits is retained as historical milestone evidence:
 
 ```bash
 cargo fmt --all -- --check
@@ -87,8 +89,8 @@ RUST_FONTCONFIG_DLOPEN=1 cargo check -p jira-gpui --lib
 ## Known limits
 
 The artifact build, extraction checks, checksums, required desktop files, and
-library inspection are automated. A local Wayland smoke run has been exercised
-for the current `0.1.4-local` milestone. GNOME, KDE, and wlroots compositor
+library inspection are automated. A local Wayland smoke run was exercised for
+the historical `0.1.4-local` milestone. GNOME, KDE, and wlroots compositor
 coverage; real Jira permission/account combinations; notification-daemon
 delivery; FUSE execution on multiple distributions; public OAuth release; and
 long-running offline/reconnect behavior still need broader release testing.
