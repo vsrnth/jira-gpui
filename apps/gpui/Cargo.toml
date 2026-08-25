@@ -27,6 +27,11 @@ futures-channel.workspace = true
 keyring.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+futures-channel.workspace = true
+keyring = { workspace = true, features = ["apple-native-keyring-store"] }
+zeroize.workspace = true
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 futures-lite = "2.6.1"

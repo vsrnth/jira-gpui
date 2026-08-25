@@ -7,7 +7,7 @@
 
 mod app_shell;
 mod config;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod credential_store;
 mod dashboard;
 mod diagnostics;
