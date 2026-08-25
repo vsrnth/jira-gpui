@@ -2,6 +2,7 @@ name: macOS DMG
 
 on:
   push:
+    branches: [main]
     tags: ['v*.*.*']
 
 permissions:
@@ -19,7 +20,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
     steps:
-      - name: Check out exact tag
+      - name: Check out exact source ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref }}
@@ -34,21 +35,78 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Resolve tag version and native architecture
+      - name: Resolve source version and native architecture
         id: resolve-version
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          case "$REF_NAME" in
-            v*) version=${REF_NAME#v} ;;
+          source_sha=$(git rev-parse --verify HEAD)
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Unexpected checked-out commit: $source_sha" >&2
+            exit 1
+          fi
+          source_short=${source_sha:0:7}
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+          if [[ "$EVENT_NAME" != push ]]; then
+            echo "Unsupported macOS DMG event: $EVENT_NAME" >&2
+            exit 1
+          fi
+
+          case "$REF" in
+            refs/tags/v*.*.*)
+              version=${REF_NAME#v}
+              ;;
+            refs/heads/main)
+              metadata_json=$(cargo metadata --no-deps --format-version 1)
+              package_version=$(
+                python3 -c '
+          import json
+          import sys
+
+          try:
+              metadata = json.load(sys.stdin)
+          except (json.JSONDecodeError, TypeError) as error:
+              raise SystemExit(f"Could not parse cargo metadata: {error}")
+
+          packages = metadata.get("packages") if isinstance(metadata, dict) else None
+          matches = (
+              [
+                  package
+                  for package in packages
+                  if isinstance(package, dict) and package.get("name") == "jira-gpui"
+              ]
+              if isinstance(packages, list)
+              else []
+          )
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"Expected exactly one jira-gpui package, found {len(matches)}"
+              )
+
+          package_version = matches[0].get("version")
+          if not isinstance(package_version, str) or not package_version:
+              raise SystemExit("jira-gpui package has no valid version")
+          print(package_version)
+                ' <<<"$metadata_json"
+              )
+              if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]]; then
+                echo "Unsupported jira-gpui Cargo package version: $package_version" >&2
+                exit 1
+              fi
+              version="${package_version}-${source_short}"
+              ;;
             *)
-              echo 'DMG builds require a v-prefixed version tag' >&2
+              echo "Unsupported macOS DMG event/ref combination: $EVENT_NAME $REF" >&2
               exit 1
               ;;
           esac
+
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]]; then
             echo "Unsupported macOS DMG version: $version" >&2
             exit 1
@@ -69,18 +127,11 @@ jobs:
               ;;
           esac
 
-          source_sha=$(git rev-parse --verify HEAD)
-          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Unexpected checked-out commit: $source_sha" >&2
-            exit 1
-          fi
-
-          printf 'Tag: %s\nVersion: %s\nBundle version: %s\nNative runner architecture: %s\nSource SHA: %s\n' \
-            "$REF_NAME" "$version" "$bundle_version" "$native_arch" "$source_sha"
+          printf 'Ref: %s\nVersion: %s\nBundle version: %s\nNative runner architecture: %s\nSource SHA: %s\n' \
+            "$REF" "$version" "$bundle_version" "$native_arch" "$source_sha"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'bundle_version=%s\n' "$bundle_version" >> "$GITHUB_OUTPUT"
           printf 'native_arch=%s\n' "$native_arch" >> "$GITHUB_OUTPUT"
-          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo registry and git dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
