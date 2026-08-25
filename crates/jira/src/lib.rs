@@ -17,10 +17,7 @@ pub use jql::{
     bulk_changelog_request, enhanced_search_request, enhanced_search_request_for_issue_ids,
     scoped_issues_for_account_ids, scoped_issues_jql,
 };
-pub use mapping::{
-    DomainIssuePage, IssueMapper, MappingError, RemoteIssue, RemoteIssuePage, RemoteNamedEntity,
-    RemoteProject, RemoteUser,
-};
+pub use mapping::{DomainIssuePage, IssueMapper, MappingError};
 pub use models::{
     EnhancedSearchPage, EnhancedSearchRequest, JiraAttachment, JiraBulkChangelogRequest,
     JiraBulkChangelogResponse, JiraChangeHistory, JiraChangeItem, JiraComment, JiraCommentPage,
@@ -104,25 +101,4 @@ mod detail_field_tests {
                 .len()
         );
     }
-}
-
-/// A narrow, read-only request boundary for a Jira Cloud client.
-///
-/// An HTTP implementation can live in a future crate without exposing `reqwest` (or OAuth)
-/// to either the UI or domain/application crates.
-pub trait JiraSearchGateway: Send + Sync {
-    fn enhanced_search(
-        &self,
-        request: EnhancedSearchRequest,
-    ) -> impl Future<Output = Result<EnhancedSearchPage, JiraAdapterError>> + Send;
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum JiraAdapterError {
-    #[error("Jira returned malformed search data: {0}")]
-    InvalidResponse(#[from] MappingError),
-    #[error("the search request is invalid: {0}")]
-    InvalidRequest(#[from] JqlError),
-    #[error("the Jira transport failed: {0}")]
-    Transport(String),
 }

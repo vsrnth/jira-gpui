@@ -1,7 +1,7 @@
 use crate::adf::{adf_comment_text, visible_adf, visible_adf_with_attachments};
 use crate::models::{
     EnhancedSearchPage, JiraAttachment, JiraBulkChangelogResponse, JiraComment, JiraCommentPage,
-    JiraIssue, JiraNamedEntity, JiraProject, JiraUser,
+    JiraIssue, JiraUser,
 };
 use jira_application::{
     IssueChangelog, IssueChangelogHistory, IssueChangelogItem, IssueChangelogPage,
@@ -243,48 +243,6 @@ impl IssueMapper {
             user.active,
         ))
     }
-
-    pub fn map_page(&self, page: EnhancedSearchPage) -> Result<RemoteIssuePage, MappingError> {
-        let issues = page
-            .issues
-            .into_iter()
-            .map(|issue| self.map_issue(issue))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(RemoteIssuePage {
-            issues,
-            next_page_token: page.next_page_token,
-            is_last: page.is_last,
-        })
-    }
-
-    pub fn map_issue(&self, issue: JiraIssue) -> Result<RemoteIssue, MappingError> {
-        non_empty("issue id", &issue.id)?;
-        non_empty("issue key", &issue.key)?;
-        non_empty("issue summary", &issue.fields.summary)?;
-
-        let parent = issue.fields.parent.map(|parent| RemoteIssueReference {
-            id: parent.id,
-            key: parent.key,
-            summary: parent.fields.and_then(|fields| fields.summary),
-        });
-
-        Ok(RemoteIssue {
-            id: issue.id,
-            key: issue.key,
-            summary: issue.fields.summary,
-            issue_type: issue.fields.issuetype.map(map_named_entity),
-            project: issue.fields.project.map(map_project),
-            status: issue.fields.status.map(map_named_entity),
-            priority: issue.fields.priority.map(map_named_entity),
-            assignee: issue.fields.assignee.map(map_user),
-            parent,
-            labels: issue.fields.labels,
-            created: issue.fields.created,
-            updated: issue.fields.updated,
-            due_date: issue.fields.duedate,
-            resolution: issue.fields.resolution.map(map_named_entity),
-        })
-    }
 }
 
 fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, MappingError> {
@@ -331,30 +289,6 @@ fn valid_display_name(user: &JiraUser) -> Option<String> {
         && display_name.len() <= 255
         && display_name != user.account_id.trim())
     .then_some(display_name.to_owned())
-}
-
-fn map_named_entity(entity: JiraNamedEntity) -> RemoteNamedEntity {
-    RemoteNamedEntity {
-        id: entity.id,
-        name: entity.name,
-    }
-}
-
-fn map_project(project: JiraProject) -> RemoteProject {
-    RemoteProject {
-        id: project.id,
-        key: project.key,
-        name: project.name,
-    }
-}
-
-fn map_user(user: JiraUser) -> RemoteUser {
-    let display_name = valid_display_name(&user).unwrap_or_else(|| "Unknown user".to_owned());
-    RemoteUser {
-        account_id: user.account_id,
-        display_name,
-        active: user.active,
-    }
 }
 
 fn domain_account_id(user: &JiraUser) -> Result<AccountId, MappingError> {
@@ -467,64 +401,10 @@ fn non_empty(field: &'static str, value: &str) -> Result<(), MappingError> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteIssuePage {
-    pub issues: Vec<RemoteIssue>,
-    pub next_page_token: Option<String>,
-    pub is_last: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DomainIssuePage {
     pub issues: Vec<Issue>,
     pub next_page_token: Option<String>,
     pub is_last: bool,
-}
-
-/// Jira's read-only issue representation, normalized just enough to isolate Jira JSON field
-/// spelling from the rest of the program.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteIssue {
-    pub id: String,
-    pub key: String,
-    pub summary: String,
-    pub issue_type: Option<RemoteNamedEntity>,
-    pub project: Option<RemoteProject>,
-    pub status: Option<RemoteNamedEntity>,
-    pub priority: Option<RemoteNamedEntity>,
-    pub assignee: Option<RemoteUser>,
-    pub parent: Option<RemoteIssueReference>,
-    pub labels: Vec<String>,
-    pub created: Option<String>,
-    pub updated: Option<String>,
-    pub due_date: Option<String>,
-    pub resolution: Option<RemoteNamedEntity>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteIssueReference {
-    pub id: String,
-    pub key: String,
-    pub summary: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteProject {
-    pub id: String,
-    pub key: String,
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteNamedEntity {
-    pub id: Option<String>,
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteUser {
-    pub account_id: String,
-    pub display_name: String,
-    pub active: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -550,28 +430,6 @@ mod tests {
         parse_adf,
     };
     use jira_domain::{PanelKind, RichBlock, RichInline, RichMark, RichTextDocument};
-
-    #[test]
-    fn maps_an_enhanced_search_page_without_leaking_json_field_names() {
-        let page: EnhancedSearchPage =
-            serde_json::from_str(include_str!("../tests/fixtures/enhanced-search-page.json"))
-                .unwrap();
-        let mapped = IssueMapper.map_page(page).unwrap();
-
-        assert!(mapped.is_last);
-        assert_eq!(mapped.next_page_token, None);
-        assert_eq!(mapped.issues.len(), 1);
-
-        let issue = &mapped.issues[0];
-        assert_eq!(issue.key, "ENG-42");
-        assert_eq!(issue.summary, "Ship the Wayland dashboard");
-        assert_eq!(
-            issue.assignee.as_ref().unwrap().account_id,
-            "557058:abc-123"
-        );
-        assert_eq!(issue.parent.as_ref().unwrap().key, "ENG-1");
-        assert_eq!(issue.project.as_ref().unwrap().name, "Engineering");
-    }
 
     #[test]
     fn maps_bulk_changelog_with_bounded_items_and_rejects_bad_timestamps() {
@@ -681,19 +539,6 @@ mod tests {
             .expect("user should retain stable identity");
 
         assert_eq!(mapped.display_name, "Unknown user");
-    }
-
-    #[test]
-    fn rejects_a_blank_issue_key() {
-        let issue: JiraIssue = serde_json::from_str(
-            r#"{"id":"10001","key":" ","fields":{"summary":"A real summary"}}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            IssueMapper.map_issue(issue),
-            Err(MappingError::MissingRequiredField("issue key"))
-        );
     }
 
     #[test]
