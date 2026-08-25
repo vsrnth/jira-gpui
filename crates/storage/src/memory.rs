@@ -1,3 +1,7 @@
+use crate::event_semantics::{
+    normalize_matching_user_set_ids, same_event_identity, union_matching_user_set_ids,
+};
+
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
@@ -239,20 +243,12 @@ impl IssueCachePort for InMemoryStore {
                     .iter_mut()
                     .find(|current| current.id == event.id)
                 {
-                    for user_set_id in event.matching_user_set_ids {
-                        if !existing.matching_user_set_ids.contains(&user_set_id) {
-                            existing.matching_user_set_ids.push(user_set_id);
-                        }
-                    }
+                    union_matching_user_set_ids(existing, &event);
                 } else if let Some(existing) = inserted_events
                     .iter_mut()
                     .find(|current| current.id == event.id)
                 {
-                    for user_set_id in event.matching_user_set_ids {
-                        if !existing.matching_user_set_ids.contains(&user_set_id) {
-                            existing.matching_user_set_ids.push(user_set_id);
-                        }
-                    }
+                    union_matching_user_set_ids(existing, &event);
                 } else {
                     inserted_events.push(event);
                 }
@@ -534,20 +530,6 @@ impl UserSetPort for InMemoryStore {
 
 fn storage_error(message: impl Into<String>) -> ApplicationError {
     ApplicationError::new(ErrorKind::Storage, message)
-}
-
-fn same_event_identity(left: &UpdateEvent, right: &UpdateEvent) -> bool {
-    left.id == right.id
-        && left.site_id == right.site_id
-        && left.issue_id == right.issue_id
-        && left.issue_key == right.issue_key
-        && left.kind == right.kind
-        && left.occurred_at == right.occurred_at
-}
-
-fn normalize_matching_user_set_ids(event: &mut UpdateEvent) {
-    event.matching_user_set_ids.sort();
-    event.matching_user_set_ids.dedup();
 }
 
 #[cfg(test)]

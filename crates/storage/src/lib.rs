@@ -1,5 +1,6 @@
 //! Local persistence adapters.
 
+mod event_semantics;
 mod memory;
 mod sqlite;
 

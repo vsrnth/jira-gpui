@@ -6,6 +6,9 @@ use std::{
     thread,
 };
 
+use crate::event_semantics::{
+    normalize_matching_user_set_ids, same_event_identity, union_matching_user_set_ids,
+};
 use futures_channel::oneshot;
 use jira_application::{
     ApplicationError, CachedAssignableUsers, CachedIssueTransitions, CommitOutcome, ErrorKind,
@@ -1122,39 +1125,18 @@ fn commit_sync(
         }
         if changed == 1 {
             let mut event = event.clone();
-            normalize_event_associations(&mut event);
+            normalize_matching_user_set_ids(&mut event);
             inserted_events.push(event);
         } else if let Some(inserted) = inserted_events
             .iter_mut()
             .find(|inserted| inserted.id == event.id)
         {
-            merge_event_associations(inserted, event);
+            union_matching_user_set_ids(inserted, event);
         }
     }
     upsert_sync_state(&transaction, &commit.state)?;
     transaction.commit().map_err(sqlite_error)?;
     Ok(CommitOutcome { inserted_events })
-}
-
-fn same_event_identity(left: &UpdateEvent, right: &UpdateEvent) -> bool {
-    left.id == right.id
-        && left.site_id == right.site_id
-        && left.issue_id == right.issue_id
-        && left.issue_key == right.issue_key
-        && left.kind == right.kind
-        && left.occurred_at == right.occurred_at
-}
-
-fn merge_event_associations(target: &mut UpdateEvent, source: &UpdateEvent) {
-    target
-        .matching_user_set_ids
-        .extend(source.matching_user_set_ids.iter().cloned());
-    normalize_event_associations(target);
-}
-
-fn normalize_event_associations(event: &mut UpdateEvent) {
-    event.matching_user_set_ids.sort();
-    event.matching_user_set_ids.dedup();
 }
 
 fn insert_issue(transaction: &Transaction<'_>, issue: &Issue) -> Result<(), ApplicationError> {
