@@ -22,6 +22,7 @@ mod notifications;
 mod polling;
 mod ports;
 mod sync;
+mod sync_activity;
 #[cfg(test)]
 mod test_support;
 mod user_sets;

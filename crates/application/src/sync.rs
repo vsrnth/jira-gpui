@@ -1,18 +1,17 @@
 use std::{collections::HashSet, sync::Arc};
 
-use jira_domain::{Issue, IssueComment, NotificationDelivery, Timestamp, UpdateEvent, UpdateKind};
+use jira_domain::{NotificationDelivery, UpdateEvent, UpdateKind};
 use time::Duration;
 
 use crate::{
     ApplicationError, ApplicationEvent, ApplicationEventSink, CancellationToken, ChangeSet, Clock,
     IssueCachePort, IssueDiffer, IssueFetchRequest, JiraSyncReadPort, NotificationPolicy,
     NotificationPort, NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest,
-    SyncState, enrich_with_changelog, issue_pagination::IssuePagination, validate_jql_scope,
+    SyncState,
+    issue_pagination::IssuePagination,
+    sync_activity::{SyncActivityEnricher, SyncActivityRequest},
+    validate_jql_scope,
 };
-
-const MAX_CHANGELOG_ISSUES_PER_REQUEST: usize = 1_000;
-const MAX_RECENT_ISSUE_COMMENTS: usize = 100;
-const MAX_COMMENT_EXCERPT_BYTES: usize = 280;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SyncConfig {
@@ -190,7 +189,7 @@ impl SyncService {
         };
         let existing_for_enrichment = existing.clone();
         let update_events = if request.mode.emits_updates() {
-            let mut update_events = self.differ.diff(ChangeSet {
+            let update_events = self.differ.diff(ChangeSet {
                 existing,
                 incoming: issues.clone(),
                 site_id: request.site_id.clone(),
@@ -198,56 +197,19 @@ impl SyncService {
                 detected_at: cursor,
                 include_removed_from_view: request.mode.replaces_membership(),
             })?;
-            let changelog_issue_ids = changed_issue_ids(&existing_for_enrichment, &issues);
-            if !changelog_issue_ids.is_empty() {
-                for issue_ids in changelog_issue_ids.chunks(MAX_CHANGELOG_ISSUES_PER_REQUEST) {
-                    cancellation.check()?;
-                    match self
-                        .jira
-                        .fetch_issue_changelog(
-                            &crate::IssueChangelogRequest {
-                                site_id: request.site_id.clone(),
-                                issue_ids: issue_ids.to_vec(),
-                            },
-                            cancellation,
-                        )
-                        .await
-                    {
-                        Ok(page) => {
-                            update_events = enrich_with_changelog(
-                                update_events,
-                                &existing_for_enrichment,
-                                &issues,
-                                &page,
-                                &request.site_id,
-                                &request.user_set_id,
-                            );
-                        }
-                        Err(error) if error.kind() == crate::ErrorKind::Cancelled => {
-                            return Err(error);
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
-                }
-            }
-            let mention_events = self
-                .mention_events(&existing_for_enrichment, &issues, request, cancellation)
-                .await?;
-            let mentioned_issue_ids = mention_events
-                .iter()
-                .map(|event| event.issue_id.clone())
-                .collect::<HashSet<_>>();
-            // A generic snapshot fallback represents the same activity as a
-            // direct mention. Remove only that fallback for the affected issue;
-            // specific field/changelog events remain independently useful.
-            update_events.retain(|event| {
-                !(mentioned_issue_ids.contains(&event.issue_id)
-                    && matches!(event.kind, UpdateKind::IssueUpdated))
-            });
-            update_events.extend(mention_events);
-            update_events
+            SyncActivityEnricher::enrich(
+                self.jira.as_ref(),
+                update_events,
+                SyncActivityRequest {
+                    existing: &existing_for_enrichment,
+                    incoming: &issues,
+                    site_id: &request.site_id,
+                    user_set_id: &request.user_set_id,
+                    notification_assignees: request.notification_assignees.as_deref(),
+                    cancellation,
+                },
+            )
+            .await?
         } else {
             Vec::new()
         };
@@ -364,98 +326,6 @@ impl SyncService {
         stats
     }
 
-    async fn mention_events(
-        &self,
-        existing: &[Issue],
-        incoming: &[Issue],
-        request: &SyncRequest,
-        cancellation: &CancellationToken,
-    ) -> Result<Vec<UpdateEvent>, ApplicationError> {
-        let Some(notification_assignees) = request.notification_assignees.as_deref() else {
-            return Ok(Vec::new());
-        };
-        if notification_assignees.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut events = Vec::new();
-        for (old_issue, new_issue) in changed_issue_pairs(existing, incoming) {
-            cancellation.check()?;
-            let comments = match self
-                .jira
-                .fetch_recent_issue_comments(
-                    &crate::RecentIssueCommentsRequest {
-                        site_id: request.site_id.clone(),
-                        issue_id: new_issue.id.clone(),
-                        limit: MAX_RECENT_ISSUE_COMMENTS,
-                    },
-                    cancellation,
-                )
-                .await
-            {
-                Ok(comments) => comments,
-                Err(error) if error.kind() == crate::ErrorKind::Cancelled => {
-                    return Err(error);
-                }
-                // A gateway that predates the optional read, or a restricted/deleted
-                // issue, must not prevent the rest of the sync from committing.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        crate::ErrorKind::Authorization
-                            | crate::ErrorKind::NotFound
-                            | crate::ErrorKind::Internal
-                    ) =>
-                {
-                    continue;
-                }
-                // Authentication, transport, rate-limit, and upstream failures are
-                // retryable. Do not advance the sync cursor after one of these.
-                Err(error) => return Err(error),
-            };
-
-            let mut seen_comments = HashSet::new();
-            for comment in comments {
-                cancellation.check()?;
-                if !seen_comments.insert(comment.id.clone()) {
-                    continue;
-                }
-                let Some(activity_at) =
-                    comment_activity(&comment, old_issue.updated_at, new_issue.updated_at)
-                else {
-                    continue;
-                };
-                let Some(rich_body) = comment.rich_body.as_ref() else {
-                    continue;
-                };
-                if !notification_assignees
-                    .iter()
-                    .any(|account| rich_body.mentions_account(account))
-                {
-                    continue;
-                }
-                let kind = UpdateKind::CommentAdded {
-                    comment_id: comment.id.clone(),
-                    author: comment
-                        .author
-                        .as_ref()
-                        .map(|author| author.account_id.clone()),
-                    excerpt: comment_excerpt(&comment),
-                };
-                events.push(UpdateEvent::new(
-                    comment_event_id(&request.site_id, new_issue, &comment, activity_at),
-                    request.site_id.clone(),
-                    new_issue.id.clone(),
-                    new_issue.key.clone(),
-                    kind,
-                    activity_at,
-                    vec![request.user_set_id.clone()],
-                ));
-            }
-        }
-        Ok(events)
-    }
-
     fn validate(&self, request: &SyncRequest) -> Result<(), ApplicationError> {
         validate_jql_scope(request.jql_scope.as_deref())
             .map_err(ApplicationError::invalid_input)?;
@@ -489,109 +359,6 @@ impl SyncService {
     }
 }
 
-fn changed_issue_ids(existing: &[Issue], incoming: &[Issue]) -> Vec<jira_domain::IssueId> {
-    let mut ids = changed_issue_pairs(existing, incoming)
-        .into_iter()
-        .map(|(_, issue)| issue.id.clone())
-        .collect::<Vec<_>>();
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-fn changed_issue_pairs<'a>(
-    existing: &'a [Issue],
-    incoming: &'a [Issue],
-) -> Vec<(&'a Issue, &'a Issue)> {
-    let old = existing
-        .iter()
-        .map(|issue| (&issue.id, issue))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut pairs = incoming
-        .iter()
-        .filter_map(|issue| {
-            let previous = old.get(&issue.id).copied()?;
-            (previous.lifecycle == jira_domain::IssueLifecycle::Present
-                && issue.lifecycle == jira_domain::IssueLifecycle::Present
-                && previous.updated_at != issue.updated_at)
-                .then_some((previous, issue))
-        })
-        .collect::<Vec<_>>();
-    pairs.sort_by(|(_, left), (_, right)| left.id.cmp(&right.id));
-    pairs
-}
-
-fn comment_activity(
-    comment: &IssueComment,
-    old_updated_at: Timestamp,
-    new_updated_at: Timestamp,
-) -> Option<Timestamp> {
-    let in_window =
-        |timestamp: Timestamp| timestamp > old_updated_at && timestamp <= new_updated_at;
-    comment
-        .updated_at
-        .filter(|timestamp| in_window(*timestamp))
-        .or_else(|| in_window(comment.created_at).then_some(comment.created_at))
-}
-
-fn comment_excerpt(comment: &IssueComment) -> String {
-    let source = comment
-        .rich_body
-        .as_ref()
-        .map(|body| body.plain_text())
-        .unwrap_or_else(|| comment.body.clone());
-    let mut excerpt = String::with_capacity(source.len().min(MAX_COMMENT_EXCERPT_BYTES));
-    for character in source.chars() {
-        if character.is_control() {
-            if (character == '\n' || character == '\r' || character == '\t')
-                && !excerpt.ends_with(' ')
-            {
-                excerpt.push(' ');
-            }
-        } else {
-            excerpt.push(character);
-        }
-        if excerpt.len() >= MAX_COMMENT_EXCERPT_BYTES {
-            break;
-        }
-    }
-    excerpt.truncate(excerpt.floor_char_boundary(MAX_COMMENT_EXCERPT_BYTES));
-    excerpt.trim().to_owned()
-}
-
-fn comment_event_id(
-    site_id: &jira_domain::JiraSiteId,
-    issue: &Issue,
-    comment: &IssueComment,
-    activity_at: Timestamp,
-) -> jira_domain::EventId {
-    let activity = activity_at.unix_timestamp_nanos().to_string();
-    let parts = [
-        site_id.as_str(),
-        issue.id.as_str(),
-        comment.id.as_str(),
-        &activity,
-    ];
-    let left = stable_digest(&parts, 0xcbf29ce484222325);
-    let right = stable_digest(&parts, 0x84222325cbf29ce4);
-    jira_domain::EventId::new(format!("v1-comment-{left:016x}{right:016x}"))
-        .expect("event ID length")
-}
-
-fn stable_digest(parts: &[&str], mut hash: u64) -> u64 {
-    for part in parts {
-        for byte in (part.len() as u64)
-            .to_le_bytes()
-            .into_iter()
-            .chain(part.as_bytes().iter().copied())
-        {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    hash
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -600,7 +367,7 @@ mod tests {
     };
 
     use jira_domain::{
-        AccountId, EventId, IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery,
+        AccountId, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery,
         Priority, Project, RichBlock, RichInline, RichTextDocument, Status, UpdateEvent,
         UpdateKind, UserSetId,
     };
@@ -1244,7 +1011,10 @@ mod tests {
         ));
         let requests = jira.comment_requests.lock().expect("comment requests lock");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].limit, MAX_RECENT_ISSUE_COMMENTS);
+        assert_eq!(
+            requests[0].limit,
+            crate::sync_activity::MAX_RECENT_ISSUE_COMMENTS
+        );
     }
 
     #[test]
@@ -1528,8 +1298,10 @@ mod tests {
             Vec::new(),
         )
         .expect("comment");
-        let first = comment_event_id(&site_id, &issue, &comment, comment.created_at);
-        let retry = comment_event_id(&site_id, &issue, &comment, comment.created_at);
+        let first =
+            crate::sync_activity::comment_event_id(&site_id, &issue, &comment, comment.created_at);
+        let retry =
+            crate::sync_activity::comment_event_id(&site_id, &issue, &comment, comment.created_at);
         assert_eq!(first, retry);
     }
 
