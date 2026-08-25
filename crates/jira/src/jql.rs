@@ -112,6 +112,42 @@ fn validated_scope(scope: Option<&str>) -> Result<String, JqlError> {
     Ok(scope.to_owned())
 }
 
+fn validated_issue_ids(issue_ids: &[IssueId]) -> Result<Vec<String>, JqlError> {
+    if issue_ids.is_empty() {
+        return Err(JqlError::NoIssueIds);
+    }
+    if issue_ids.len() > MAX_ISSUE_IDS {
+        return Err(JqlError::TooManyIssueIds {
+            maximum: MAX_ISSUE_IDS,
+            received: issue_ids.len(),
+        });
+    }
+
+    let mut issue_ids = issue_ids
+        .iter()
+        .map(|issue_id| {
+            let value = issue_id.as_str();
+            if value.trim().is_empty() {
+                return Err(JqlError::EmptyIssueId);
+            }
+            if value.len() > 255 {
+                return Err(JqlError::IssueIdTooLong);
+            }
+            if value
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+            {
+                return Err(JqlError::UnsafeIssueId);
+            }
+            Ok(value.to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    issue_ids.sort();
+    issue_ids.dedup();
+    Ok(issue_ids)
+}
+
 /// Builds the default-scope assignee-only JQL retained for callers that do not need watchers.
 pub fn assigned_issues_jql(
     account_ids: impl IntoIterator<Item = AccountId>,
@@ -165,38 +201,7 @@ pub fn assigned_or_watched_issues_for_account_ids(
 pub fn enhanced_search_request_for_issue_ids(
     issue_ids: &[IssueId],
 ) -> Result<crate::EnhancedSearchRequest, JqlError> {
-    if issue_ids.is_empty() {
-        return Err(JqlError::NoIssueIds);
-    }
-    if issue_ids.len() > MAX_ISSUE_IDS {
-        return Err(JqlError::TooManyIssueIds {
-            maximum: MAX_ISSUE_IDS,
-            received: issue_ids.len(),
-        });
-    }
-
-    let mut issue_ids = issue_ids
-        .iter()
-        .map(|issue_id| {
-            let value = issue_id.as_str();
-            if value.trim().is_empty() {
-                return Err(JqlError::EmptyIssueId);
-            }
-            if value.len() > 255 {
-                return Err(JqlError::IssueIdTooLong);
-            }
-            if value
-                .chars()
-                .any(|character| character.is_control() || matches!(character, '"' | '\\'))
-            {
-                return Err(JqlError::UnsafeIssueId);
-            }
-            Ok(value.to_owned())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    issue_ids.sort();
-    issue_ids.dedup();
+    let issue_ids = validated_issue_ids(issue_ids)?;
 
     let literals = issue_ids
         .into_iter()
@@ -222,37 +227,7 @@ pub fn bulk_changelog_request(
     request: &jira_application::IssueChangelogRequest,
     next_page_token: Option<String>,
 ) -> Result<crate::JiraBulkChangelogRequest, JqlError> {
-    if request.issue_ids.is_empty() {
-        return Err(JqlError::NoIssueIds);
-    }
-    if request.issue_ids.len() > MAX_ISSUE_IDS {
-        return Err(JqlError::TooManyIssueIds {
-            maximum: MAX_ISSUE_IDS,
-            received: request.issue_ids.len(),
-        });
-    }
-    let mut issue_ids = request
-        .issue_ids
-        .iter()
-        .map(|issue_id| {
-            let value = issue_id.as_str();
-            if value.trim().is_empty() {
-                return Err(JqlError::EmptyIssueId);
-            }
-            if value.len() > 255 {
-                return Err(JqlError::IssueIdTooLong);
-            }
-            if value
-                .chars()
-                .any(|character| character.is_control() || matches!(character, '"' | '\\'))
-            {
-                return Err(JqlError::UnsafeIssueId);
-            }
-            Ok(value.to_owned())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    issue_ids.sort();
-    issue_ids.dedup();
+    let issue_ids = validated_issue_ids(&request.issue_ids)?;
     Ok(crate::JiraBulkChangelogRequest {
         issue_ids_or_keys: issue_ids,
         max_results: 1_000,
@@ -519,6 +494,79 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn changelog_request(issue_ids: &[IssueId]) -> jira_application::IssueChangelogRequest {
+        jira_application::IssueChangelogRequest {
+            site_id: jira_domain::JiraSiteId::new("site").expect("valid test site"),
+            issue_ids: issue_ids.to_vec(),
+        }
+    }
+
+    fn assert_both_bounded_builders_reject(issue_ids: &[IssueId], expected: JqlError) {
+        assert_eq!(
+            enhanced_search_request_for_issue_ids(issue_ids).unwrap_err(),
+            expected.clone()
+        );
+        assert_eq!(
+            bulk_changelog_request(&changelog_request(issue_ids), None).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rejects_empty_issue_ids_through_both_bounded_builders() {
+        assert_both_bounded_builders_reject(&[], JqlError::NoIssueIds);
+    }
+
+    #[test]
+    fn rejects_trimmed_blank_issue_ids_through_both_bounded_builders() {
+        let blank: IssueId = serde_json::from_str(r#"" \t ""#).expect("valid JSON issue ID");
+        assert_both_bounded_builders_reject(&[blank], JqlError::EmptyIssueId);
+    }
+
+    #[test]
+    fn rejects_256_byte_issue_ids_through_both_bounded_builders() {
+        let oversized: IssueId = serde_json::from_str(&format!("\"{}\"", "x".repeat(256))).unwrap();
+        assert_both_bounded_builders_reject(&[oversized], JqlError::IssueIdTooLong);
+    }
+
+    #[test]
+    fn rejects_unsafe_issue_ids_through_both_bounded_builders() {
+        for suffix in ["\n", "\"", "\\"] {
+            let unsafe_id = IssueId::new(format!("100{suffix}")).unwrap();
+            assert_both_bounded_builders_reject(&[unsafe_id], JqlError::UnsafeIssueId);
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_original_cardinality_even_when_ids_are_duplicates() {
+        let ids = vec![IssueId::new("1001").unwrap(); MAX_ISSUE_IDS + 1];
+        assert_both_bounded_builders_reject(
+            &ids,
+            JqlError::TooManyIssueIds {
+                maximum: MAX_ISSUE_IDS,
+                received: MAX_ISSUE_IDS + 1,
+            },
+        );
+    }
+
+    #[test]
+    fn normalizes_unsorted_duplicates_identically_for_both_bounded_builders() {
+        let ids = vec![
+            IssueId::new("1002").unwrap(),
+            IssueId::new("1001").unwrap(),
+            IssueId::new("1002").unwrap(),
+        ];
+
+        let enhanced = enhanced_search_request_for_issue_ids(&ids).unwrap();
+        let bulk = bulk_changelog_request(&changelog_request(&ids), None).unwrap();
+
+        assert_eq!(
+            enhanced.jql,
+            "id IN (\"1001\", \"1002\") ORDER BY updated DESC"
+        );
+        assert_eq!(bulk.issue_ids_or_keys, vec!["1001", "1002"]);
     }
 
     #[test]
