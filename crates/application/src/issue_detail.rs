@@ -1,9 +1,11 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use jira_domain::IssueDetail;
 
 use crate::{
-    ApplicationError, CancellationToken, IssueCommentsPageRequest, IssueDetailRequest, JiraReadPort,
+    ApplicationError, CancellationToken, IssueCommentsPageRequest, IssueDetailRequest,
+    JiraReadPort,
+    comment_pagination::{CommentPageDecision, CommentPagination},
 };
 
 const MAX_PAGE_SIZE: usize = 1_000;
@@ -53,13 +55,13 @@ impl IssueDetailService {
         }
         let canonical_issue_id = core.issue.id.clone();
 
-        let mut comments = Vec::new();
-        let mut start_at = 0;
-        let mut page_cursor = None;
-        let mut seen_cursors = HashSet::new();
-        let mut completed = false;
+        let mut pagination = CommentPagination::new(
+            self.config.comment_page_size,
+            self.config.max_comment_pages,
+            self.config.max_comments,
+        );
 
-        for _ in 0..self.config.max_comment_pages {
+        let comments = loop {
             cancellation.check()?;
             let page = self
                 .jira
@@ -67,8 +69,8 @@ impl IssueDetailService {
                     &IssueCommentsPageRequest {
                         site_id: request.site_id.clone(),
                         issue_id: canonical_issue_id.clone(),
-                        start_at,
-                        page_cursor: page_cursor.clone(),
+                        start_at: pagination.start_at(),
+                        page_cursor: pagination.page_cursor(),
                         page_size: self.config.comment_page_size,
                     },
                     cancellation,
@@ -76,96 +78,10 @@ impl IssueDetailService {
                 .await?;
             cancellation.check()?;
 
-            let crate::IssueCommentsPage {
-                comments: page_comments,
-                start_at: page_start_at,
-                next_start_at,
-                next_cursor,
-                total,
-            } = page;
-            let page_comment_count = page_comments.len();
-
-            if page_start_at != start_at {
-                return Err(upstream("Jira returned an invalid comments startAt"));
+            if pagination.accept_page(page)? == CommentPageDecision::Complete {
+                break pagination.finish();
             }
-            if page_comment_count > self.config.comment_page_size {
-                return Err(upstream("Jira returned more comments than requested"));
-            }
-            if let Some(total) = total {
-                if total > self.config.max_comments {
-                    return Err(upstream(
-                        "Jira comments exceeded the configured safety limit",
-                    ));
-                }
-                if comments.len().saturating_add(page_comment_count) > total {
-                    return Err(upstream(
-                        "Jira returned more comments than its reported total",
-                    ));
-                }
-            }
-            comments.extend(page_comments);
-            if comments.len() > self.config.max_comments {
-                return Err(upstream(
-                    "Jira comments exceeded the configured safety limit",
-                ));
-            }
-            if let Some(total) = total
-                && comments.len() == total
-            {
-                completed = true;
-                break;
-            }
-
-            if next_cursor.is_some() && next_start_at.is_some() {
-                return Err(upstream("Jira returned ambiguous comments pagination"));
-            }
-            if let Some(next_cursor) = next_cursor {
-                let value = next_cursor.0;
-                if page_cursor.as_ref().is_some_and(|cursor| cursor.0 == value)
-                    || !seen_cursors.insert(value.clone())
-                {
-                    return Err(upstream("Jira returned a comments cursor cycle"));
-                }
-                page_cursor = Some(crate::PageCursor(value));
-                continue;
-            }
-            page_cursor = None;
-
-            if let Some(next_start_at) = next_start_at {
-                if next_start_at <= start_at {
-                    return Err(upstream("Jira returned invalid comments startAt progress"));
-                }
-                if total.is_some_and(|total| next_start_at > total) {
-                    return Err(upstream("Jira returned comments startAt beyond total"));
-                }
-                start_at = next_start_at;
-                continue;
-            }
-
-            if total.is_some() {
-                return Err(upstream(
-                    "Jira comments pagination stopped before its total",
-                ));
-            }
-            if page_comment_count == self.config.comment_page_size {
-                let next_start_at = start_at
-                    .checked_add(page_comment_count)
-                    .ok_or_else(|| upstream("Jira returned an invalid comments startAt"))?;
-                if next_start_at <= start_at {
-                    return Err(upstream("Jira returned invalid comments startAt progress"));
-                }
-                start_at = next_start_at;
-                continue;
-            }
-            completed = true;
-            break;
-        }
-
-        if !completed {
-            return Err(upstream(
-                "Jira comment pagination exceeded the safety limit",
-            ));
-        }
+        };
 
         IssueDetail::new(core, comments)
             .map_err(|_| ApplicationError::invalid_input("invalid Jira issue detail payload"))

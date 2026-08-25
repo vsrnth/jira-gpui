@@ -7,6 +7,7 @@
 mod attachment_diagnostics;
 mod cancellation;
 mod comment;
+mod comment_pagination;
 mod error;
 mod feed;
 mod issue_detail;
