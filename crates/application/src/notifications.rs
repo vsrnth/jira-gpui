@@ -31,13 +31,13 @@ mod tests {
 
     fn event(kind: UpdateKind) -> UpdateEvent {
         UpdateEvent::new(
-            EventId::new("event-1").unwrap(),
-            JiraSiteId::new("site").unwrap(),
-            IssueId::new("issue-1").unwrap(),
-            IssueKey::new("PROJ-1").unwrap(),
+            EventId::new("event-1").expect("test event ID should be valid"),
+            JiraSiteId::new("site").expect("test Jira site ID should be valid"),
+            IssueId::new("issue-1").expect("test issue ID should be valid"),
+            IssueKey::new("PROJ-1").expect("test issue key should be valid"),
             kind,
             time::OffsetDateTime::now_utc(),
-            vec![UserSetId::new("set-1").unwrap()],
+            vec![UserSetId::new("set-1").expect("test user set ID should be valid")],
         )
     }
 
@@ -65,7 +65,7 @@ mod tests {
             },
             UpdateKind::CommentAdded {
                 comment_id: "comment-1".into(),
-                author: Some(AccountId::new("account-1").unwrap()),
+                author: Some(AccountId::new("account-1").expect("test account ID should be valid")),
                 excerpt: "hello".into(),
             },
         ] {
