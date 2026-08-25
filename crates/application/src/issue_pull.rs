@@ -140,16 +140,16 @@ impl IssuePullService {
 mod tests {
     use std::{
         collections::VecDeque,
-        future::Future,
         sync::{Arc, Mutex},
-        task::{Context, Poll, Wake, Waker},
     };
 
     use jira_domain::{IssueId, IssueKey, IssueType, Priority, Project, Status, User};
     use time::macros::datetime;
 
     use super::*;
-    use crate::{ErrorKind, IssuePage, PageCursor, PortFuture, UserSearchRequest};
+    use crate::{
+        ErrorKind, IssuePage, PageCursor, PortFuture, UserSearchRequest, test_support::block_on,
+    };
 
     struct FakeJira {
         pages: Mutex<VecDeque<Result<IssuePage, ApplicationError>>>,
@@ -288,23 +288,6 @@ mod tests {
             next_cursor: next_cursor.map(|cursor| PageCursor(cursor.into())),
             server_time,
         })
-    }
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        struct Noop;
-        impl Wake for Noop {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(Noop));
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
     }
 
     #[test]

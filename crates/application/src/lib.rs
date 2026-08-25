@@ -22,6 +22,8 @@ mod notifications;
 mod polling;
 mod ports;
 mod sync;
+#[cfg(test)]
+mod test_support;
 mod user_sets;
 
 pub use attachment_diagnostics::{

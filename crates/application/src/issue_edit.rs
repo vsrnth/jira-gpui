@@ -360,17 +360,15 @@ fn upstream(message: &'static str) -> ApplicationError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future::Future,
-        sync::{Arc, Mutex},
-        task::{Context, Poll, Wake, Waker},
-    };
+    use std::sync::{Arc, Mutex};
 
     use jira_domain::{AccountId, IssueId, IssueKey, JiraSiteId, Status};
     use time::macros::datetime;
 
     use super::*;
-    use crate::{CachedAssignableUsers, CachedIssueTransitions, IssueLocator};
+    use crate::{
+        CachedAssignableUsers, CachedIssueTransitions, IssueLocator, test_support::block_on,
+    };
 
     #[derive(Clone)]
     struct FakeEditor {
@@ -875,21 +873,5 @@ mod tests {
         let calls = editor.count();
         assert_eq!(calls.assignments, 1);
         assert_eq!(calls.transitions, 1);
-    }
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        struct Noop;
-        impl Wake for Noop {
-            fn wake(self: Arc<Self>) {}
-        }
-        let waker = Waker::from(Arc::new(Noop));
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
     }
 }

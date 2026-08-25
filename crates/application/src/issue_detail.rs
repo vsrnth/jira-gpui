@@ -127,9 +127,7 @@ fn locator_matches(locator: &crate::IssueLocator, core: &jira_domain::IssueDetai
 mod tests {
     use std::{
         collections::VecDeque,
-        future::Future,
         sync::{Arc, Mutex},
-        task::{Context, Poll, Wake, Waker},
     };
 
     use jira_domain::{
@@ -142,7 +140,7 @@ mod tests {
     use crate::{
         ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
         IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage,
-        JiraReadPort, PortFuture, UserSearchRequest,
+        JiraReadPort, PortFuture, UserSearchRequest, test_support::block_on,
     };
 
     #[derive(Default)]
@@ -358,23 +356,6 @@ mod tests {
             Vec::new(),
         )
         .expect("comment")
-    }
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        struct Noop;
-        impl Wake for Noop {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(Noop));
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
     }
 
     #[test]

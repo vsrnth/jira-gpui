@@ -574,9 +574,7 @@ fn stable_digest(parts: &[&str], mut hash: u64) -> u64 {
 mod tests {
     use std::{
         collections::VecDeque,
-        future::Future,
         sync::{Arc, Mutex},
-        task::{Context, Poll, Wake, Waker},
     };
 
     use jira_domain::{
@@ -589,7 +587,7 @@ mod tests {
     use super::*;
     use crate::{
         CommitOutcome, DefaultDesktopNotificationPolicy, ErrorKind, IssueListQuery, IssuePage,
-        PageCursor, PortFuture, SyncCommit, UserSearchRequest,
+        PageCursor, PortFuture, SyncCommit, UserSearchRequest, test_support::block_on,
     };
 
     #[derive(Default)]
@@ -1683,23 +1681,5 @@ mod tests {
             None,
             "notification scope must not narrow the project-wide Jira fetch"
         );
-    }
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(output) => return output,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
     }
 }
