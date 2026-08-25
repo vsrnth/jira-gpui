@@ -18,9 +18,10 @@ use jira_application::{
     DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind,
     IssueChangelog, IssueChangelogRequest, IssueCommentsPage, IssueCommentsPageRequest,
     IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, IssueTransition,
-    IssueTransitionsRequest, JiraCommentWritePort, JiraIssueEditPort, JiraReadPort,
-    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture, RecentIssueCommentsRequest,
-    TransitionIssueRequest, UserSearchRequest,
+    IssueTransitionsRequest, JiraAttachmentReadPort, JiraCommentWritePort, JiraIssueActivityPort,
+    JiraIssueDetailReadPort, JiraIssueEditPort, JiraIssueSearchPort, JiraReadPort,
+    JiraSyncReadPort, JiraUserReadPort, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture,
+    RecentIssueCommentsRequest, TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, Status, User};
 use reqwest::{Client, header};
@@ -885,7 +886,7 @@ impl JiraHttpClient {
     }
 }
 
-impl JiraReadPort for JiraHttpClient {
+impl JiraIssueActivityPort for JiraHttpClient {
     fn fetch_issue_changelog<'a>(
         &'a self,
         request: &'a IssueChangelogRequest,
@@ -924,6 +925,33 @@ impl JiraReadPort for JiraHttpClient {
         })
     }
 
+    fn fetch_recent_issue_comments<'a>(
+        &'a self,
+        request: &'a RecentIssueCommentsRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueComment>> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let locator = IssueLocator::Id(request.issue_id.clone());
+        let url = match self.issue_endpoint(&locator, Some("comment")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let request = request.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::recent_issue_comments_request(client, url, credentials, request, max).await
+        })
+    }
+}
+
+impl JiraAttachmentReadPort for JiraHttpClient {
     fn fetch_attachment_image<'a>(
         &'a self,
         request: &'a AttachmentImageRequest,
@@ -1042,7 +1070,9 @@ impl JiraReadPort for JiraHttpClient {
             .await
         })
     }
+}
 
+impl JiraIssueDetailReadPort for JiraHttpClient {
     fn fetch_issue_detail<'a>(
         &'a self,
         request: &'a IssueDetailRequest,
@@ -1091,32 +1121,9 @@ impl JiraReadPort for JiraHttpClient {
             Self::issue_comments_page_request(client, url, credentials, request, max).await
         })
     }
+}
 
-    fn fetch_recent_issue_comments<'a>(
-        &'a self,
-        request: &'a RecentIssueCommentsRequest,
-        cancellation: &'a CancellationToken,
-    ) -> PortFuture<'a, Vec<IssueComment>> {
-        if let Err(error) = cancellation.check() {
-            return Box::pin(std::future::ready(Err(error)));
-        }
-        if let Err(error) = self.validate_site(&request.site_id) {
-            return Box::pin(std::future::ready(Err(error)));
-        }
-        let locator = IssueLocator::Id(request.issue_id.clone());
-        let url = match self.issue_endpoint(&locator, Some("comment")) {
-            Ok(url) => url,
-            Err(error) => return Box::pin(std::future::ready(Err(error))),
-        };
-        let client = self.client.clone();
-        let credentials = self.credentials.clone();
-        let request = request.clone();
-        let max = self.config.max_response_bytes;
-        self.submit(cancellation, async move {
-            Self::recent_issue_comments_request(client, url, credentials, request, max).await
-        })
-    }
-
+impl JiraUserReadPort for JiraHttpClient {
     fn fetch_current_user<'a>(
         &'a self,
         site_id: &'a JiraSiteId,
@@ -1164,7 +1171,9 @@ impl JiraReadPort for JiraHttpClient {
             Self::search_users_request(client, url, credentials, request, max).await
         })
     }
+}
 
+impl JiraIssueSearchPort for JiraHttpClient {
     fn fetch_issue_page<'a>(
         &'a self,
         request: &'a IssueFetchRequest,
@@ -1228,6 +1237,9 @@ impl JiraReadPort for JiraHttpClient {
         })
     }
 }
+
+impl JiraSyncReadPort for JiraHttpClient {}
+impl JiraReadPort for JiraHttpClient {}
 
 impl JiraCommentWritePort for JiraHttpClient {
     fn create_comment<'a>(

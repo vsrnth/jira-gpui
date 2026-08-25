@@ -3,18 +3,18 @@ use std::sync::Arc;
 use jira_domain::{Issue, IssueId, JiraSiteId, User};
 
 use crate::{
-    ApplicationError, CancellationToken, IssueCachePort, IssueListQuery, JiraReadPort,
+    ApplicationError, CancellationToken, IssueCachePort, IssueListQuery, JiraUserReadPort,
     UserSearchRequest,
 };
 
 #[derive(Clone)]
 pub struct IssueCatalogService {
-    jira: Arc<dyn JiraReadPort>,
+    jira: Arc<dyn JiraUserReadPort>,
     cache: Arc<dyn IssueCachePort>,
 }
 
 impl IssueCatalogService {
-    pub fn new(jira: Arc<dyn JiraReadPort>, cache: Arc<dyn IssueCachePort>) -> Self {
+    pub fn new(jira: Arc<dyn JiraUserReadPort>, cache: Arc<dyn IssueCachePort>) -> Self {
         Self { jira, cache }
     }
 

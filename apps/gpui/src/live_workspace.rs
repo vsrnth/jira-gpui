@@ -967,8 +967,9 @@ mod tests {
     use jira_application::{
         ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
         IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage,
-        IssueTransition, IssueTransitionsRequest, PortFuture, TransitionIssueRequest,
-        UserSearchRequest,
+        IssueTransition, IssueTransitionsRequest, JiraAttachmentReadPort, JiraIssueActivityPort,
+        JiraIssueDetailReadPort, JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort,
+        JiraUserReadPort, PortFuture, TransitionIssueRequest, UserSearchRequest,
     };
     use jira_domain::{
         AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetailCore, IssueId, IssueKey,
@@ -1032,7 +1033,7 @@ mod tests {
         }
     }
 
-    impl JiraReadPort for FakeJira {
+    impl JiraIssueDetailReadPort for FakeJira {
         fn fetch_issue_detail<'a>(
             &'a self,
             _request: &'a IssueDetailRequest,
@@ -1060,7 +1061,9 @@ mod tests {
                 .ok_or_else(|| ApplicationError::new(ErrorKind::Upstream, "missing comments"));
             Box::pin(async move { page })
         }
+    }
 
+    impl JiraUserReadPort for FakeJira {
         fn fetch_current_user<'a>(
             &'a self,
             _site_id: &'a JiraSiteId,
@@ -1081,7 +1084,9 @@ mod tests {
         ) -> PortFuture<'a, Vec<User>> {
             Box::pin(async { Ok(Vec::new()) })
         }
+    }
 
+    impl JiraIssueSearchPort for FakeJira {
         fn fetch_issue_page<'a>(
             &'a self,
             request: &'a IssueFetchRequest,
@@ -1118,6 +1123,11 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
     }
+
+    impl JiraIssueActivityPort for FakeJira {}
+    impl JiraAttachmentReadPort for FakeJira {}
+    impl JiraSyncReadPort for FakeJira {}
+    impl JiraReadPort for FakeJira {}
 
     #[derive(Clone)]
     struct FakeIssueEditor {

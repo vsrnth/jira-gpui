@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     ApplicationError, AttachmentBodyClass, AttachmentContent, AttachmentDownloadRequest,
     AttachmentImage, AttachmentImageRequest, AttachmentMimeClass, AttachmentReadAttempt,
-    AttachmentReadDiagnostic, CancellationToken, ErrorKind, JiraReadPort,
+    AttachmentReadDiagnostic, CancellationToken, ErrorKind, JiraAttachmentReadPort,
 };
 
 pub const DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -33,12 +33,12 @@ impl Default for IssueMediaConfig {
 /// Read-only application orchestration for one Jira issue image attachment.
 #[derive(Clone)]
 pub struct IssueMediaService {
-    jira: Arc<dyn JiraReadPort>,
+    jira: Arc<dyn JiraAttachmentReadPort>,
     config: IssueMediaConfig,
 }
 
 impl IssueMediaService {
-    pub fn new(jira: Arc<dyn JiraReadPort>, config: IssueMediaConfig) -> Self {
+    pub fn new(jira: Arc<dyn JiraAttachmentReadPort>, config: IssueMediaConfig) -> Self {
         Self { jira, config }
     }
 
@@ -324,13 +324,10 @@ fn classify_mime(value: &str) -> AttachmentMimeClass {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use jira_domain::{IssueId, JiraSiteId, User};
+    use jira_domain::{IssueId, JiraSiteId};
 
     use super::*;
-    use crate::{
-        AttachmentReadAttempt, AttachmentReadStage, IssueFetchRequest, IssuePage, PortFuture,
-        UserSearchRequest, test_support::block_on,
-    };
+    use crate::{AttachmentReadAttempt, AttachmentReadStage, PortFuture, test_support::block_on};
 
     struct FakeJira {
         image: Mutex<Option<Result<AttachmentImage, ApplicationError>>>,
@@ -341,7 +338,7 @@ mod tests {
         cancellation: Mutex<Option<CancellationToken>>,
     }
 
-    impl JiraReadPort for FakeJira {
+    impl JiraAttachmentReadPort for FakeJira {
         fn fetch_attachment_image<'a>(
             &'a self,
             request: &'a AttachmentImageRequest,
@@ -372,45 +369,6 @@ mod tests {
                 .take()
                 .expect("download");
             Box::pin(async move { result })
-        }
-
-        fn fetch_current_user<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, User> {
-            Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "not used")) })
-        }
-
-        fn search_users<'a>(
-            &'a self,
-            _request: &'a UserSearchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<User>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn fetch_issue_page<'a>(
-            &'a self,
-            _request: &'a IssueFetchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, IssuePage> {
-            Box::pin(async {
-                Ok(IssuePage {
-                    issues: Vec::new(),
-                    next_cursor: None,
-                    server_time: None,
-                })
-            })
-        }
-
-        fn fetch_issues_by_id<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _issue_ids: &'a [IssueId],
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<jira_domain::Issue>> {
-            Box::pin(async { Ok(Vec::new()) })
         }
     }
 
@@ -535,7 +493,7 @@ mod tests {
             cancellation: Mutex::new(None),
         });
         let fallback_service = IssueMediaService::new(
-            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            Arc::clone(&fake) as Arc<dyn JiraAttachmentReadPort>,
             IssueMediaConfig {
                 max_bytes: 4,
                 ..IssueMediaConfig::default()
@@ -586,7 +544,7 @@ mod tests {
             cancellation: Mutex::new(None),
         });
         let fallback_service = IssueMediaService::new(
-            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            Arc::clone(&fake) as Arc<dyn JiraAttachmentReadPort>,
             IssueMediaConfig::default(),
         );
 
@@ -633,7 +591,7 @@ mod tests {
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
-            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            Arc::clone(&fake) as Arc<dyn JiraAttachmentReadPort>,
             IssueMediaConfig::default(),
         );
 
@@ -664,7 +622,7 @@ mod tests {
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
-            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            Arc::clone(&fake) as Arc<dyn JiraAttachmentReadPort>,
             IssueMediaConfig::default(),
         );
 
@@ -696,7 +654,7 @@ mod tests {
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
-            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            Arc::clone(&fake) as Arc<dyn JiraAttachmentReadPort>,
             IssueMediaConfig {
                 max_bytes: 3,
                 width: 640,
@@ -810,7 +768,7 @@ mod tests {
             cancellation: Mutex::new(None),
         });
         let service = IssueMediaService::new(
-            Arc::clone(&fake) as Arc<dyn JiraReadPort>,
+            Arc::clone(&fake) as Arc<dyn JiraAttachmentReadPort>,
             IssueMediaConfig::default(),
         );
         fake.cancellation

@@ -18,8 +18,24 @@ use crate::{
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationError>> + Send + 'a>>;
 
-/// Read-only Jira gateway. Its implementation may own any async runtime it needs.
-pub trait JiraReadPort: Send + Sync {
+/// Read-only Jira issue search capability. Its implementation may own any async runtime it needs.
+pub trait JiraIssueSearchPort: Send + Sync {
+    fn fetch_issue_page<'a>(
+        &'a self,
+        request: &'a IssueFetchRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, IssuePage>;
+
+    fn fetch_issues_by_id<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_ids: &'a [IssueId],
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<Issue>>;
+}
+
+/// Read-only Jira issue activity capability.
+pub trait JiraIssueActivityPort: Send + Sync {
     /// Fetches bounded bulk changelog data for changed issue snapshots. Older
     /// gateways may leave this unsupported; synchronization treats that as a
     /// best-effort enrichment miss and retains its generic fallback event.
@@ -34,32 +50,26 @@ pub trait JiraReadPort: Send + Sync {
         ))))
     }
 
-    /// Fetches the original bytes of one authenticated attachment. The default preserves
-    /// compatibility with gateways that do not implement attachment downloads.
-    fn fetch_attachment_content<'a>(
+    /// Fetches the newest bounded comments for sync-time mention enrichment.
+    /// Older gateways may leave this unsupported; sync treats unsupported
+    /// enrichment as a best-effort miss.
+    fn fetch_recent_issue_comments<'a>(
         &'a self,
-        _request: &'a AttachmentDownloadRequest,
+        _request: &'a RecentIssueCommentsRequest,
         _cancellation: &'a CancellationToken,
-    ) -> PortFuture<'a, AttachmentContent> {
+    ) -> PortFuture<'a, Vec<jira_domain::IssueComment>> {
         Box::pin(std::future::ready(Err(ApplicationError::new(
             crate::ErrorKind::Internal,
-            "attachment downloads are not supported by this Jira gateway",
+            "recent issue comments are not supported by this Jira gateway",
         ))))
     }
+}
 
-    /// Fetches one authenticated image attachment thumbnail. The default preserves compatibility
-    /// with gateways that do not implement issue media reads.
-    fn fetch_attachment_image<'a>(
-        &'a self,
-        _request: &'a AttachmentImageRequest,
-        _cancellation: &'a CancellationToken,
-    ) -> PortFuture<'a, AttachmentImage> {
-        Box::pin(std::future::ready(Err(ApplicationError::new(
-            crate::ErrorKind::Internal,
-            "attachment images are not supported by this Jira gateway",
-        ))))
-    }
+/// Combined read capability required by synchronization.
+pub trait JiraSyncReadPort: JiraIssueSearchPort + JiraIssueActivityPort {}
 
+/// Read-only Jira issue-detail capability.
+pub trait JiraIssueDetailReadPort: Send + Sync {
     /// Fetches the typed core payload for one issue. Adapters may override this when issue-detail
     /// support is available; the default preserves compatibility with existing gateways.
     fn fetch_issue_detail<'a>(
@@ -85,21 +95,39 @@ pub trait JiraReadPort: Send + Sync {
             "issue comments are not supported by this Jira gateway",
         ))))
     }
+}
 
-    /// Fetches the newest bounded comments for sync-time mention enrichment.
-    /// Older gateways may leave this unsupported; sync treats unsupported
-    /// enrichment as a best-effort miss.
-    fn fetch_recent_issue_comments<'a>(
+/// Read-only Jira attachment capability.
+pub trait JiraAttachmentReadPort: Send + Sync {
+    /// Fetches the original bytes of one authenticated attachment. The default preserves
+    /// compatibility with gateways that do not implement attachment downloads.
+    fn fetch_attachment_content<'a>(
         &'a self,
-        _request: &'a RecentIssueCommentsRequest,
+        _request: &'a AttachmentDownloadRequest,
         _cancellation: &'a CancellationToken,
-    ) -> PortFuture<'a, Vec<jira_domain::IssueComment>> {
+    ) -> PortFuture<'a, AttachmentContent> {
         Box::pin(std::future::ready(Err(ApplicationError::new(
             crate::ErrorKind::Internal,
-            "recent issue comments are not supported by this Jira gateway",
+            "attachment downloads are not supported by this Jira gateway",
         ))))
     }
 
+    /// Fetches one authenticated image attachment thumbnail. The default preserves compatibility
+    /// with gateways that do not implement issue media reads.
+    fn fetch_attachment_image<'a>(
+        &'a self,
+        _request: &'a AttachmentImageRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, AttachmentImage> {
+        Box::pin(std::future::ready(Err(ApplicationError::new(
+            crate::ErrorKind::Internal,
+            "attachment images are not supported by this Jira gateway",
+        ))))
+    }
+}
+
+/// Read-only Jira user capability.
+pub trait JiraUserReadPort: Send + Sync {
     fn fetch_current_user<'a>(
         &'a self,
         site_id: &'a JiraSiteId,
@@ -111,19 +139,14 @@ pub trait JiraReadPort: Send + Sync {
         request: &'a UserSearchRequest,
         cancellation: &'a CancellationToken,
     ) -> PortFuture<'a, Vec<User>>;
+}
 
-    fn fetch_issue_page<'a>(
-        &'a self,
-        request: &'a IssueFetchRequest,
-        cancellation: &'a CancellationToken,
-    ) -> PortFuture<'a, IssuePage>;
-
-    fn fetch_issues_by_id<'a>(
-        &'a self,
-        site_id: &'a JiraSiteId,
-        issue_ids: &'a [IssueId],
-        cancellation: &'a CancellationToken,
-    ) -> PortFuture<'a, Vec<Issue>>;
+/// Aggregate read-only Jira gateway retained to preserve consumer construction and trait-object
+/// upcast compatibility within this unpublished workspace. Legacy implementors must migrate to
+/// capability impls; this aggregate does not preserve implementor source compatibility.
+pub trait JiraReadPort:
+    JiraSyncReadPort + JiraIssueDetailReadPort + JiraAttachmentReadPort + JiraUserReadPort
+{
 }
 
 /// Dedicated confirmed Jira comment-write boundary. Implementations must issue
@@ -292,4 +315,174 @@ pub struct NoopEventSink;
 
 impl ApplicationEventSink for NoopEventSink {
     fn publish(&self, _event: ApplicationEvent) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{ErrorKind, IssueLocator, test_support::block_on};
+
+    struct ContractRead;
+
+    impl JiraIssueSearchPort for ContractRead {
+        fn fetch_issue_page<'a>(
+            &'a self,
+            _request: &'a IssueFetchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, IssuePage> {
+            Box::pin(std::future::ready(Err(ApplicationError::new(
+                ErrorKind::Internal,
+                "unused search capability",
+            ))))
+        }
+
+        fn fetch_issues_by_id<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _issue_ids: &'a [IssueId],
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<Issue>> {
+            Box::pin(std::future::ready(Err(ApplicationError::new(
+                ErrorKind::Internal,
+                "unused search capability",
+            ))))
+        }
+    }
+
+    impl JiraIssueActivityPort for ContractRead {}
+    impl JiraSyncReadPort for ContractRead {}
+    impl JiraIssueDetailReadPort for ContractRead {}
+    impl JiraAttachmentReadPort for ContractRead {}
+
+    impl JiraUserReadPort for ContractRead {
+        fn fetch_current_user<'a>(
+            &'a self,
+            _site_id: &'a JiraSiteId,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, User> {
+            Box::pin(std::future::ready(Err(ApplicationError::new(
+                ErrorKind::Internal,
+                "unused user capability",
+            ))))
+        }
+
+        fn search_users<'a>(
+            &'a self,
+            _request: &'a UserSearchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Vec<User>> {
+            Box::pin(std::future::ready(Err(ApplicationError::new(
+                ErrorKind::Internal,
+                "unused user capability",
+            ))))
+        }
+    }
+
+    impl JiraReadPort for ContractRead {}
+
+    fn site() -> JiraSiteId {
+        JiraSiteId::new("site").expect("site")
+    }
+
+    fn issue_id() -> IssueId {
+        IssueId::new("100").expect("issue")
+    }
+
+    fn assert_unsupported<T: std::fmt::Debug>(result: Result<T, ApplicationError>, message: &str) {
+        let error = result.expect_err("capability should retain its unsupported default");
+        assert_eq!(error.kind(), ErrorKind::Internal);
+        assert_eq!(error.message(), message);
+    }
+
+    #[test]
+    fn optional_capability_defaults_preserve_current_errors() {
+        let port = ContractRead;
+        let cancellation = CancellationToken::new();
+        let site_id = site();
+        let issue_id = issue_id();
+
+        assert_unsupported(
+            block_on(port.fetch_issue_changelog(
+                &IssueChangelogRequest {
+                    site_id: site_id.clone(),
+                    issue_ids: vec![issue_id.clone()],
+                },
+                &cancellation,
+            )),
+            "issue changelog is not supported by this Jira gateway",
+        );
+        assert_unsupported(
+            block_on(port.fetch_recent_issue_comments(
+                &RecentIssueCommentsRequest {
+                    site_id: site_id.clone(),
+                    issue_id: issue_id.clone(),
+                    limit: 1,
+                },
+                &cancellation,
+            )),
+            "recent issue comments are not supported by this Jira gateway",
+        );
+        assert_unsupported(
+            block_on(port.fetch_issue_detail(
+                &IssueDetailRequest {
+                    site_id: site_id.clone(),
+                    locator: IssueLocator::Id(issue_id.clone()),
+                },
+                &cancellation,
+            )),
+            "issue detail is not supported by this Jira gateway",
+        );
+        assert_unsupported(
+            block_on(port.fetch_issue_comments_page(
+                &IssueCommentsPageRequest {
+                    site_id: site_id.clone(),
+                    issue_id: issue_id.clone(),
+                    start_at: 0,
+                    page_cursor: None,
+                    page_size: 1,
+                },
+                &cancellation,
+            )),
+            "issue comments are not supported by this Jira gateway",
+        );
+        assert_unsupported(
+            block_on(port.fetch_attachment_content(
+                &AttachmentDownloadRequest {
+                    site_id: site_id.clone(),
+                    issue_id: issue_id.clone(),
+                    attachment_id: "attachment".to_owned(),
+                    max_bytes: 1,
+                },
+                &cancellation,
+            )),
+            "attachment downloads are not supported by this Jira gateway",
+        );
+        assert_unsupported(
+            block_on(port.fetch_attachment_image(
+                &AttachmentImageRequest {
+                    site_id,
+                    issue_id,
+                    attachment_id: "attachment".to_owned(),
+                    width: 1,
+                    height: 1,
+                    max_bytes: 1,
+                },
+                &cancellation,
+            )),
+            "attachment images are not supported by this Jira gateway",
+        );
+    }
+
+    #[test]
+    fn aggregate_upcasts_to_each_capability() {
+        let aggregate: Arc<dyn JiraReadPort> = Arc::new(ContractRead);
+        let _: Arc<dyn JiraSyncReadPort> = aggregate.clone();
+        let _: Arc<dyn JiraIssueSearchPort> = aggregate.clone();
+        let _: Arc<dyn JiraIssueActivityPort> = aggregate.clone();
+        let _: Arc<dyn JiraIssueDetailReadPort> = aggregate.clone();
+        let _: Arc<dyn JiraAttachmentReadPort> = aggregate.clone();
+        let _: Arc<dyn JiraUserReadPort> = aggregate;
+    }
 }

@@ -6279,14 +6279,16 @@ mod tests {
     use gpui::VisualTestContext;
     use gpui_component::searchable_list::SearchableListDelegate as _;
     use jira_application::{
-        ErrorKind, IssueFetchRequest, IssuePage, PortFuture, UserSearchRequest,
+        ErrorKind, IssueFetchRequest, IssuePage, JiraAttachmentReadPort, JiraIssueActivityPort,
+        JiraIssueDetailReadPort, JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort,
+        JiraUserReadPort, PortFuture, UserSearchRequest,
     };
     use jira_domain::JiraSiteId;
     use time::macros::datetime;
 
     struct EmptyJira;
 
-    impl JiraReadPort for EmptyJira {
+    impl JiraUserReadPort for EmptyJira {
         fn fetch_current_user<'a>(
             &'a self,
             _site_id: &'a JiraSiteId,
@@ -6302,7 +6304,9 @@ mod tests {
         ) -> PortFuture<'a, Vec<User>> {
             Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
         }
+    }
 
+    impl JiraIssueSearchPort for EmptyJira {
         fn fetch_issue_page<'a>(
             &'a self,
             _request: &'a IssueFetchRequest,
@@ -6320,6 +6324,12 @@ mod tests {
             Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
         }
     }
+
+    impl JiraIssueActivityPort for EmptyJira {}
+    impl JiraIssueDetailReadPort for EmptyJira {}
+    impl JiraAttachmentReadPort for EmptyJira {}
+    impl JiraSyncReadPort for EmptyJira {}
+    impl JiraReadPort for EmptyJira {}
 
     fn update_view(event_id: &str, change: &str, occurred_at: &str) -> UpdateViewModel {
         UpdateViewModel {

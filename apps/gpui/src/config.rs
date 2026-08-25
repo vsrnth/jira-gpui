@@ -9,7 +9,7 @@
 
 use std::{env, fmt, sync::Arc};
 
-use jira_application::{CancellationToken, ErrorKind, JiraReadPort};
+use jira_application::{CancellationToken, ErrorKind, JiraUserReadPort};
 use jira_domain::{JiraSiteId, User};
 use jira_http::{
     ApiTokenCredentials, ConfigError, JiraBaseUrl, JiraCloudId, JiraHttpClient, discover_cloud_id,
@@ -181,7 +181,7 @@ where
 /// discover or paste an Atlassian account ID.
 pub(crate) async fn ensure_authenticated_user(
     existing: Option<User>,
-    jira: &dyn JiraReadPort,
+    jira: &dyn JiraUserReadPort,
     site_id: &JiraSiteId,
 ) -> Result<User, StartupError> {
     if let Some(user) = existing {
@@ -191,7 +191,7 @@ pub(crate) async fn ensure_authenticated_user(
 }
 
 async fn resolve_initial_user(
-    jira: &dyn JiraReadPort,
+    jira: &dyn JiraUserReadPort,
     site_id: &JiraSiteId,
 ) -> Result<User, StartupError> {
     let cancellation = CancellationToken::new();
@@ -336,10 +336,9 @@ mod tests {
 
     use futures_lite::future::block_on;
     use jira_application::{
-        ApplicationError, CancellationToken, IssueCachePort, IssueFetchRequest, IssuePage,
-        PortFuture, UserSearchRequest,
+        ApplicationError, CancellationToken, IssueCachePort, PortFuture, UserSearchRequest,
     };
-    use jira_domain::{AccountId, Issue, IssueId, User};
+    use jira_domain::{AccountId, User};
     use jira_storage::SqliteStore;
 
     use super::*;
@@ -393,7 +392,7 @@ mod tests {
         result: Result<User, ApplicationError>,
     }
 
-    impl JiraReadPort for FakeCurrentUser {
+    impl JiraUserReadPort for FakeCurrentUser {
         fn fetch_current_user<'a>(
             &'a self,
             _site_id: &'a JiraSiteId,
@@ -407,26 +406,6 @@ mod tests {
             _request: &'a UserSearchRequest,
             _cancellation: &'a CancellationToken,
         ) -> PortFuture<'a, Vec<User>> {
-            Box::pin(std::future::ready(Ok(Vec::new())))
-        }
-
-        fn fetch_issue_page<'a>(
-            &'a self,
-            _request: &'a IssueFetchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, IssuePage> {
-            Box::pin(std::future::ready(Err(ApplicationError::new(
-                ErrorKind::Internal,
-                "not used by onboarding",
-            ))))
-        }
-
-        fn fetch_issues_by_id<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _issue_ids: &'a [IssueId],
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<Issue>> {
             Box::pin(std::future::ready(Ok(Vec::new())))
         }
     }

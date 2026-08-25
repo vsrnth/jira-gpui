@@ -4,7 +4,7 @@ use jira_domain::IssueDetail;
 
 use crate::{
     ApplicationError, CancellationToken, IssueCommentsPageRequest, IssueDetailRequest,
-    JiraReadPort,
+    JiraIssueDetailReadPort,
     comment_pagination::{CommentPageDecision, CommentPagination},
 };
 
@@ -31,12 +31,12 @@ impl Default for IssueDetailConfig {
 /// Application orchestration for one issue's core data and all paginated comments.
 #[derive(Clone)]
 pub struct IssueDetailService {
-    jira: Arc<dyn JiraReadPort>,
+    jira: Arc<dyn JiraIssueDetailReadPort>,
     config: IssueDetailConfig,
 }
 
 impl IssueDetailService {
-    pub fn new(jira: Arc<dyn JiraReadPort>, config: IssueDetailConfig) -> Self {
+    pub fn new(jira: Arc<dyn JiraIssueDetailReadPort>, config: IssueDetailConfig) -> Self {
         Self { jira, config }
     }
 
@@ -132,15 +132,15 @@ mod tests {
 
     use jira_domain::{
         Issue, IssueComment, IssueDetailCore, IssueId, IssueKey, IssueType, JiraSiteId, Priority,
-        Project, Status, User,
+        Project, Status,
     };
     use time::macros::datetime;
 
     use super::*;
     use crate::{
         ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
-        IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage,
-        JiraReadPort, PortFuture, UserSearchRequest, test_support::block_on,
+        IssueCommentsPageRequest, IssueDetailRequest, IssueLocator, JiraIssueDetailReadPort,
+        PortFuture, test_support::block_on,
     };
 
     #[derive(Default)]
@@ -151,7 +151,7 @@ mod tests {
         cancel_on_comments: bool,
     }
 
-    impl JiraReadPort for FakeJira {
+    impl JiraIssueDetailReadPort for FakeJira {
         fn fetch_issue_detail<'a>(
             &'a self,
             _request: &'a IssueDetailRequest,
@@ -189,45 +189,6 @@ mod tests {
                 }
                 result
             })
-        }
-
-        fn fetch_current_user<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, User> {
-            Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "not used")) })
-        }
-
-        fn search_users<'a>(
-            &'a self,
-            _request: &'a UserSearchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<User>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn fetch_issue_page<'a>(
-            &'a self,
-            _request: &'a IssueFetchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, IssuePage> {
-            Box::pin(async {
-                Ok(IssuePage {
-                    issues: Vec::new(),
-                    next_cursor: None,
-                    server_time: None,
-                })
-            })
-        }
-
-        fn fetch_issues_by_id<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _issue_ids: &'a [IssueId],
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<Issue>> {
-            Box::pin(async { Ok(Vec::new()) })
         }
     }
 

@@ -3,7 +3,7 @@ use std::{collections::HashSet, sync::Arc};
 use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp};
 
 use crate::{
-    ApplicationError, CancellationToken, IssueFetchRequest, JiraReadPort,
+    ApplicationError, CancellationToken, IssueFetchRequest, JiraIssueSearchPort,
     issue_pagination::IssuePagination, validate_jql_scope,
 };
 
@@ -55,12 +55,12 @@ pub struct IssuePullOutcome {
 /// persistence, or presentation frameworks.
 #[derive(Clone)]
 pub struct IssuePullService {
-    jira: Arc<dyn JiraReadPort>,
+    jira: Arc<dyn JiraIssueSearchPort>,
     config: IssuePullConfig,
 }
 
 impl IssuePullService {
-    pub fn new(jira: Arc<dyn JiraReadPort>, config: IssuePullConfig) -> Self {
+    pub fn new(jira: Arc<dyn JiraIssueSearchPort>, config: IssuePullConfig) -> Self {
         Self { jira, config }
     }
 
@@ -143,13 +143,11 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use jira_domain::{IssueId, IssueKey, IssueType, Priority, Project, Status, User};
+    use jira_domain::{IssueId, IssueKey, IssueType, Priority, Project, Status};
     use time::macros::datetime;
 
     use super::*;
-    use crate::{
-        ErrorKind, IssuePage, PageCursor, PortFuture, UserSearchRequest, test_support::block_on,
-    };
+    use crate::{ErrorKind, IssuePage, PageCursor, PortFuture, test_support::block_on};
 
     struct FakeJira {
         pages: Mutex<VecDeque<Result<IssuePage, ApplicationError>>>,
@@ -167,28 +165,7 @@ mod tests {
         }
     }
 
-    impl JiraReadPort for FakeJira {
-        fn fetch_current_user<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, User> {
-            Box::pin(async {
-                Err(ApplicationError::new(
-                    ErrorKind::Internal,
-                    "fake does not implement current user",
-                ))
-            })
-        }
-
-        fn search_users<'a>(
-            &'a self,
-            _request: &'a UserSearchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<User>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
+    impl JiraIssueSearchPort for FakeJira {
         fn fetch_issue_page<'a>(
             &'a self,
             request: &'a IssueFetchRequest,

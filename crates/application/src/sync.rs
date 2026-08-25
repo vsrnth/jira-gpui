@@ -5,7 +5,7 @@ use time::Duration;
 
 use crate::{
     ApplicationError, ApplicationEvent, ApplicationEventSink, CancellationToken, ChangeSet, Clock,
-    IssueCachePort, IssueDiffer, IssueFetchRequest, JiraReadPort, NotificationPolicy,
+    IssueCachePort, IssueDiffer, IssueFetchRequest, JiraSyncReadPort, NotificationPolicy,
     NotificationPort, NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest,
     SyncState, enrich_with_changelog, issue_pagination::IssuePagination, validate_jql_scope,
 };
@@ -33,7 +33,7 @@ impl Default for SyncConfig {
 
 #[derive(Clone)]
 pub struct SyncService {
-    jira: Arc<dyn JiraReadPort>,
+    jira: Arc<dyn JiraSyncReadPort>,
     cache: Arc<dyn IssueCachePort>,
     differ: Arc<dyn IssueDiffer>,
     notifications: Arc<dyn NotificationPort>,
@@ -51,7 +51,7 @@ struct NotificationStats {
 impl SyncService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        jira: Arc<dyn JiraReadPort>,
+        jira: Arc<dyn JiraSyncReadPort>,
         cache: Arc<dyn IssueCachePort>,
         differ: Arc<dyn IssueDiffer>,
         notifications: Arc<dyn NotificationPort>,
@@ -602,14 +602,15 @@ mod tests {
     use jira_domain::{
         AccountId, EventId, IssueId, IssueKey, IssueType, JiraSiteId, NotificationDelivery,
         Priority, Project, RichBlock, RichInline, RichTextDocument, Status, UpdateEvent,
-        UpdateKind, User, UserSetId,
+        UpdateKind, UserSetId,
     };
     use time::macros::datetime;
 
     use super::*;
     use crate::{
         CommitOutcome, DefaultDesktopNotificationPolicy, ErrorKind, IssueListQuery, IssuePage,
-        PageCursor, PortFuture, SyncCommit, UserSearchRequest, test_support::block_on,
+        JiraIssueActivityPort, JiraIssueSearchPort, PageCursor, PortFuture, SyncCommit,
+        test_support::block_on,
     };
 
     #[derive(Default)]
@@ -620,28 +621,7 @@ mod tests {
         comment_requests: Mutex<Vec<crate::RecentIssueCommentsRequest>>,
     }
 
-    impl JiraReadPort for FakeJira {
-        fn fetch_current_user<'a>(
-            &'a self,
-            _site_id: &'a JiraSiteId,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, User> {
-            Box::pin(async {
-                Err(ApplicationError::new(
-                    ErrorKind::Internal,
-                    "fake does not implement current user",
-                ))
-            })
-        }
-
-        fn search_users<'a>(
-            &'a self,
-            _request: &'a UserSearchRequest,
-            _cancellation: &'a CancellationToken,
-        ) -> PortFuture<'a, Vec<User>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
+    impl JiraIssueSearchPort for FakeJira {
         fn fetch_issue_page<'a>(
             &'a self,
             request: &'a IssueFetchRequest,
@@ -668,7 +648,9 @@ mod tests {
         ) -> PortFuture<'a, Vec<Issue>> {
             Box::pin(async { Ok(Vec::new()) })
         }
+    }
 
+    impl JiraIssueActivityPort for FakeJira {
         fn fetch_recent_issue_comments<'a>(
             &'a self,
             request: &'a crate::RecentIssueCommentsRequest,
@@ -692,6 +674,8 @@ mod tests {
             Box::pin(async move { result })
         }
     }
+
+    impl JiraSyncReadPort for FakeJira {}
 
     #[derive(Default)]
     struct FakeCache {
