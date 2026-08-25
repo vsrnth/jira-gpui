@@ -1,6 +1,6 @@
 # Refactoring roadmap
 
-This living roadmap tracks behavior-preserving, independently reviewable refactors—not feature work. Baseline: `9c895a4`.
+This living roadmap tracks behavior-preserving, independently reviewable refactors—not feature work. Baseline: `6964594`.
 
 ## Status legend
 
@@ -9,7 +9,7 @@ This living roadmap tracks behavior-preserving, independently reviewable refacto
 - **Blocked** — scoped, but validation is currently unavailable.
 - **Deferred** — intentionally held for later review.
 
-Item 3 remains Blocked; items 4–6 are Completed; item 7 is Ready.
+Item 3 remains Blocked; items 4–7 are Completed.
 
 ## Ranked work
 
@@ -21,7 +21,7 @@ Item 3 remains Blocked; items 4–6 are Completed; item 7 is Ready.
 | 4 · **Completed** | Application test modules → `crates/application/src/test_support.rs` under `cfg(test)`; current helpers in `crates/application/src/comment.rs`, `crates/application/src/issue_detail.rs`, `crates/application/src/issue_edit.rs`, `crates/application/src/issue_media.rs`, `crates/application/src/issue_pull.rs`, and `crates/application/src/sync.rs` | Consolidate duplicated `block_on`/no-op-waker test helpers. | Test-only module and imports; no runtime dependency, fake/fixture consolidation, or production API. Keep each test’s behavior and ownership intact. | Focused application tests, then relevant application/workspace validation. | `a7a710f` |
 | 5 · **Completed** | `crates/jira/src/jql.rs` only | Consolidate bounded Jira issue-ID validation shared by `enhanced_search_request_for_issue_ids` and `bulk_changelog_request`. | Extract the duplicated empty/1000 count, blank/255-byte/unsafe-character validation, lexicographic sort, and dedup pipeline. Check original count before dedup; preserve exact `JqlError` variants/order, output order, requests, JQL, page sizes, and tokens; do not merge account-ID rules. | Focused JQL tests, full jira-adapter tests, lib Clippy/fmt. | `92c4bc9` |
 | 6 · **Completed** | Private storage helper plus `crates/storage/src/{lib.rs,memory.rs,sqlite.rs}` | Centralize update-event identity and association semantics across stores. | Identity remains exactly ID/site/issue ID/key/kind/occurred_at; merge only matching_user_set_ids; preserve payload/read/delivery state, ordering, atomic validation, and SQLite transaction boundaries; no SQL/schema/public API change. | Duplicate/conflict/rollback tests and full storage tests/Clippy. | `9c895a4` |
-| 7 · **Ready** | `crates/application/src/sync.rs` only | Extract post-commit notification delivery from SyncService orchestration. | Commit completes before delivery; preserve inserted-event order, baseline suppression, mention precedence, policy once, dispatch once/no retries, best-effort records, counters, timestamps, non-fatal failures, and no post-commit cancellation check. | Focused sync and application tests, commit-before-delivery regression, lib Clippy/fmt. | — |
+| 7 · **Completed** | `crates/application/src/sync.rs` only | Extract post-commit notification delivery from SyncService orchestration. | Commit completes before delivery; preserve inserted-event order, baseline suppression, mention precedence, policy once, dispatch once/no retries, best-effort records, counters, timestamps, non-fatal failures, and no post-commit cancellation check. | Focused sync and application tests, commit-before-delivery regression, lib Clippy/fmt. | `6964594` |
 
 Workspace-wide macOS compilation and all-target Clippy blockers are validation context only, not tasks in this roadmap.
 
