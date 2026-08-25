@@ -641,12 +641,6 @@ impl Render for AppShell {
                 cx.notify();
             }));
 
-        let shell_context = if self.dashboard.is_some() {
-            "Workspace operations"
-        } else {
-            "Secure connection"
-        };
-
         v_flex()
             .size_full()
             .min_w_0()
@@ -677,18 +671,12 @@ impl Render for AppShell {
                                         .child("JD"),
                                 )
                                 .child(
-                                    v_flex()
+                                    div()
                                         .min_w_0()
-                                        .gap_0p5()
-                                        .child(div().text_sm().font_semibold().child("Jira Desk"))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(shell_context),
-                                        ),
+                                        .truncate()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .child("Jira Desk"),
                                 ),
                         )
                         .child(theme_toggle),

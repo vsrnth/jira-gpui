@@ -1,16 +1,16 @@
 #[cfg(target_os = "linux")]
 mod desktop_integration;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use gpui::{App, AppContext as _, Bounds, Pixels, Size, WindowBounds, px, size};
 
-#[cfg(target_os = "linux")]
-const INITIAL_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(780.));
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const INITIAL_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const INITIAL_WINDOW_MARGIN: f32 = 24.;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn initial_window_size(display_size: Size<Pixels>) -> Size<Pixels> {
     let available_size =
         display_size.map(|dimension| (dimension.as_f32() - 2. * INITIAL_WINDOW_MARGIN).max(1.));
@@ -24,7 +24,7 @@ fn initial_window_size(display_size: Size<Pixels>) -> Size<Pixels> {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn initial_window_bounds(cx: &App) -> WindowBounds {
     let display = cx.primary_display();
     let window_size = display
@@ -42,13 +42,14 @@ fn initial_window_bounds(cx: &App) -> WindowBounds {
         .unwrap_or_else(|| WindowBounds::centered(window_size, cx))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
     use gpui::{WindowDecorations, WindowOptions};
     use gpui_component::{Root, TitleBar};
     use gpui_component_assets::Assets;
     use jira_gpui::{AppShell, startup_from_environment};
 
+    #[cfg(target_os = "linux")]
     if desktop_integration::register_from_environment().is_err() {
         eprintln!("Jira Desk: desktop integration unavailable");
     }
@@ -81,12 +82,12 @@ fn main() {
         });
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("Jira Desk Phase 1 runs on Linux/Wayland; macOS support is planned for Phase 2.");
+    eprintln!("Jira Desk does not support this operating system yet.");
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 
@@ -94,7 +95,7 @@ mod tests {
     fn preserves_desired_size_when_display_has_room() {
         assert_eq!(
             initial_window_size(size(px(1920.), px(1080.))),
-            INITIAL_WINDOW_SIZE
+            size(px(1240.), px(900.))
         );
     }
 

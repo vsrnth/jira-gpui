@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "linux", test))]
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,7 @@ pub const TEST_NOTIFICATION_SUMMARY: &str = "Jira Desk notification test";
 pub const TEST_NOTIFICATION_BODY: &str =
     "If this appears, Jira Desk desktop notifications are working.";
 
+#[cfg(any(target_os = "linux", test))]
 const MAX_RETAINED_HANDLES: usize = 32;
 
 /// A local receipt from the Freedesktop notification service. This is not a
@@ -38,12 +40,14 @@ impl DesktopNotificationReceipt {
 /// A strictly bounded FIFO retention queue. Retaining notification handles is
 /// required by some desktop environments to keep the D-Bus connection alive;
 /// evicting the oldest handle prevents an unbounded connection leak.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 struct BoundedRetention<T> {
     capacity: usize,
     items: VecDeque<T>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl<T> BoundedRetention<T> {
     fn new(capacity: usize) -> Self {
         Self {
@@ -68,12 +72,14 @@ impl<T> BoundedRetention<T> {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), derive(Default))]
 #[derive(Debug, Clone)]
 pub struct FreedesktopNotificationPort {
     #[cfg(target_os = "linux")]
     retained_handles: Arc<Mutex<BoundedRetention<notify_rust::NotificationHandle>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Default for FreedesktopNotificationPort {
     fn default() -> Self {
         Self {

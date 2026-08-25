@@ -1,7 +1,7 @@
-//! Linux Secret Service storage for the Jira Cloud login.
+//! Secure system credential storage for the Jira Cloud login.
 //!
 //! The keyring entry has one deliberately boring identity.  This keeps an
-//! AppImage upgrade from orphaning credentials because its path or artifact
+//! application upgrade from orphaning credentials because its path or artifact
 //! version changed.  The value stored in the entry is a versioned, bounded
 //! JSON document; it is never written to a local file or a plaintext cache.
 
@@ -127,7 +127,7 @@ pub async fn load_saved_credentials() -> Result<Option<SavedCredentials>, Creden
     run_on_os_thread(load_from_keyring).await
 }
 
-/// Save the credentials into the Linux Secret Service.
+/// Save the credentials into the secure system credential store.
 pub async fn save_credentials(
     credentials: SavedCredentials,
 ) -> Result<SaveOutcome, CredentialStoreError> {

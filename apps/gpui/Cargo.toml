@@ -27,6 +27,13 @@ futures-channel.workspace = true
 keyring.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed", default-features = false, features = ["runtime_shaders", "font-kit"] }
+gpui-component-assets = { version = "0.5.1", git = "https://github.com/longbridge/gpui-component", rev = "b29ee13379e161c2fb68c14c229c958d52d6ffe4" }
+futures-channel.workspace = true
+keyring = { workspace = true, features = ["apple-native-keyring-store"] }
+zeroize.workspace = true
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 futures-lite = "2.6.1"
