@@ -7,7 +7,7 @@ use crate::{
     ApplicationError, ApplicationEvent, ApplicationEventSink, CancellationToken, ChangeSet, Clock,
     IssueCachePort, IssueDiffer, IssueFetchRequest, JiraReadPort, NotificationPolicy,
     NotificationPort, NotificationRequest, SyncCommit, SyncMode, SyncOutcome, SyncRequest,
-    SyncState, enrich_with_changelog, validate_jql_scope,
+    SyncState, enrich_with_changelog, issue_pagination::IssuePagination, validate_jql_scope,
 };
 
 const MAX_CHANGELOG_ISSUES_PER_REQUEST: usize = 1_000;
@@ -125,18 +125,13 @@ impl SyncService {
             SyncMode::Baseline | SyncMode::Reconciliation => None,
         };
 
-        let mut page_cursor = None;
-        let mut issues = Vec::new();
-        let mut server_time = None;
-        let mut pages_fetched = 0;
+        let mut pagination = IssuePagination::new(
+            self.config.page_size,
+            self.config.max_pages,
+            "invalid sync pagination configuration",
+        )?;
         loop {
-            cancellation.check()?;
-            if pages_fetched >= self.config.max_pages {
-                return Err(ApplicationError::new(
-                    crate::ErrorKind::Upstream,
-                    "Jira pagination exceeded the configured safety limit",
-                ));
-            }
+            let page_cursor = pagination.prepare_request(cancellation)?;
             let page = self
                 .jira
                 .fetch_issue_page(
@@ -152,24 +147,22 @@ impl SyncService {
                     cancellation,
                 )
                 .await?;
-            pages_fetched += 1;
-            server_time = page.server_time.or(server_time);
-            page_cursor = page.next_cursor;
-            let page_issue_count = page.issues.len();
-            issues.extend(page.issues);
+            let page_stats = pagination.accept_page(page, cancellation)?;
             self.events.publish(ApplicationEvent::SyncPageFetched {
                 user_set_id: request.user_set_id.clone(),
-                page: pages_fetched,
-                issue_count: page_issue_count,
-                total_issue_count: issues.len(),
+                page: page_stats.page,
+                issue_count: page_stats.issue_count,
+                total_issue_count: page_stats.total_issue_count,
             });
-            if page_cursor.is_none() {
+            if !pagination.has_next_page() {
                 break;
             }
         }
-        cancellation.check()?;
 
-        let issues = deduplicate_issues(issues);
+        let pagination_outcome = pagination.finish();
+        let issues = pagination_outcome.issues;
+        let pages_fetched = pagination_outcome.pages_fetched;
+        let server_time = pagination_outcome.server_time;
         let notification_issue_ids = request.notification_assignees.as_deref().map(|assignees| {
             issues
                 .iter()
@@ -465,12 +458,11 @@ impl SyncService {
                 "notification assignees must be unique",
             ));
         }
-        if self.config.page_size == 0 || self.config.max_pages == 0 {
-            return Err(ApplicationError::new(
-                crate::ErrorKind::Internal,
-                "invalid sync pagination configuration",
-            ));
-        }
+        crate::issue_pagination::validate_pagination_config(
+            self.config.page_size,
+            self.config.max_pages,
+            "invalid sync pagination configuration",
+        )?;
         Ok(())
     }
 }
@@ -576,23 +568,6 @@ fn stable_digest(parts: &[&str], mut hash: u64) -> u64 {
         }
     }
     hash
-}
-
-fn deduplicate_issues(issues: Vec<Issue>) -> Vec<Issue> {
-    // Jira pages should not overlap, but an eventually-consistent search can return
-    // duplicates. Keeping the last snapshot gives the cache the freshest value.
-    let mut unique = Vec::with_capacity(issues.len());
-    let mut positions = std::collections::HashMap::new();
-    for issue in issues {
-        let id = issue.id.clone();
-        if let Some(position) = positions.get(&id).copied() {
-            unique[position] = issue;
-        } else {
-            positions.insert(id, unique.len());
-            unique.push(issue);
-        }
-    }
-    unique
 }
 
 #[cfg(test)]
@@ -1020,6 +995,103 @@ mod tests {
                 .lock()
                 .expect("comment requests lock")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_cursor_cycles_before_commit() {
+        let (site_id, user_set_id, _account_id) = fixture_ids();
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([
+                IssuePage {
+                    issues: Vec::new(),
+                    next_cursor: Some(PageCursor("same".into())),
+                    server_time: None,
+                },
+                IssuePage {
+                    issues: Vec::new(),
+                    next_cursor: Some(PageCursor("same".into())),
+                    server_time: None,
+                },
+            ])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        let service = service(
+            jira.clone(),
+            cache.clone(),
+            Arc::new(FakeDiffer::default()),
+            Arc::new(FakeNotifications::default()),
+            datetime!(2026-08-16 12:00 UTC),
+        );
+
+        let error = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: None,
+                jql_scope: None,
+                notification_assignees: None,
+                mode: SyncMode::Baseline,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect_err("cursor cycle");
+
+        assert_eq!(error.kind(), ErrorKind::Upstream);
+        assert!(cache.commits.lock().expect("commits lock").is_empty());
+        assert_eq!(jira.requests.lock().expect("requests lock").len(), 2);
+    }
+
+    #[test]
+    fn uses_greatest_server_timestamp_when_pages_are_non_monotonic() {
+        let (site_id, user_set_id, _account_id) = fixture_ids();
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([
+                IssuePage {
+                    issues: Vec::new(),
+                    next_cursor: Some(PageCursor("older".into())),
+                    server_time: Some(datetime!(2026-08-16 12:00 UTC)),
+                },
+                IssuePage {
+                    issues: Vec::new(),
+                    next_cursor: None,
+                    server_time: Some(datetime!(2026-08-16 11:00 UTC)),
+                },
+            ])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache::default());
+        let service = service(
+            jira,
+            cache.clone(),
+            Arc::new(FakeDiffer::default()),
+            Arc::new(FakeNotifications::default()),
+            datetime!(2026-08-16 10:00 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: None,
+                jql_scope: None,
+                notification_assignees: None,
+                mode: SyncMode::Baseline,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("baseline sync");
+
+        let greatest = datetime!(2026-08-16 12:00 UTC);
+        assert_eq!(outcome.cursor, greatest);
+        assert_eq!(
+            cache.commits.lock().expect("commits lock")[0]
+                .state
+                .last_full_sync_at,
+            Some(greatest)
         );
     }
 

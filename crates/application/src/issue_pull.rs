@@ -1,13 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use jira_domain::{AccountId, Issue, JiraSiteId, Timestamp};
 
 use crate::{
-    ApplicationError, CancellationToken, IssueFetchRequest, JiraReadPort, PageCursor,
-    validate_jql_scope,
+    ApplicationError, CancellationToken, IssueFetchRequest, JiraReadPort,
+    issue_pagination::IssuePagination, validate_jql_scope,
 };
 
 /// Safety limits for a manual issue pull.
@@ -75,36 +72,14 @@ impl IssuePullService {
         self.validate(&request)?;
         cancellation.check()?;
 
-        let mut page_cursor: Option<PageCursor> = None;
-        let mut requested_cursors = HashSet::new();
-        let mut issues = Vec::new();
-        let mut server_time = None;
-        let mut pages_fetched = 0;
+        let mut pagination = IssuePagination::new(
+            self.config.page_size,
+            self.config.max_pages,
+            "issue pull pagination configuration is invalid",
+        )?;
 
         loop {
-            cancellation.check()?;
-            if pages_fetched >= self.config.max_pages {
-                return Err(ApplicationError::new(
-                    crate::ErrorKind::Upstream,
-                    "Jira pagination exceeded the configured safety limit",
-                ));
-            }
-
-            if let Some(cursor) = &page_cursor {
-                if cursor.0.trim().is_empty() {
-                    return Err(ApplicationError::new(
-                        crate::ErrorKind::Upstream,
-                        "Jira returned an empty pagination cursor",
-                    ));
-                }
-                if !requested_cursors.insert(cursor.0.clone()) {
-                    return Err(ApplicationError::new(
-                        crate::ErrorKind::Upstream,
-                        "Jira returned a pagination cursor cycle",
-                    ));
-                }
-            }
-
+            let page_cursor = pagination.prepare_request(cancellation)?;
             let page = self
                 .jira
                 .fetch_issue_page(
@@ -114,29 +89,24 @@ impl IssuePullService {
                         watchers: request.watchers.clone(),
                         jql_scope: request.jql_scope.clone(),
                         updated_since: request.updated_since,
-                        page_cursor: page_cursor.clone(),
+                        page_cursor,
                         page_size: self.config.page_size,
                     },
                     cancellation,
                 )
                 .await?;
-            cancellation.check()?;
+            pagination.accept_page(page, cancellation)?;
 
-            pages_fetched += 1;
-            server_time = max_timestamp(server_time, page.server_time);
-            page_cursor = page.next_cursor;
-            issues.extend(page.issues);
-
-            if page_cursor.is_none() {
+            if !pagination.has_next_page() {
                 break;
             }
         }
 
-        cancellation.check()?;
+        let outcome = pagination.finish();
         Ok(IssuePullOutcome {
-            issues: deduplicate_issues(issues),
-            pages_fetched,
-            server_time,
+            issues: outcome.issues,
+            pages_fetched: outcome.pages_fetched,
+            server_time: outcome.server_time,
         })
     }
 
@@ -157,39 +127,13 @@ impl IssuePullService {
                 "issue pull watchers must be unique",
             ));
         }
-        if !(1..=1_000).contains(&self.config.page_size) || self.config.max_pages == 0 {
-            return Err(ApplicationError::new(
-                crate::ErrorKind::Internal,
-                "issue pull pagination configuration is invalid",
-            ));
-        }
+        crate::issue_pagination::validate_pagination_config(
+            self.config.page_size,
+            self.config.max_pages,
+            "issue pull pagination configuration is invalid",
+        )?;
         Ok(())
     }
-}
-
-fn max_timestamp(current: Option<Timestamp>, candidate: Option<Timestamp>) -> Option<Timestamp> {
-    match (current, candidate) {
-        (Some(current), Some(candidate)) => Some(current.max(candidate)),
-        (None, candidate) => candidate,
-        (current, None) => current,
-    }
-}
-
-fn deduplicate_issues(issues: Vec<Issue>) -> Vec<Issue> {
-    // Pages can overlap while Jira's search index catches up. Replacing in place
-    // preserves the first-seen order while retaining the last snapshot received.
-    let mut unique = Vec::with_capacity(issues.len());
-    let mut positions = HashMap::with_capacity(issues.len());
-    for issue in issues {
-        let id = issue.id.clone();
-        if let Some(position) = positions.get(&id).copied() {
-            unique[position] = issue;
-        } else {
-            positions.insert(id, unique.len());
-            unique.push(issue);
-        }
-    }
-    unique
 }
 
 #[cfg(test)]
@@ -205,7 +149,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::{ErrorKind, IssuePage, PortFuture, UserSearchRequest};
+    use crate::{ErrorKind, IssuePage, PageCursor, PortFuture, UserSearchRequest};
 
     struct FakeJira {
         pages: Mutex<VecDeque<Result<IssuePage, ApplicationError>>>,
