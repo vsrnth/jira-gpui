@@ -9,7 +9,7 @@ This living roadmap tracks behavior-preserving, independently reviewable refacto
 - **Blocked** — scoped, but validation is currently unavailable.
 - **Deferred** — intentionally held for later review.
 
-Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; items 18–23, 27, 29, and 31–34, 36 are Ready. Items 1–2, 4–7, and 14–17 are Completed.
+Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; items 18–23, 27, and 31–34, 36 are Ready. Items 1–2, 4–7, 14–17, and 29 are Completed.
 
 ## Ranked work
 
@@ -43,7 +43,7 @@ Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; items 18�
 | 26 · **Blocked** | GPUI presentation: `apps/gpui/src/rich_text_view.rs` | Decompose rich-text rendering along block, inline, image, and policy boundaries. | Retain one shared render budget plus ordinal and accessibility behavior. | Focused rendering/policy tests on Linux Wayland. | — |
 | 27 · **Ready** | Non-GPUI tests: large inline `#[cfg(test)]` modules under `crates/**/src` | Move large inline test modules to private sibling files before related semantic refactors. | Test ownership and visibility only; preserve fixtures, behavior, and production APIs. | Each affected crate’s focused tests, then relevant workspace tests. | — |
 | 28 · **Deferred** | GPUI tests: `apps/gpui/src/dashboard.rs` and private sibling test module | Move Dashboard’s large inline tests after the existing GPUI validation blocker clears. | Mechanical move only; preserve fixtures, visibility, and test behavior before semantic refactors. | Focused Dashboard tests on Linux Wayland. | — |
-| 29 · **Ready** | Jira adapter protocol: `crates/jira/src/lib.rs`, `crates/jira/src/mapping.rs` | Remove or deprecate obsolete `JiraSearchGateway` and its `RemoteIssue` projection protocol. | Require exhaustive reference audit; keep active domain mapper and transport models, and preserve active read behavior. | Reference audit, adapter tests, and public API/Clippy review. | — |
+| 29 · **Completed** | Jira adapter protocol: `crates/jira/src/lib.rs`, `crates/jira/src/mapping.rs` | Remove or deprecate obsolete `JiraSearchGateway` and its `RemoteIssue` projection protocol. | Require exhaustive reference audit; keep active domain mapper and transport models, and preserve active read behavior. | Reference audit, adapter tests, and public API/Clippy review. | `7fd84a7` |
 | 30 · **Blocked** | GPUI package surface: `apps/gpui/src/lib.rs` and exhaustive consumers | Reduce unused GPUI public re-exports after the protocol audit. | Preserve the binary-facing `AppShell`/startup bootstrap surface; remove only demonstrably unused surface and avoid compatibility changes beyond the audit. | Exhaustive workspace reference audit plus focused GPUI tests on Linux Wayland; validation is blocked by the existing GPUI target constraint. | — |
 | 31 · **Ready** | Jira adapter/HTTP boundary: `crates/jira/src/{models.rs,lib.rs}`, `crates/jira-http/src/lib.rs` | Move Jira JSON codecs for transition responses and explicit write bodies into the pure Jira adapter. | Keep dispatch, exactly-once behavior, and transport/runtime policy in `jira-http`. | Codec golden tests plus focused Jira HTTP write tests. | — |
 | 32 · **Ready** | Jira HTTP reads: `crates/jira-http/src/lib.rs` | Centralize token-page progress guards for HTTP-owned bulk reads. | Preserve endpoint-specific current behavior first; any hardening behavior change is a separate roadmap item. | Focused page-progress/cycle tests for each bulk-read endpoint. | — |
