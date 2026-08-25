@@ -9,7 +9,7 @@ This living roadmap tracks behavior-preserving, independently reviewable refacto
 - **Blocked** — scoped, but validation is currently unavailable.
 - **Deferred** — intentionally held for later review.
 
-Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; item 27 is Ready. Items 1–2, 4–7, 14–23, 29, 31–34, and 36 are Completed.
+Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred. Items 1–2, 4–7, 14–23, 27, 29, 31–34, and 36 are Completed.
 
 ## Ranked work
 
@@ -41,7 +41,7 @@ Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; item 27 i
 | 24 · **Blocked** | GPUI presentation: `apps/gpui/src/live_workspace.rs`, `apps/gpui/src/dashboard.rs` | Model primary/team LiveWorkspace sync as explicit partition specs/builders. | Preserve team no-op, watcher differences, notification restriction, and cache isolation. | Focused workspace tests on Linux Wayland. | — |
 | 25 · **Blocked** | GPUI diagnostics: `apps/gpui/src/diagnostics.rs` | Split diagnostics schema/serialization from bounded hardened file persistence. | Preserve sequencing, bounded writes, privacy, and `record_once` semantics. | Focused diagnostics schema and persistence tests on Linux Wayland. | — |
 | 26 · **Blocked** | GPUI presentation: `apps/gpui/src/rich_text_view.rs` | Decompose rich-text rendering along block, inline, image, and policy boundaries. | Retain one shared render budget plus ordinal and accessibility behavior. | Focused rendering/policy tests on Linux Wayland. | — |
-| 27 · **Ready** | Non-GPUI tests: large inline `#[cfg(test)]` modules under `crates/**/src` | Move large inline test modules to private sibling files before related semantic refactors. | Test ownership and visibility only; preserve fixtures, behavior, and production APIs. | Each affected crate’s focused tests, then relevant workspace tests. | — |
+| 27 · **Completed** | Non-GPUI tests: large inline `#[cfg(test)]` modules under `crates/**/src` | Move large inline test modules to private sibling files before related semantic refactors. | Test ownership and visibility only; preserve fixtures, behavior, and production APIs. | Each affected crate’s focused tests, then relevant workspace tests. | `b0078cd` |
 | 28 · **Deferred** | GPUI tests: `apps/gpui/src/dashboard.rs` and private sibling test module | Move Dashboard’s large inline tests after the existing GPUI validation blocker clears. | Mechanical move only; preserve fixtures, visibility, and test behavior before semantic refactors. | Focused Dashboard tests on Linux Wayland. | — |
 | 29 · **Completed** | Jira adapter protocol: `crates/jira/src/lib.rs`, `crates/jira/src/mapping.rs` | Remove or deprecate obsolete `JiraSearchGateway` and its `RemoteIssue` projection protocol. | Require exhaustive reference audit; keep active domain mapper and transport models, and preserve active read behavior. | Reference audit, adapter tests, and public API/Clippy review. | `7fd84a7` |
 | 30 · **Blocked** | GPUI package surface: `apps/gpui/src/lib.rs` and exhaustive consumers | Reduce unused GPUI public re-exports after the protocol audit. | Preserve the binary-facing `AppShell`/startup bootstrap surface; remove only demonstrably unused surface and avoid compatibility changes beyond the audit. | Exhaustive workspace reference audit plus focused GPUI tests on Linux Wayland; validation is blocked by the existing GPUI target constraint. | — |
