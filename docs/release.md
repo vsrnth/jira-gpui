@@ -7,6 +7,22 @@ build enables Wayland and does not support X11 as a runtime target. macOS is
 Phase 2. The AppImage build instructions and host-library notes live in
 [`packaging/appimage/README.md`](../packaging/appimage/README.md).
 
+## Phase 2 macOS local DMG
+
+A native macOS host can build the local Phase 2 DMG with the system packaging
+tools and the instructions in
+[`packaging/macos/README.md`](../packaging/macos/README.md):
+
+```sh
+VERSION=0.1.34-local packaging/macos/build-dmg.sh
+```
+
+The script selects `arm64` or `x86_64` from `uname`, builds and validates a
+signed `Jira Desk.app`, and writes a compressed read-only DMG plus adjacent
+SHA-256 checksum under `dist/`. Use `--skip-build` only with an existing
+native release binary. This is a local artifact path, not a Phase 1 Linux
+release or a cross-compilation target.
+
 Build from Linux with the required Wayland development libraries:
 
 ```bash
