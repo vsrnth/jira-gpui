@@ -9,7 +9,7 @@ This living roadmap tracks behavior-preserving, independently reviewable refacto
 - **Blocked** — scoped, but validation is currently unavailable.
 - **Deferred** — intentionally held for later review.
 
-Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; items 18–23, 27, 31–32, and 36 are Ready. Items 1–2, 4–7, 14–17, 29, and 33–34 are Completed.
+Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; items 18–23, 27, 31–32 are Ready. Items 1–2, 4–7, 14–17, 29, and 33–34, 36 are Completed.
 
 ## Ranked work
 
@@ -50,9 +50,9 @@ Items 3, 8–13, 24–26, 30, and 35 are Blocked; item 28 is Deferred; items 18�
 | 33 · **Completed** | Desktop notifications: `crates/desktop-notifications/src/lib.rs` | Add a private backend seam for deterministic one-call, failure, and retention tests. | Preserve `NotifyRust` handle lifetime, one dispatch, and no retries; keep the seam private. | Focused deterministic notification tests. | `86d12a7` |
 | 34 · **Completed** | Workspace docs/manifests/tests: `README.md`, `Cargo.toml`, package manifests, brittle count snapshots | Correct documentation and manifest drift for remembered credentials, workspace `futures-lite` inheritance, and hard-coded test-count snapshots. | Documentation/configuration/test-maintenance only; do not change runtime behavior or broaden snapshot policy. | Targeted documentation/config checks and affected tests. | `c4ad942` |
 | 35 · **Blocked** | Pure Dashboard presentation policy: `apps/gpui/src/dashboard.rs` and presentation modules | Replace tuple/operation-string Dashboard outcome/error copies with typed presentation policy after feature-state seams. | Do not duplicate completed update-feed roadmap item 3; preserve user-facing wording and outcome mapping. | Focused presentation tests on Linux Wayland. | — |
-| 36 · **Ready** | Application notification tests: `crates/application/src/notifications.rs` test code | Mechanically remove current test-lint `unwrap` violations. | Test-lint hygiene only; no broad pedantic cleanup and no production behavior change. | Targeted application all-target Clippy for `crates/application/src/notifications.rs` test code. | — |
+| 36 · **Completed** | Application notification tests: `crates/application/src/notifications.rs` test code | Mechanically remove current test-lint `unwrap` violations. | Test-lint hygiene only; no broad pedantic cleanup and no production behavior change. | Targeted application all-target Clippy for `crates/application/src/notifications.rs` test code. | `624f9fd` |
 
-Workspace-wide macOS compilation remains validation context only, and unrelated all-target Clippy blockers remain context only; item 36 is a narrow Ready test-lint cleanup and does not broaden that context.
+Workspace-wide macOS compilation remains validation context only, and unrelated all-target Clippy blockers remain context only; item 36 is a narrow Completed test-lint cleanup and does not broaden that context.
 
 ## Workflow
 
