@@ -43,6 +43,11 @@ pub struct SyncService {
     config: SyncConfig,
 }
 
+struct NotificationStats {
+    delivered: usize,
+    failures: usize,
+}
+
 impl SyncService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -268,13 +273,39 @@ impl SyncService {
             })
             .await?;
 
-        let mut notifications_delivered = 0;
-        let mut notification_failures = 0;
-        if request.mode.emits_updates() {
-            for event in &committed.inserted_events {
+        let notification_stats = self
+            .deliver_notifications(
+                request.mode,
+                &committed.inserted_events,
+                notification_issue_ids.as_ref(),
+            )
+            .await;
+
+        Ok(SyncOutcome {
+            mode: request.mode,
+            pages_fetched,
+            issues_fetched: issue_count,
+            events_inserted: committed.inserted_events.len(),
+            notifications_delivered: notification_stats.delivered,
+            notification_failures: notification_stats.failures,
+            cursor,
+        })
+    }
+
+    async fn deliver_notifications(
+        &self,
+        mode: SyncMode,
+        inserted_events: &[UpdateEvent],
+        notification_issue_ids: Option<&HashSet<jira_domain::IssueId>>,
+    ) -> NotificationStats {
+        let mut stats = NotificationStats {
+            delivered: 0,
+            failures: 0,
+        };
+        if mode.emits_updates() {
+            for event in inserted_events {
                 if !matches!(event.kind, UpdateKind::CommentAdded { .. })
                     && notification_issue_ids
-                        .as_ref()
                         .is_some_and(|issue_ids| !issue_ids.contains(&event.issue_id))
                 {
                     let _ = self
@@ -296,7 +327,7 @@ impl SyncService {
                         .await
                     {
                         Ok(()) => {
-                            notifications_delivered += 1;
+                            stats.delivered += 1;
                             let _ = self
                                 .cache
                                 .record_notification_delivery(
@@ -307,7 +338,7 @@ impl SyncService {
                                 .await;
                         }
                         Err(_) => {
-                            notification_failures += 1;
+                            stats.failures += 1;
                             let _ = self
                                 .cache
                                 .record_notification_delivery(
@@ -330,16 +361,7 @@ impl SyncService {
                 }
             }
         }
-
-        Ok(SyncOutcome {
-            mode: request.mode,
-            pages_fetched,
-            issues_fetched: issue_count,
-            events_inserted: committed.inserted_events.len(),
-            notifications_delivered,
-            notification_failures,
-            cursor,
-        })
+        stats
     }
 
     async fn mention_events(
@@ -679,6 +701,7 @@ mod tests {
         inserted_events: Mutex<Vec<UpdateEvent>>,
         failures: Mutex<Vec<ErrorKind>>,
         deliveries: Mutex<Vec<(EventId, NotificationDelivery)>>,
+        operation_log: Option<Arc<Mutex<Vec<&'static str>>>>,
     }
 
     impl IssueCachePort for FakeCache {
@@ -713,6 +736,12 @@ mod tests {
         }
 
         fn commit_sync<'a>(&'a self, commit: SyncCommit) -> PortFuture<'a, CommitOutcome> {
+            if let Some(operation_log) = &self.operation_log {
+                operation_log
+                    .lock()
+                    .expect("operation log lock")
+                    .push("commit");
+            }
             let committed_events = commit.update_events.clone();
             self.commits.lock().expect("commits lock").push(commit);
             let events = if committed_events.is_empty() {
@@ -772,10 +801,17 @@ mod tests {
     struct FakeNotifications {
         calls: Mutex<usize>,
         fail: bool,
+        operation_log: Option<Arc<Mutex<Vec<&'static str>>>>,
     }
 
     impl NotificationPort for FakeNotifications {
         fn deliver<'a>(&'a self, _request: NotificationRequest) -> PortFuture<'a, ()> {
+            if let Some(operation_log) = &self.operation_log {
+                operation_log
+                    .lock()
+                    .expect("operation log lock")
+                    .push("deliver");
+            }
             *self.calls.lock().expect("notification calls lock") += 1;
             let fail = self.fail;
             Box::pin(async move {
@@ -993,6 +1029,59 @@ mod tests {
                 .lock()
                 .expect("comment requests lock")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn commit_precedes_notification_delivery() {
+        let (site_id, user_set_id, _account_id) = fixture_ids();
+        let operation_log = Arc::new(Mutex::new(Vec::new()));
+        let jira = Arc::new(FakeJira {
+            pages: Mutex::new(VecDeque::from([IssuePage {
+                issues: vec![fixture_issue(site_id.clone())],
+                next_cursor: None,
+                server_time: Some(datetime!(2026-08-16 12:01 UTC)),
+            }])),
+            ..FakeJira::default()
+        });
+        let cache = Arc::new(FakeCache {
+            operation_log: Some(operation_log.clone()),
+            ..FakeCache::default()
+        });
+        let differ = Arc::new(FakeDiffer {
+            events: Mutex::new(vec![fixture_event(site_id.clone(), user_set_id.clone())]),
+            ..FakeDiffer::default()
+        });
+        let notifications = Arc::new(FakeNotifications {
+            operation_log: Some(operation_log.clone()),
+            ..FakeNotifications::default()
+        });
+        let service = service(
+            jira,
+            cache,
+            differ,
+            notifications,
+            datetime!(2026-08-16 12:00 UTC),
+        );
+
+        let outcome = block_on(service.run(
+            SyncRequest {
+                site_id,
+                user_set_id,
+                assignees: None,
+                watchers: None,
+                jql_scope: None,
+                notification_assignees: None,
+                mode: SyncMode::Incremental,
+            },
+            &CancellationToken::new(),
+        ))
+        .expect("incremental sync");
+
+        assert_eq!(outcome.notifications_delivered, 1);
+        assert_eq!(
+            operation_log.lock().expect("operation log lock").as_slice(),
+            ["commit", "deliver"]
         );
     }
 
