@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   appimage:
-    name: Linux x86_64 Wayland CI or AppImage
+    name: Linux x86_64 Wayland CI and AppImage
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
@@ -94,22 +94,20 @@ jobs:
             exit 1
           fi
 
-          mode=''
-          profile=''
+          run_ci=false
+          build_appimage=false
           case "$EVENT_NAME" in
             pull_request)
-              mode=ci
-              profile=debug
+              run_ci=true
               ;;
             push)
               case "$REF_TYPE:$REF_NAME" in
                 branch:main)
-                  mode=ci
-                  profile=debug
+                  run_ci=true
+                  build_appimage=true
                   ;;
                 tag:v*)
-                  mode=release
-                  profile=release
+                  build_appimage=true
                   ;;
                 *)
                   echo 'Unsupported push ref for this workflow' >&2
@@ -118,8 +116,7 @@ jobs:
               esac
               ;;
             workflow_dispatch)
-              mode=release
-              profile=release
+              build_appimage=true
               ;;
             *)
               echo "Unsupported event for this workflow: $EVENT_NAME" >&2
@@ -161,8 +158,8 @@ jobs:
             exit 1
           fi
 
-          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
-          printf 'profile=%s\n' "$profile" >> "$GITHUB_OUTPUT"
+          printf 'run_ci=%s\n' "$run_ci" >> "$GITHUB_OUTPUT"
+          printf 'build_appimage=%s\n' "$build_appimage" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
@@ -176,13 +173,23 @@ jobs:
           restore-keys: |
             cargo-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-
 
-      - name: Cache Cargo build output
+      - name: Cache Cargo debug build output
+        if: ${{ steps.appimage-version.outputs.run_ci == 'true' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: target/${{ steps.appimage-version.outputs.profile }}
-          key: cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ steps.appimage-version.outputs.mode }}-${{ steps.appimage-version.outputs.profile }}-${{ hashFiles('Cargo.lock') }}-${{ steps.appimage-version.outputs.source_sha }}
+          path: target/debug
+          key: cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-ci-debug-${{ hashFiles('Cargo.lock') }}-${{ steps.appimage-version.outputs.source_sha }}
           restore-keys: |
-            cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-${{ steps.appimage-version.outputs.mode }}-${{ steps.appimage-version.outputs.profile }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-ci-debug-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Cache Cargo release build output
+        if: ${{ steps.appimage-version.outputs.build_appimage == 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/release
+          key: cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-release-release-${{ hashFiles('Cargo.lock') }}-${{ steps.appimage-version.outputs.source_sha }}
+          restore-keys: |
+            cargo-target-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-release-release-${{ hashFiles('Cargo.lock') }}-
 
       - name: Validate desktop and AppStream metadata
         run: |
@@ -192,15 +199,15 @@ jobs:
             packaging/appimage/dev.jiradesk.JiraDesk.metainfo.xml
 
       - name: Check formatting
-        if: ${{ steps.appimage-version.outputs.mode == 'ci' }}
+        if: ${{ steps.appimage-version.outputs.run_ci == 'true' }}
         run: cargo fmt --all -- --check
 
       - name: Test workspace
-        if: ${{ steps.appimage-version.outputs.mode == 'ci' }}
+        if: ${{ steps.appimage-version.outputs.run_ci == 'true' }}
         run: cargo test --workspace --all-targets --locked
 
       - name: Check production code with Clippy
-        if: ${{ steps.appimage-version.outputs.mode == 'ci' }}
+        if: ${{ steps.appimage-version.outputs.run_ci == 'true' }}
         run: cargo clippy --workspace --lib --bins --locked -- -D warnings
 
       - name: Guard against gpui_linux X11 feature
@@ -215,11 +222,11 @@ jobs:
           fi
 
       - name: Build release binary
-        if: ${{ steps.appimage-version.outputs.mode == 'release' }}
+        if: ${{ steps.appimage-version.outputs.build_appimage == 'true' }}
         run: cargo build --release --locked -p jira-gpui
 
       - name: Download and verify AppImage tools
-        if: ${{ steps.appimage-version.outputs.mode == 'release' }}
+        if: ${{ steps.appimage-version.outputs.build_appimage == 'true' }}
         shell: bash
         env:
           TOOL_DIR: ${{ runner.temp }}/jira-desk-appimage-tools
@@ -251,7 +258,7 @@ jobs:
             '1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf'
 
       - name: Build AppImage
-        if: ${{ steps.appimage-version.outputs.mode == 'release' }}
+        if: ${{ steps.appimage-version.outputs.build_appimage == 'true' }}
         shell: bash
         env:
           TOOL_DIR: ${{ runner.temp }}/jira-desk-appimage-tools
@@ -266,7 +273,7 @@ jobs:
           packaging/appimage/build-appimage.sh --skip-build
 
       - name: Inspect AppImage without FUSE
-        if: ${{ steps.appimage-version.outputs.mode == 'release' }}
+        if: ${{ steps.appimage-version.outputs.build_appimage == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -299,7 +306,7 @@ jobs:
           fi
 
       - name: Upload AppImage artifacts
-        if: ${{ steps.appimage-version.outputs.mode == 'release' }}
+        if: ${{ steps.appimage-version.outputs.build_appimage == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: jira-desk-${{ steps.appimage-version.outputs.version }}-x86_64
