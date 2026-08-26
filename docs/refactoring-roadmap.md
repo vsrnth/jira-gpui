@@ -6,7 +6,7 @@ This living roadmap tracks behavior-preserving, independently reviewable refacto
 
 - **Completed** — merged and recorded here.
 - **Ready** — audited and bounded for implementation.
-Item 35 is Ready. Items 1–24, 25–34, and 36 are Completed.
+Items 1–36 are Completed; no Ready items remain.
 
 ## Ranked work
 
@@ -46,7 +46,7 @@ Item 35 is Ready. Items 1–24, 25–34, and 36 are Completed.
 | 32 · **Completed** | Jira HTTP reads: `crates/jira-http/src/lib.rs` | Centralize token-page progress guards for HTTP-owned bulk reads. | Preserve endpoint-specific current behavior first; any hardening behavior change is a separate roadmap item. | Focused page-progress/cycle tests for each bulk-read endpoint. | `9141aff` |
 | 33 · **Completed** | Desktop notifications: `crates/desktop-notifications/src/lib.rs` | Add a private backend seam for deterministic one-call, failure, and retention tests. | Preserve `NotifyRust` handle lifetime, one dispatch, and no retries; keep the seam private. | Focused deterministic notification tests. | `86d12a7` |
 | 34 · **Completed** | Workspace docs/manifests/tests: `README.md`, `Cargo.toml`, package manifests, brittle count snapshots | Correct documentation and manifest drift for remembered credentials, workspace `futures-lite` inheritance, and hard-coded test-count snapshots. | Documentation/configuration/test-maintenance only; do not change runtime behavior or broaden snapshot policy. | Targeted documentation/config checks and affected tests. | `c4ad942` |
-| 35 · **Ready** | Pure Dashboard presentation policy: `apps/gpui/src/dashboard.rs` and presentation modules | Replace tuple/operation-string Dashboard outcome/error copies with typed presentation policy after feature-state seams. | Do not duplicate completed update-feed roadmap item 3; preserve user-facing wording and outcome mapping. | Focused presentation tests on a supported native GPUI host, plus Linux Wayland or macOS smoke where behavior is platform-sensitive. | — |
+| 35 · **Completed** | Pure Dashboard presentation policy: `apps/gpui/src/dashboard.rs` and presentation modules | Replace tuple/operation-string Dashboard outcome/error copies with typed presentation policy after feature-state seams. | Do not duplicate completed update-feed roadmap item 3; preserve user-facing wording and outcome mapping. | Focused presentation tests on a supported native GPUI host, plus Linux Wayland or macOS smoke where behavior is platform-sensitive. | `ef1d32a` |
 | 36 · **Completed** | Application notification tests: `crates/application/src/notifications.rs` test code | Mechanically remove current test-lint `unwrap` violations. | Test-lint hygiene only; no broad pedantic cleanup and no production behavior change. | Targeted application all-target Clippy for `crates/application/src/notifications.rs` test code. | `624f9fd` |
 
 Platform-sensitive GPUI validation uses a supported native host and the relevant Linux Wayland or macOS smoke; unrelated all-target Clippy blockers remain context only. Item 36 is a narrow Completed test-lint cleanup and does not broaden that context.
