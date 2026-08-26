@@ -1,3 +1,4 @@
+use super::settings::{persisted_direct_team_member, team_identifier_lines};
 use super::*;
 use crate::presentation::{UpdateViewModel, normalized_issue_key};
 use crate::sample_data::{sample_issues, sample_users};
@@ -1110,13 +1111,6 @@ fn team_identifier_parser_trims_bounds_and_rejects_jql_metacharacters() {
     );
     assert!(team_identifier_lines("account\"bad").is_err());
     assert!(team_identifier_lines(&"account-a\n".repeat(MAX_TEAM_MEMBERS + 1)).is_err());
-}
-
-#[test]
-fn team_email_resolution_requires_exactly_one_candidate() {
-    assert_eq!(team_email_resolution_message(1), None);
-    assert!(team_email_resolution_message(0).is_some());
-    assert!(team_email_resolution_message(2).is_some());
 }
 
 #[test]

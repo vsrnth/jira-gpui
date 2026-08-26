@@ -46,8 +46,8 @@ use crate::{
     },
     live_workspace::{CachedWorkspace, LiveWorkspace, RefreshResult},
     local_data::{
-        LocalPreferences, MAX_TEAM_MEMBERS, PersistedTeamMember, load_preferences,
-        normalize_issue_jql_scope, normalize_team_members, save_preferences,
+        MAX_TEAM_MEMBERS, PersistedTeamMember, load_preferences, normalize_issue_jql_scope,
+        normalize_team_members,
     },
     presentation::{
         CompactedUpdateRow, IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection,
@@ -66,6 +66,7 @@ use crate::{
 };
 
 mod media;
+mod settings;
 
 use media::{
     AttachmentDownloadState, MAX_ATTACHMENT_DOWNLOAD_BYTES, attachment_download_button_label,
@@ -289,35 +290,6 @@ enum Section {
     Settings,
 }
 
-fn team_identifier_lines(value: &str) -> Result<Vec<String>, &'static str> {
-    let lines = value
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if lines.len() > MAX_TEAM_MEMBERS {
-        return Err("Team tracker accepts at most 100 members");
-    }
-    for line in &lines {
-        if line.chars().any(char::is_control) || line.len() > 320 {
-            return Err("Team tracker entries must be short, single-line values");
-        }
-        if !line.contains('@') {
-            let account = AccountId::new(line.clone())
-                .map_err(|_| "Enter a valid Jira account ID or Atlassian email")?;
-            if account
-                .as_str()
-                .chars()
-                .any(|character| matches!(character, '"' | '\\'))
-            {
-                return Err("Jira account IDs cannot contain quote or backslash characters");
-            }
-        }
-    }
-    Ok(lines)
-}
-
 fn team_issue_counts(issues: &[Issue]) -> (usize, usize) {
     let displayed = issues
         .iter()
@@ -356,31 +328,6 @@ fn team_feedback_is_loading(feedback: Option<&str>) -> bool {
     feedback.is_some_and(|message| {
         message.starts_with("Refreshing team tracker")
             || message.starts_with("Resolving team members")
-    })
-}
-
-fn team_email_resolution_message(candidate_count: usize) -> Option<&'static str> {
-    match candidate_count {
-        1 => None,
-        0 => Some("Email did not resolve to one active Jira user"),
-        _ => Some("Email matched multiple active Jira users; enter an account ID instead"),
-    }
-}
-
-fn persisted_direct_team_member(identifier: String) -> Result<PersistedTeamMember, &'static str> {
-    let account_id = AccountId::new(identifier.clone())
-        .map_err(|_| "Enter a valid Jira account ID or Atlassian email")?;
-    if account_id
-        .as_str()
-        .chars()
-        .any(|character| matches!(character, '"' | '\\'))
-    {
-        return Err("Jira account IDs cannot contain quote or backslash characters");
-    }
-    Ok(PersistedTeamMember {
-        identifier,
-        account_id: account_id.into_inner(),
-        display_name: "Unknown user".to_owned(),
     })
 }
 
@@ -5340,44 +5287,23 @@ impl Dashboard {
         cx.notify();
 
         let task = cx.spawn(async move |this, cx| {
-            let normalized = normalize_issue_jql_scope(Some(entered.clone()));
-            let result = async {
-                let normalized = normalized
-                    .map_err(|_| "Scope is invalid; check the expression and ORDER BY rule")?;
-                workspace
-                    .set_jql_scope(normalized.clone())
-                    .await
-                    .map_err(|_| "Scope could not be prepared locally")?;
-                let refreshed = match workspace.refresh(&CancellationToken::new()).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        if workspace.set_jql_scope(previous_scope.clone()).await.is_err() {
-                            return Err("Jira rejected the scope and the previous scope could not be restored");
-                        }
-                        let _ = workspace.load_cached_for_authenticated_account().await;
-                        return Err("Jira rejected the scope; the previous scope remains active");
-                    }
-                };
-                if save_preferences(&LocalPreferences {
-                    issue_jql_scope: normalized.clone(),
-                    team_members,
-                })
-                .is_err()
-                {
-                    if workspace.set_jql_scope(previous_scope.clone()).await.is_err() {
-                        return Err("Settings could not be saved and the previous scope could not be restored");
-                    }
-                    let _ = workspace.load_cached_for_authenticated_account().await;
-                    return Err("Scope applied remotely, but settings could not be saved locally");
-                }
-                Ok((refreshed, normalized))
-            }
+            let preferences = settings::ProductionPreferences;
+            let result = settings::run_scope_transaction(
+                workspace.as_ref(),
+                &preferences,
+                entered,
+                previous_scope,
+                team_members,
+            )
             .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.operation_in_progress = false;
                 match result {
-                    Ok((refreshed, normalized)) => {
+                    settings::ScopeSaveResult::Saved {
+                        refreshed,
+                        normalized,
+                    } => {
                         this.settings_scope_text = normalized
                             .clone()
                             .unwrap_or_else(|| DEFAULT_JQL_SCOPE.to_owned());
@@ -5387,8 +5313,40 @@ impl Dashboard {
                         this.apply_cached(refreshed.cached, cx);
                         this.start_automatic_polling(cx);
                     }
-                    Err(message) => {
-                        if message.contains("could not be restored") {
+                    settings::ScopeSaveResult::Failed(failure) => {
+                        let (message, restore_failed) = match failure {
+                            settings::ScopeSaveFailure::Unchanged(
+                                settings::ScopeUnchangedFailure::Invalid,
+                            ) => (
+                                "Scope is invalid; check the expression and ORDER BY rule",
+                                false,
+                            ),
+                            settings::ScopeSaveFailure::Unchanged(
+                                settings::ScopeUnchangedFailure::Preparation,
+                            ) => ("Scope could not be prepared locally", false),
+                            settings::ScopeSaveFailure::Restored(
+                                settings::ScopeFailureCause::Refresh,
+                            ) => ("Jira rejected the scope; the previous scope remains active", false),
+                            settings::ScopeSaveFailure::RestoreFailed(
+                                settings::ScopeFailureCause::Refresh,
+                            ) => (
+                                "Jira rejected the scope and the previous scope could not be restored",
+                                true,
+                            ),
+                            settings::ScopeSaveFailure::Restored(
+                                settings::ScopeFailureCause::PreferenceSave,
+                            ) => (
+                                "Scope applied remotely, but settings could not be saved locally",
+                                false,
+                            ),
+                            settings::ScopeSaveFailure::RestoreFailed(
+                                settings::ScopeFailureCause::PreferenceSave,
+                            ) => (
+                                "Settings could not be saved and the previous scope could not be restored",
+                                true,
+                            ),
+                        };
+                        if restore_failed {
                             // Never leave the old cache paired with an unknown active scope.
                             this.workspace = None;
                             this.polling_task.take();
@@ -5424,80 +5382,20 @@ impl Dashboard {
         self.operation_in_progress = true;
         self.team_feedback = Some("Resolving team members and refreshing Jira…".to_owned());
         let task = cx.spawn(async move |this, cx| {
-            let result = async {
-                let identifiers = team_identifier_lines(&entered)?;
-                let mut resolved = Vec::new();
-                for identifier in identifiers {
-                    let user = if identifier.contains('@') {
-                        let users = workspace
-                            .search_users(identifier.clone(), 5, &CancellationToken::new())
-                            .await
-                            .map_err(|_| "Jira user search failed; existing team remains active")?
-                            .into_iter()
-                            .filter(|user| user.active)
-                            .collect::<Vec<_>>();
-                        if let Some(message) = team_email_resolution_message(users.len()) {
-                            return Err(message);
-                        }
-                        users.into_iter().next().expect("exactly one candidate")
-                    } else {
-                        let member = persisted_direct_team_member(identifier)?;
-                        resolved.push(member);
-                        continue;
-                    };
-                    resolved.push(PersistedTeamMember {
-                        identifier,
-                        account_id: user.account_id.to_string(),
-                        display_name: user.display_name,
-                    });
-                }
-                let normalized = normalize_team_members(resolved)
-                    .map_err(|_| "Team tracker entries are invalid or exceed the member limit")?;
-                let accounts = normalized
-                    .iter()
-                    .filter_map(|member| AccountId::new(member.account_id.clone()).ok())
-                    .collect::<Vec<_>>();
-                workspace.configure_team_members(accounts).await.map_err(
-                    |_| "Team configuration could not be applied; existing team remains active",
-                )?;
-                let refreshed = match workspace.refresh_team(&CancellationToken::new()).await {
-                    Ok(refreshed) => refreshed,
-                    Err(_) => {
-                        let restored = workspace
-                            .configure_team_members(previous_accounts.clone())
-                            .await
-                            .is_ok();
-                        return Err(if restored {
-                            "Team refresh failed; existing team remains active"
-                        } else {
-                            "Team refresh failed and the previous team could not be restored; team tracker paused"
-                        });
-                    }
-                };
-                if save_preferences(&LocalPreferences {
-                    issue_jql_scope,
-                    team_members: normalized.clone(),
-                })
-                .is_err()
-                {
-                    let restored = workspace
-                        .configure_team_members(previous_accounts.clone())
-                        .await
-                        .is_ok();
-                    return Err(if restored {
-                        "Team refreshed but could not be saved locally; existing team remains active"
-                    } else {
-                        "Team settings could not be saved and the previous team could not be restored; team tracker paused"
-                    });
-                }
-                Ok((normalized, refreshed))
-            }
+            let preferences = settings::ProductionPreferences;
+            let result = settings::run_team_transaction(
+                workspace.as_ref(),
+                &preferences,
+                entered,
+                previous_accounts,
+                issue_jql_scope,
+            )
             .await;
             let _ = this.update(cx, |this, cx| {
                 this.team_task = None;
                 this.operation_in_progress = false;
                 match result {
-                    Ok((members, refreshed)) => {
+                    settings::TeamSaveResult::Saved { members, refreshed } => {
                         this.team_automatic_polling_paused = false;
                         this.team_members = members;
                         this.team_text = this
@@ -5533,10 +5431,42 @@ impl Dashboard {
                             &this.team_issues,
                         ));
                     }
-                    Err(message) => {
+                    settings::TeamSaveResult::Failed(failure) => {
                         this.team_members = previous_members;
                         this.team_text = previous_text;
-                        if message.contains("could not be restored") {
+                        let (message, restore_failed) = match failure {
+                            settings::TeamSaveFailure::Unchanged(
+                                settings::TeamUnchangedFailure::InvalidInput(message),
+                            ) => (message, false),
+                            settings::TeamSaveFailure::Unchanged(
+                                settings::TeamUnchangedFailure::Search,
+                            ) => ("Jira user search failed; existing team remains active", false),
+                            settings::TeamSaveFailure::Unchanged(
+                                settings::TeamUnchangedFailure::EmailNotFound,
+                            ) => ("Email did not resolve to one active Jira user", false),
+                            settings::TeamSaveFailure::Unchanged(
+                                settings::TeamUnchangedFailure::EmailAmbiguous,
+                            ) => ("Email matched multiple active Jira users; enter an account ID instead", false),
+                            settings::TeamSaveFailure::Unchanged(
+                                settings::TeamUnchangedFailure::Normalization,
+                            ) => ("Team tracker entries are invalid or exceed the member limit", false),
+                            settings::TeamSaveFailure::Unchanged(
+                                settings::TeamUnchangedFailure::Preparation,
+                            ) => ("Team configuration could not be applied; existing team remains active", false),
+                            settings::TeamSaveFailure::Restored(
+                                settings::TeamFailureCause::Refresh,
+                            ) => ("Team refresh failed; existing team remains active", false),
+                            settings::TeamSaveFailure::RestoreFailed(
+                                settings::TeamFailureCause::Refresh,
+                            ) => ("Team refresh failed and the previous team could not be restored; team tracker paused", true),
+                            settings::TeamSaveFailure::Restored(
+                                settings::TeamFailureCause::PreferenceSave,
+                            ) => ("Team refreshed but could not be saved locally; existing team remains active", false),
+                            settings::TeamSaveFailure::RestoreFailed(
+                                settings::TeamFailureCause::PreferenceSave,
+                            ) => ("Team settings could not be saved and the previous team could not be restored; team tracker paused", true),
+                        };
+                        if restore_failed {
                             this.team_automatic_polling_paused = true;
                             this.team_members.clear();
                             this.team_issues.clear();
