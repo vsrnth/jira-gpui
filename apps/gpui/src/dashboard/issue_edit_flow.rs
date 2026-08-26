@@ -1,6 +1,13 @@
 use jira_application::{ApplicationError, ErrorKind, IssueTransition};
 use jira_domain::{AccountId, IssueId, User};
 
+#[cfg(test)]
+use crate::presentation::{FeedbackCertainty, RecoveryDirective};
+
+use crate::presentation::{
+    IssueEditPhase, OutcomeCopy, issue_edit_error_copy, issue_edit_workspace_unavailable_copy,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum IssueEditState {
     Idle,
@@ -41,8 +48,7 @@ pub(super) enum IssueEditState {
     },
     Error {
         issue_id: IssueId,
-        message: String,
-        unknown_outcome: bool,
+        copy: OutcomeCopy,
         operation: IssueEditOperation,
     },
 }
@@ -136,43 +142,20 @@ impl IssueEditSubmission {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum IssueEditCompletion {
-    Applied,
-    Failed { unknown_outcome: bool },
-    Ignored { release_busy: bool },
+pub(super) enum BusyDirective {
+    Retain,
+    Release,
 }
 
-pub(super) fn issue_edit_error_message(
-    error: &ApplicationError,
-    operation: &str,
-) -> (&'static str, bool) {
-    match error.kind() {
-        ErrorKind::UnknownOutcome => (
-            "Jira may have accepted this change. Refresh Jira before another attempt.",
-            true,
-        ),
-        ErrorKind::Authentication => (
-            "Change not applied · Jira authentication was rejected",
-            false,
-        ),
-        ErrorKind::Authorization => ("Change not applied · Jira denied permission", false),
-        ErrorKind::NotFound => ("Change not applied · the Jira issue was not found", false),
-        ErrorKind::RateLimited => (
-            "Change not applied · Jira rate limit reached; try later",
-            false,
-        ),
-        ErrorKind::Offline => ("Change not applied · Jira is unreachable", false),
-        ErrorKind::InvalidInput => (
-            "Change not applied · Jira rejected the requested change",
-            false,
-        ),
-        ErrorKind::Cancelled => ("Change cancelled", false),
-        _ if operation == "lookup" => (
-            "Jira options unavailable · request was not completed",
-            false,
-        ),
-        _ => ("Change not applied · Jira returned an error", false),
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IssueEditCompletion {
+    Applied,
+    Failed { copy: OutcomeCopy },
+    Ignored { busy: BusyDirective },
+}
+
+pub(super) fn issue_edit_error_message(kind: ErrorKind, phase: IssueEditPhase) -> OutcomeCopy {
+    issue_edit_error_copy(kind, phase)
 }
 
 pub(super) fn status_control_is_editable(
@@ -291,11 +274,10 @@ impl IssueEditFlow {
                 users,
             },
             Err(error) => {
-                let (message, unknown_outcome) = issue_edit_error_message(&error, "lookup");
+                let copy = issue_edit_error_message(error.kind(), IssueEditPhase::Lookup);
                 IssueEditState::Error {
                     issue_id,
-                    message: message.to_owned(),
-                    unknown_outcome,
+                    copy,
                     operation: IssueEditOperation::Assignee,
                 }
             }
@@ -321,12 +303,11 @@ impl IssueEditFlow {
                 transitions,
             },
             Err(error) => {
-                let (message, unknown_outcome) = issue_edit_error_message(&error, "lookup");
+                let copy = issue_edit_error_message(error.kind(), IssueEditPhase::Lookup);
                 self.status_popover_open = false;
                 IssueEditState::Error {
                     issue_id,
-                    message: message.to_owned(),
-                    unknown_outcome,
+                    copy,
                     operation: IssueEditOperation::Transition,
                 }
             }
@@ -471,8 +452,7 @@ impl IssueEditFlow {
     pub(super) fn unavailable(&mut self, issue_id: IssueId, operation: IssueEditOperation) {
         self.state = IssueEditState::Error {
             issue_id,
-            message: "Change unavailable · live Jira workspace is not ready".to_owned(),
-            unknown_outcome: false,
+            copy: issue_edit_workspace_unavailable_copy(),
             operation,
         };
     }
@@ -502,14 +482,13 @@ impl IssueEditFlow {
                     IssueEditCompletion::Applied
                 }
                 Err(error) => {
-                    let (message, unknown_outcome) = issue_edit_error_message(&error, "write");
+                    let copy = issue_edit_error_message(error.kind(), IssueEditPhase::Write);
                     self.state = IssueEditState::Error {
                         issue_id: identity.issue_id().clone(),
-                        message: message.to_owned(),
-                        unknown_outcome,
+                        copy,
                         operation: identity.operation(),
                     };
-                    IssueEditCompletion::Failed { unknown_outcome }
+                    IssueEditCompletion::Failed { copy }
                 }
             };
         }
@@ -520,7 +499,7 @@ impl IssueEditFlow {
             .position(|invalidated| invalidated == &identity)
         else {
             return IssueEditCompletion::Ignored {
-                release_busy: false,
+                busy: BusyDirective::Retain,
             };
         };
         self.invalidated_submissions.swap_remove(index);
@@ -529,7 +508,11 @@ impl IssueEditFlow {
             .as_ref()
             .is_some_and(|latest| latest != &identity);
         IssueEditCompletion::Ignored {
-            release_busy: !superseded,
+            busy: if superseded {
+                BusyDirective::Retain
+            } else {
+                BusyDirective::Release
+            },
         }
     }
 
@@ -539,13 +522,7 @@ impl IssueEditFlow {
 
     pub(super) fn refresh_succeeded(&mut self) {
         self.reconciliation_pending = false;
-        if matches!(
-            self.state,
-            IssueEditState::Error {
-                unknown_outcome: true,
-                ..
-            }
-        ) {
+        if matches!(self.state, IssueEditState::Error { copy, .. } if copy.is_unknown()) {
             self.state = IssueEditState::Idle;
         }
     }
@@ -726,7 +703,9 @@ mod tests {
         assert!(matches!(flow.state(), IssueEditState::Idle));
         assert_eq!(
             flow.finish_write(submission.identity().clone(), Some(&issue("2")), Ok(())),
-            IssueEditCompletion::Ignored { release_busy: true }
+            IssueEditCompletion::Ignored {
+                busy: BusyDirective::Release,
+            }
         );
         assert!(matches!(flow.state(), IssueEditState::Idle));
     }
@@ -749,7 +728,7 @@ mod tests {
                 Err(ApplicationError::new(ErrorKind::UnknownOutcome, "secret")),
             ),
             IssueEditCompletion::Failed {
-                unknown_outcome: true
+                copy: issue_edit_error_copy(ErrorKind::UnknownOutcome, IssueEditPhase::Write)
             }
         );
         assert!(!matches!(flow.state(), IssueEditState::Idle));
@@ -790,7 +769,7 @@ mod tests {
                 Err(ApplicationError::new(ErrorKind::Authorization, "denied")),
             ),
             IssueEditCompletion::Failed {
-                unknown_outcome: false
+                copy: issue_edit_error_copy(ErrorKind::Authorization, IssueEditPhase::Write)
             }
         );
         let definite_state = flow.state().clone();
@@ -830,7 +809,7 @@ mod tests {
                 Err(ApplicationError::new(ErrorKind::Authorization, "old")),
             ),
             IssueEditCompletion::Ignored {
-                release_busy: false
+                busy: BusyDirective::Retain,
             }
         );
         assert!(matches!(
@@ -840,7 +819,7 @@ mod tests {
         assert_eq!(
             flow.finish_write(old.identity().clone(), Some(&selected), Ok(()),),
             IssueEditCompletion::Ignored {
-                release_busy: false
+                busy: BusyDirective::Retain,
             }
         );
 
@@ -852,7 +831,7 @@ mod tests {
         assert_eq!(
             flow.finish_write(wrong_operation, Some(&selected), Ok(())),
             IssueEditCompletion::Ignored {
-                release_busy: false
+                busy: BusyDirective::Retain,
             }
         );
         let wrong_issue = SubmissionIdentity {
@@ -863,13 +842,13 @@ mod tests {
         assert_eq!(
             flow.finish_write(wrong_issue, Some(&selected), Ok(())),
             IssueEditCompletion::Ignored {
-                release_busy: false
+                busy: BusyDirective::Retain,
             }
         );
         assert_eq!(
             flow.finish_write(newer.identity().clone(), Some(&issue("2")), Ok(()),),
             IssueEditCompletion::Ignored {
-                release_busy: false
+                busy: BusyDirective::Retain,
             }
         );
         assert!(matches!(
@@ -884,83 +863,153 @@ mod tests {
 
     #[test]
     fn error_copy_maps_every_kind_by_lookup_or_write_context() {
-        let cases = [
+        let expected = [
             (
                 ErrorKind::Authentication,
+                IssueEditPhase::Lookup,
+                "Change not applied · Jira authentication was rejected",
+            ),
+            (
+                ErrorKind::Authentication,
+                IssueEditPhase::Write,
                 "Change not applied · Jira authentication was rejected",
             ),
             (
                 ErrorKind::Authorization,
+                IssueEditPhase::Lookup,
+                "Change not applied · Jira denied permission",
+            ),
+            (
+                ErrorKind::Authorization,
+                IssueEditPhase::Write,
                 "Change not applied · Jira denied permission",
             ),
             (
                 ErrorKind::NotFound,
+                IssueEditPhase::Lookup,
+                "Change not applied · the Jira issue was not found",
+            ),
+            (
+                ErrorKind::NotFound,
+                IssueEditPhase::Write,
                 "Change not applied · the Jira issue was not found",
             ),
             (
                 ErrorKind::RateLimited,
+                IssueEditPhase::Lookup,
+                "Change not applied · Jira rate limit reached; try later",
+            ),
+            (
+                ErrorKind::RateLimited,
+                IssueEditPhase::Write,
                 "Change not applied · Jira rate limit reached; try later",
             ),
             (
                 ErrorKind::Offline,
+                IssueEditPhase::Lookup,
+                "Change not applied · Jira is unreachable",
+            ),
+            (
+                ErrorKind::Offline,
+                IssueEditPhase::Write,
                 "Change not applied · Jira is unreachable",
             ),
             (
                 ErrorKind::InvalidInput,
+                IssueEditPhase::Lookup,
                 "Change not applied · Jira rejected the requested change",
             ),
-            (ErrorKind::Cancelled, "Change cancelled"),
+            (
+                ErrorKind::InvalidInput,
+                IssueEditPhase::Write,
+                "Change not applied · Jira rejected the requested change",
+            ),
+            (
+                ErrorKind::Cancelled,
+                IssueEditPhase::Lookup,
+                "Change cancelled",
+            ),
+            (
+                ErrorKind::Cancelled,
+                IssueEditPhase::Write,
+                "Change cancelled",
+            ),
             (
                 ErrorKind::Storage,
+                IssueEditPhase::Lookup,
+                "Jira options unavailable · request was not completed",
+            ),
+            (
+                ErrorKind::Storage,
+                IssueEditPhase::Write,
                 "Change not applied · Jira returned an error",
             ),
             (
                 ErrorKind::Upstream,
+                IssueEditPhase::Lookup,
+                "Jira options unavailable · request was not completed",
+            ),
+            (
+                ErrorKind::Upstream,
+                IssueEditPhase::Write,
                 "Change not applied · Jira returned an error",
             ),
             (
                 ErrorKind::Notification,
+                IssueEditPhase::Lookup,
+                "Jira options unavailable · request was not completed",
+            ),
+            (
+                ErrorKind::Notification,
+                IssueEditPhase::Write,
                 "Change not applied · Jira returned an error",
             ),
             (
                 ErrorKind::Internal,
+                IssueEditPhase::Lookup,
+                "Jira options unavailable · request was not completed",
+            ),
+            (
+                ErrorKind::Internal,
+                IssueEditPhase::Write,
                 "Change not applied · Jira returned an error",
             ),
+            (
+                ErrorKind::UnknownOutcome,
+                IssueEditPhase::Lookup,
+                "Jira may have accepted this change. Refresh Jira before another attempt.",
+            ),
+            (
+                ErrorKind::UnknownOutcome,
+                IssueEditPhase::Write,
+                "Jira may have accepted this change. Refresh Jira before another attempt.",
+            ),
         ];
-        for (kind, expected) in cases {
-            let error = ApplicationError::new(kind, "redacted detail");
-            assert_eq!(issue_edit_error_message(&error, "write"), (expected, false));
-            let lookup_expected = if matches!(
-                kind,
-                ErrorKind::Storage
-                    | ErrorKind::Upstream
-                    | ErrorKind::Notification
-                    | ErrorKind::Internal
-            ) {
-                "Jira options unavailable · request was not completed"
-            } else {
-                expected
-            };
+        for (kind, phase, expected_message) in expected {
+            let copy = issue_edit_error_message(kind, phase);
+            assert_eq!(copy.message(), expected_message);
             assert_eq!(
-                issue_edit_error_message(&error, "lookup"),
-                (lookup_expected, false)
+                copy.severity(),
+                crate::presentation::FeedbackSeverity::Error
             );
+            assert_eq!(
+                copy.certainty(),
+                if kind == ErrorKind::UnknownOutcome {
+                    FeedbackCertainty::Unknown
+                } else {
+                    FeedbackCertainty::Definite
+                }
+            );
+            assert_eq!(
+                copy.recovery(),
+                if kind == ErrorKind::UnknownOutcome {
+                    RecoveryDirective::Refresh
+                } else {
+                    RecoveryDirective::Retry
+                }
+            );
+            assert!(!copy.message().contains("redacted detail"));
         }
-        let unknown = ApplicationError::new(ErrorKind::UnknownOutcome, "redacted detail");
-        assert_eq!(
-            issue_edit_error_message(&unknown, "write"),
-            (
-                "Jira may have accepted this change. Refresh Jira before another attempt.",
-                true
-            )
-        );
-        assert_eq!(
-            issue_edit_error_message(&unknown, "lookup"),
-            (
-                "Jira may have accepted this change. Refresh Jira before another attempt.",
-                true
-            )
-        );
     }
 
     #[test]

@@ -334,28 +334,37 @@ fn settings_editor_starts_with_the_default_scope() {
 }
 
 #[test]
-fn saved_login_delete_feedback_is_safe_and_explicit() {
-    assert_eq!(
-        saved_login_delete_feedback(SavedLoginDeleteOutcome::Deleted),
+fn saved_login_delete_feedback_is_safe_and_exact_for_every_outcome() {
+    let outcomes = [
         (
+            SavedLoginDeleteOutcome::Deleted,
             "Saved Jira login forgotten. This session remains connected.",
-            false
-        )
-    );
-    assert_eq!(
-        saved_login_delete_feedback(SavedLoginDeleteOutcome::Absent),
+            FeedbackSeverity::Info,
+            FeedbackCertainty::Definite,
+            RecoveryDirective::None,
+        ),
         (
+            SavedLoginDeleteOutcome::Absent,
             "No saved Jira login was present. This session remains connected.",
-            false
-        )
-    );
-    assert_eq!(
-        saved_login_delete_feedback(SavedLoginDeleteOutcome::Error),
+            FeedbackSeverity::Info,
+            FeedbackCertainty::Definite,
+            RecoveryDirective::None,
+        ),
         (
+            SavedLoginDeleteOutcome::Error,
             "Saved Jira login could not be removed from the system keyring.",
-            true
-        )
-    );
+            FeedbackSeverity::Error,
+            FeedbackCertainty::Definite,
+            RecoveryDirective::None,
+        ),
+    ];
+    for (outcome, message, severity, certainty, recovery) in outcomes {
+        let copy = saved_login_delete_feedback(outcome);
+        assert_eq!(copy.message(), message);
+        assert_eq!(copy.severity(), severity);
+        assert_eq!(copy.certainty(), certainty);
+        assert_eq!(copy.recovery(), recovery);
+    }
 }
 
 #[test]
@@ -1059,18 +1068,6 @@ fn team_table_mode_defers_wide_columns_until_the_table_can_fit() {
 }
 
 #[test]
-fn team_feedback_distinguishes_refreshing_from_loaded_empty_results() {
-    assert!(team_feedback_is_loading(Some("Refreshing team tracker…")));
-    assert!(team_feedback_is_loading(Some(
-        "Resolving team members and refreshing Jira…"
-    )));
-    assert!(!team_feedback_is_loading(Some(
-        "Team tracker refreshed · fetched 0 · displaying 0 in-progress tickets"
-    )));
-    assert!(!team_feedback_is_loading(None));
-}
-
-#[test]
 fn semantic_ticket_controls_activate_only_on_plain_enter_or_space() {
     let event = |key| KeyDownEvent {
         keystroke: gpui::Keystroke::parse(key).expect("keystroke"),
@@ -1180,7 +1177,12 @@ fn rebuild_retains_hidden_selection_and_defers_refresh_of_absent_cache_fetch() {
         &[],
         &DetailState::Error {
             issue_id: issue.id.clone(),
-            message: "detail unavailable".to_owned(),
+            copy: OutcomeCopy::new(
+                "detail unavailable",
+                FeedbackSeverity::Error,
+                FeedbackCertainty::Definite,
+                RecoveryDirective::Retry,
+            ),
         },
         true,
     ));
@@ -1189,7 +1191,12 @@ fn rebuild_retains_hidden_selection_and_defers_refresh_of_absent_cache_fetch() {
         &[],
         &DetailState::Error {
             issue_id: IssueId::new("different").expect("issue"),
-            message: "detail unavailable".to_owned(),
+            copy: OutcomeCopy::new(
+                "detail unavailable",
+                FeedbackSeverity::Error,
+                FeedbackCertainty::Definite,
+                RecoveryDirective::Retry,
+            ),
         },
         true,
     ));
@@ -1229,7 +1236,12 @@ fn clearing_search_cancels_and_removes_remote_result() {
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.remote_lookup = RemoteLookupState::Error {
         query: "IX-404".to_owned(),
-        message: "not found".to_owned(),
+        copy: OutcomeCopy::new(
+            "not found",
+            FeedbackSeverity::Error,
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
     };
     let ticket = dashboard
         .remote_lookup_epoch
@@ -1245,23 +1257,18 @@ fn clearing_search_cancels_and_removes_remote_result() {
 
 #[test]
 fn issue_edit_failures_have_safe_definite_and_unknown_copy() {
-    let definite = ApplicationError::new(
-        jira_application::ErrorKind::Authorization,
-        "raw Jira response must not reach UI",
+    let copy = issue_edit_error_message(ErrorKind::Authorization, IssueEditPhase::Write);
+    assert_eq!(
+        copy.message(),
+        "Change not applied · Jira denied permission"
     );
-    let (message, unknown) = issue_edit_error_message(&definite, "write");
-    assert_eq!(message, "Change not applied · Jira denied permission");
-    assert!(!unknown);
-    assert!(!message.contains("raw Jira response"));
+    assert_eq!(copy.certainty(), FeedbackCertainty::Definite);
+    assert!(!copy.message().contains("raw Jira response"));
 
-    let uncertain = ApplicationError::new(
-        jira_application::ErrorKind::UnknownOutcome,
-        "secret transport detail",
-    );
-    let (message, unknown) = issue_edit_error_message(&uncertain, "write");
-    assert!(unknown);
-    assert!(message.contains("Refresh Jira"));
-    assert!(!message.contains("secret transport detail"));
+    let copy = issue_edit_error_message(ErrorKind::UnknownOutcome, IssueEditPhase::Write);
+    assert_eq!(copy.certainty(), FeedbackCertainty::Unknown);
+    assert!(copy.message().contains("Refresh Jira"));
+    assert!(!copy.message().contains("secret transport detail"));
 }
 
 #[test]

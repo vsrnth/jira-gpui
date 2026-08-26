@@ -5,6 +5,578 @@ use jira_domain::{
 };
 use time::macros::datetime;
 
+fn assert_copy(
+    copy: OutcomeCopy,
+    message: &'static str,
+    severity: FeedbackSeverity,
+    certainty: FeedbackCertainty,
+    recovery: RecoveryDirective,
+) {
+    assert_eq!(copy.message(), message);
+    assert_eq!(copy.severity(), severity);
+    assert_eq!(copy.certainty(), certainty);
+    assert_eq!(copy.is_unknown(), certainty == FeedbackCertainty::Unknown);
+    assert_eq!(copy.recovery(), recovery);
+}
+
+#[test]
+fn read_policy_maps_every_error_kind_without_accepting_error_detail() {
+    use jira_application::ErrorKind;
+
+    let kinds = [
+        ErrorKind::Authentication,
+        ErrorKind::Authorization,
+        ErrorKind::RateLimited,
+        ErrorKind::Offline,
+        ErrorKind::Cancelled,
+        ErrorKind::InvalidInput,
+        ErrorKind::NotFound,
+        ErrorKind::Upstream,
+        ErrorKind::Storage,
+        ErrorKind::Notification,
+        ErrorKind::Internal,
+        ErrorKind::UnknownOutcome,
+    ];
+    for surface in [ReadSurface::Sync, ReadSurface::Detail, ReadSurface::Lookup] {
+        for kind in kinds {
+            let copy = read_error_copy(surface, kind);
+            let expected = match (surface, kind) {
+                (ReadSurface::Sync, ErrorKind::Authentication) => {
+                    "Refresh failed · Jira authentication was rejected"
+                }
+                (ReadSurface::Sync, ErrorKind::Authorization) => {
+                    "Refresh failed · Jira authorization was denied"
+                }
+                (ReadSurface::Sync, ErrorKind::RateLimited) => {
+                    "Refresh paused · Jira rate limit reached"
+                }
+                (ReadSurface::Sync, ErrorKind::Offline) => "Refresh failed · Jira is unreachable",
+                (ReadSurface::Sync, ErrorKind::Cancelled) => "Refresh cancelled",
+                (ReadSurface::Sync, ErrorKind::InvalidInput) => "Refresh failed · invalid request",
+                (ReadSurface::Sync, ErrorKind::NotFound) => {
+                    "Refresh failed · Jira site was not found"
+                }
+                (ReadSurface::Sync, ErrorKind::Upstream) => {
+                    "Refresh failed · Jira returned an error"
+                }
+                (
+                    ReadSurface::Sync,
+                    ErrorKind::Storage
+                    | ErrorKind::Notification
+                    | ErrorKind::Internal
+                    | ErrorKind::UnknownOutcome,
+                ) => "Refresh failed · local application error",
+                (ReadSurface::Detail, ErrorKind::Authentication) => {
+                    "Issue details unavailable · Jira authentication was rejected"
+                }
+                (ReadSurface::Detail, ErrorKind::Authorization) => {
+                    "Issue details unavailable · Jira authorization was denied"
+                }
+                (ReadSurface::Detail, ErrorKind::NotFound) => {
+                    "Issue details unavailable · Jira issue was not found"
+                }
+                (ReadSurface::Detail, ErrorKind::RateLimited) => {
+                    "Issue details unavailable · Jira rate limit reached"
+                }
+                (ReadSurface::Detail, ErrorKind::Offline) => {
+                    "Issue details unavailable · Jira is unreachable"
+                }
+                (ReadSurface::Detail, ErrorKind::Cancelled) => "Issue details request cancelled",
+                (
+                    ReadSurface::Detail,
+                    ErrorKind::InvalidInput
+                    | ErrorKind::Upstream
+                    | ErrorKind::Storage
+                    | ErrorKind::Notification
+                    | ErrorKind::Internal
+                    | ErrorKind::UnknownOutcome,
+                ) => "Issue details unavailable · Jira returned an error",
+                (ReadSurface::Lookup, ErrorKind::Authentication) => {
+                    "Jira lookup failed · authentication was rejected"
+                }
+                (ReadSurface::Lookup, ErrorKind::Authorization) => {
+                    "Jira lookup failed · authorization was denied"
+                }
+                (ReadSurface::Lookup, ErrorKind::NotFound) => "Jira lookup · issue was not found",
+                (ReadSurface::Lookup, ErrorKind::RateLimited) => {
+                    "Jira lookup paused · rate limit reached"
+                }
+                (ReadSurface::Lookup, ErrorKind::Offline) => {
+                    "Jira lookup failed · Jira is unreachable"
+                }
+                (ReadSurface::Lookup, ErrorKind::Cancelled) => "Jira lookup cancelled",
+                (
+                    ReadSurface::Lookup,
+                    ErrorKind::InvalidInput
+                    | ErrorKind::Upstream
+                    | ErrorKind::Storage
+                    | ErrorKind::Notification
+                    | ErrorKind::Internal
+                    | ErrorKind::UnknownOutcome,
+                ) => "Jira lookup failed · request was not completed",
+            };
+            assert_eq!(copy.message(), expected, "{surface:?} {kind:?}");
+            assert_eq!(copy.severity(), FeedbackSeverity::Error);
+            assert_eq!(copy.certainty(), FeedbackCertainty::Definite);
+            assert_eq!(copy.recovery(), RecoveryDirective::Retry);
+            assert!(!copy.message().contains("secret server detail"));
+        }
+    }
+}
+
+#[test]
+fn comment_policy_has_independent_exact_tables_for_every_key() {
+    use jira_application::ErrorKind;
+
+    let validation = [
+        (
+            CommentOutcomeKind::ValidationEmpty,
+            "Comment not posted · enter a non-empty comment",
+        ),
+        (
+            CommentOutcomeKind::ValidationByteLimit,
+            "Comment not posted · comment exceeds the byte limit",
+        ),
+        (
+            CommentOutcomeKind::ValidationCharacterLimit,
+            "Comment not posted · comment exceeds the character limit",
+        ),
+    ];
+    for (kind, message) in validation {
+        assert_copy(
+            comment_outcome_copy(kind),
+            message,
+            FeedbackSeverity::Error,
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        );
+    }
+    assert_eq!(
+        comment_validation_kind("   "),
+        Some(CommentOutcomeKind::ValidationEmpty)
+    );
+    assert_eq!(
+        comment_validation_kind(&"😀".repeat(jira_application::MAX_COMMENT_BYTES / 4 + 1)),
+        Some(CommentOutcomeKind::ValidationByteLimit)
+    );
+    assert_eq!(
+        comment_validation_kind(&"x".repeat(jira_application::MAX_COMMENT_CHARS + 1)),
+        Some(CommentOutcomeKind::ValidationCharacterLimit)
+    );
+    assert_copy(
+        comment_outcome_copy(CommentOutcomeKind::WorkspaceUnavailable),
+        "Comment not posted · live Jira workspace is not ready",
+        FeedbackSeverity::Error,
+        FeedbackCertainty::Definite,
+        RecoveryDirective::Retry,
+    );
+
+    let errors = [
+        (
+            ErrorKind::Authentication,
+            "Comment not posted · Jira authentication was rejected",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::Authorization,
+            "Comment not posted · Jira denied comment permission",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::NotFound,
+            "Comment not posted · the Jira issue was not found",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::RateLimited,
+            "Comment not posted · Jira rate limit reached; try later",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::InvalidInput,
+            "Comment not posted · the comment text is invalid",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::UnknownOutcome,
+            "Jira may have accepted this comment. Refresh comments before retrying.",
+            FeedbackCertainty::Unknown,
+            RecoveryDirective::Refresh,
+        ),
+        (
+            ErrorKind::Offline,
+            "Comment not posted · Jira returned an error",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::Cancelled,
+            "Comment not posted · Jira returned an error",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::Storage,
+            "Comment not posted · Jira returned an error",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::Upstream,
+            "Comment not posted · Jira returned an error",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::Notification,
+            "Comment not posted · Jira returned an error",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+        (
+            ErrorKind::Internal,
+            "Comment not posted · Jira returned an error",
+            FeedbackCertainty::Definite,
+            RecoveryDirective::Retry,
+        ),
+    ];
+    for (kind, message, certainty, recovery) in errors {
+        assert_copy(
+            comment_outcome_copy(CommentOutcomeKind::Error(kind)),
+            message,
+            FeedbackSeverity::Error,
+            certainty,
+            recovery,
+        );
+    }
+}
+
+#[test]
+fn recovery_directives_are_exhaustively_named() {
+    for directive in [
+        RecoveryDirective::None,
+        RecoveryDirective::Retry,
+        RecoveryDirective::Refresh,
+        RecoveryDirective::InvalidateWorkspace,
+        RecoveryDirective::PauseTeam,
+    ] {
+        let name = match directive {
+            RecoveryDirective::None => "none",
+            RecoveryDirective::Retry => "retry",
+            RecoveryDirective::Refresh => "refresh",
+            RecoveryDirective::InvalidateWorkspace => "invalidate workspace",
+            RecoveryDirective::PauseTeam => "pause team",
+        };
+        assert!(!name.is_empty());
+    }
+}
+
+#[test]
+fn issue_edit_policy_has_independent_exact_lookup_and_write_tables() {
+    use jira_application::ErrorKind;
+
+    let copies = [
+        (
+            ErrorKind::Authentication,
+            IssueEditPhase::Lookup,
+            "Change not applied · Jira authentication was rejected",
+        ),
+        (
+            ErrorKind::Authentication,
+            IssueEditPhase::Write,
+            "Change not applied · Jira authentication was rejected",
+        ),
+        (
+            ErrorKind::Authorization,
+            IssueEditPhase::Lookup,
+            "Change not applied · Jira denied permission",
+        ),
+        (
+            ErrorKind::Authorization,
+            IssueEditPhase::Write,
+            "Change not applied · Jira denied permission",
+        ),
+        (
+            ErrorKind::NotFound,
+            IssueEditPhase::Lookup,
+            "Change not applied · the Jira issue was not found",
+        ),
+        (
+            ErrorKind::NotFound,
+            IssueEditPhase::Write,
+            "Change not applied · the Jira issue was not found",
+        ),
+        (
+            ErrorKind::RateLimited,
+            IssueEditPhase::Lookup,
+            "Change not applied · Jira rate limit reached; try later",
+        ),
+        (
+            ErrorKind::RateLimited,
+            IssueEditPhase::Write,
+            "Change not applied · Jira rate limit reached; try later",
+        ),
+        (
+            ErrorKind::Offline,
+            IssueEditPhase::Lookup,
+            "Change not applied · Jira is unreachable",
+        ),
+        (
+            ErrorKind::Offline,
+            IssueEditPhase::Write,
+            "Change not applied · Jira is unreachable",
+        ),
+        (
+            ErrorKind::InvalidInput,
+            IssueEditPhase::Lookup,
+            "Change not applied · Jira rejected the requested change",
+        ),
+        (
+            ErrorKind::InvalidInput,
+            IssueEditPhase::Write,
+            "Change not applied · Jira rejected the requested change",
+        ),
+        (
+            ErrorKind::Cancelled,
+            IssueEditPhase::Lookup,
+            "Change cancelled",
+        ),
+        (
+            ErrorKind::Cancelled,
+            IssueEditPhase::Write,
+            "Change cancelled",
+        ),
+        (
+            ErrorKind::Storage,
+            IssueEditPhase::Lookup,
+            "Jira options unavailable · request was not completed",
+        ),
+        (
+            ErrorKind::Storage,
+            IssueEditPhase::Write,
+            "Change not applied · Jira returned an error",
+        ),
+        (
+            ErrorKind::Upstream,
+            IssueEditPhase::Lookup,
+            "Jira options unavailable · request was not completed",
+        ),
+        (
+            ErrorKind::Upstream,
+            IssueEditPhase::Write,
+            "Change not applied · Jira returned an error",
+        ),
+        (
+            ErrorKind::Notification,
+            IssueEditPhase::Lookup,
+            "Jira options unavailable · request was not completed",
+        ),
+        (
+            ErrorKind::Notification,
+            IssueEditPhase::Write,
+            "Change not applied · Jira returned an error",
+        ),
+        (
+            ErrorKind::Internal,
+            IssueEditPhase::Lookup,
+            "Jira options unavailable · request was not completed",
+        ),
+        (
+            ErrorKind::Internal,
+            IssueEditPhase::Write,
+            "Change not applied · Jira returned an error",
+        ),
+        (
+            ErrorKind::UnknownOutcome,
+            IssueEditPhase::Lookup,
+            "Jira may have accepted this change. Refresh Jira before another attempt.",
+        ),
+        (
+            ErrorKind::UnknownOutcome,
+            IssueEditPhase::Write,
+            "Jira may have accepted this change. Refresh Jira before another attempt.",
+        ),
+    ];
+    for (kind, phase, message) in copies {
+        assert_copy(
+            issue_edit_error_copy(kind, phase),
+            message,
+            FeedbackSeverity::Error,
+            if kind == ErrorKind::UnknownOutcome {
+                FeedbackCertainty::Unknown
+            } else {
+                FeedbackCertainty::Definite
+            },
+            if kind == ErrorKind::UnknownOutcome {
+                RecoveryDirective::Refresh
+            } else {
+                RecoveryDirective::Retry
+            },
+        );
+    }
+}
+
+#[test]
+fn issue_edit_workspace_unavailable_copy_is_exact() {
+    assert_copy(
+        issue_edit_workspace_unavailable_copy(),
+        "Change unavailable · live Jira workspace is not ready",
+        FeedbackSeverity::Error,
+        FeedbackCertainty::Definite,
+        RecoveryDirective::Retry,
+    );
+}
+
+#[test]
+fn lookup_workspace_unavailable_copy_is_exact() {
+    assert_copy(
+        lookup_workspace_unavailable_copy(),
+        "Jira lookup unavailable · live workspace is not ready",
+        FeedbackSeverity::Error,
+        FeedbackCertainty::Definite,
+        RecoveryDirective::Retry,
+    );
+}
+
+#[test]
+fn settings_saved_login_and_workspace_outcomes_are_exhaustively_typed() {
+    let scope = [
+        (
+            ScopeOutcomeKind::Invalid,
+            "Scope is invalid; check the expression and ORDER BY rule",
+            RecoveryDirective::Retry,
+        ),
+        (
+            ScopeOutcomeKind::Preparation,
+            "Scope could not be prepared locally",
+            RecoveryDirective::Retry,
+        ),
+        (
+            ScopeOutcomeKind::RefreshRestored,
+            "Jira rejected the scope; the previous scope remains active",
+            RecoveryDirective::Retry,
+        ),
+        (
+            ScopeOutcomeKind::RefreshRollbackFailed,
+            "Jira rejected the scope and the previous scope could not be restored",
+            RecoveryDirective::InvalidateWorkspace,
+        ),
+        (
+            ScopeOutcomeKind::PreferenceSaveRestored,
+            "Scope applied remotely, but settings could not be saved locally",
+            RecoveryDirective::Retry,
+        ),
+        (
+            ScopeOutcomeKind::PreferenceSaveRollbackFailed,
+            "Settings could not be saved and the previous scope could not be restored",
+            RecoveryDirective::InvalidateWorkspace,
+        ),
+    ];
+    for (kind, expected, recovery) in scope {
+        assert_copy(
+            scope_outcome_copy(kind),
+            expected,
+            FeedbackSeverity::Error,
+            FeedbackCertainty::Definite,
+            recovery,
+        );
+    }
+    for kind in [
+        TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::TooManyMembers),
+        TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::InvalidAccount),
+        TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::UnsafeAccount),
+        TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::InvalidEntry),
+        TeamOutcomeKind::Search,
+        TeamOutcomeKind::EmailNotFound,
+        TeamOutcomeKind::EmailAmbiguous,
+        TeamOutcomeKind::Normalization,
+        TeamOutcomeKind::Preparation,
+        TeamOutcomeKind::RefreshRestored,
+        TeamOutcomeKind::RefreshRollbackFailed,
+        TeamOutcomeKind::PreferenceSaveRestored,
+        TeamOutcomeKind::PreferenceSaveRollbackFailed,
+    ] {
+        let copy = team_outcome_copy(kind);
+        assert!(!copy.message().contains("secret"));
+        assert_eq!(copy.severity(), FeedbackSeverity::Error);
+        let expected = match kind {
+            TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::TooManyMembers) => {
+                "Team tracker accepts at most 100 members"
+            }
+            TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::InvalidAccount) => {
+                "Enter a valid Jira account ID or Atlassian email"
+            }
+            TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::UnsafeAccount) => {
+                "Jira account IDs cannot contain quote or backslash characters"
+            }
+            TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::InvalidEntry) => {
+                "Team tracker entries must be short, single-line values"
+            }
+            TeamOutcomeKind::Search => "Jira user search failed; existing team remains active",
+            TeamOutcomeKind::EmailNotFound => "Email did not resolve to one active Jira user",
+            TeamOutcomeKind::EmailAmbiguous => {
+                "Email matched multiple active Jira users; enter an account ID instead"
+            }
+            TeamOutcomeKind::Normalization => {
+                "Team tracker entries are invalid or exceed the member limit"
+            }
+            TeamOutcomeKind::Preparation => {
+                "Team configuration could not be applied; existing team remains active"
+            }
+            TeamOutcomeKind::RefreshRestored => "Team refresh failed; existing team remains active",
+            TeamOutcomeKind::RefreshRollbackFailed => {
+                "Team refresh failed and the previous team could not be restored; team tracker paused"
+            }
+            TeamOutcomeKind::PreferenceSaveRestored => {
+                "Team refreshed but could not be saved locally; existing team remains active"
+            }
+            TeamOutcomeKind::PreferenceSaveRollbackFailed => {
+                "Team settings could not be saved and the previous team could not be restored; team tracker paused"
+            }
+        };
+        assert_eq!(copy.message(), expected);
+        assert_eq!(copy.certainty(), FeedbackCertainty::Definite);
+        assert_eq!(
+            copy.recovery(),
+            if matches!(
+                kind,
+                TeamOutcomeKind::RefreshRollbackFailed
+                    | TeamOutcomeKind::PreferenceSaveRollbackFailed
+            ) {
+                RecoveryDirective::PauseTeam
+            } else {
+                RecoveryDirective::Retry
+            }
+        );
+    }
+    assert_copy(
+        saved_login_outcome_copy(SavedLoginOutcomeKind::Deleted),
+        "Saved Jira login forgotten. This session remains connected.",
+        FeedbackSeverity::Info,
+        FeedbackCertainty::Definite,
+        RecoveryDirective::None,
+    );
+    assert_copy(
+        saved_login_outcome_copy(SavedLoginOutcomeKind::Absent),
+        "No saved Jira login was present. This session remains connected.",
+        FeedbackSeverity::Info,
+        FeedbackCertainty::Definite,
+        RecoveryDirective::None,
+    );
+    assert_copy(
+        saved_login_outcome_copy(SavedLoginOutcomeKind::Error),
+        "Saved Jira login could not be removed from the system keyring.",
+        FeedbackSeverity::Error,
+        FeedbackCertainty::Definite,
+        RecoveryDirective::None,
+    );
+}
+
 #[test]
 fn maps_domain_identity_to_display_name() {
     let issues = sample_issues();

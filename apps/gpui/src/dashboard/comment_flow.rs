@@ -1,5 +1,15 @@
-use jira_application::{ApplicationError, ErrorKind, MAX_COMMENT_BYTES, MAX_COMMENT_CHARS};
+use jira_application::{ApplicationError, ErrorKind};
+
+#[cfg(test)]
+use jira_application::{MAX_COMMENT_BYTES, MAX_COMMENT_CHARS};
 use jira_domain::IssueId;
+
+use crate::presentation::{
+    CommentOutcomeKind, OutcomeCopy, comment_outcome_copy, comment_validation_kind,
+};
+
+#[cfg(test)]
+use crate::presentation::{FeedbackCertainty, RecoveryDirective};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CommentTarget {
@@ -29,10 +39,7 @@ pub(super) enum CommentInvalidation {
 pub(super) enum CommentCompletion {
     Ignored,
     Succeeded,
-    Failed {
-        message: &'static str,
-        unknown_outcome: bool,
-    },
+    Failed { copy: OutcomeCopy },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,8 +58,7 @@ enum CommentPostState {
     },
     Error {
         issue_id: IssueId,
-        message: String,
-        unknown_outcome: bool,
+        copy: OutcomeCopy,
     },
 }
 
@@ -101,13 +107,9 @@ impl CommentFlow {
         }
     }
 
-    pub(super) fn error_details(&self) -> Option<(&str, bool)> {
+    pub(super) fn error_details(&self) -> Option<OutcomeCopy> {
         match &self.state {
-            CommentPostState::Error {
-                message,
-                unknown_outcome,
-                ..
-            } => Some((message, *unknown_outcome)),
+            CommentPostState::Error { copy, .. } => Some(*copy),
             CommentPostState::Idle
             | CommentPostState::Confirming { .. }
             | CommentPostState::Posting { .. } => None,
@@ -119,29 +121,19 @@ impl CommentFlow {
         target: CommentTarget,
         input_body: &str,
     ) -> Result<(), CommentValidationError> {
-        if self.has_unknown_outcome() {
+        if matches!(
+            self.state,
+            CommentPostState::Error { copy, .. } if copy.is_unknown()
+        ) {
             return Err(CommentValidationError::UnknownOutcomeNeedsRefresh);
         }
 
         // Keep this order and copy aligned with the pre-refactor Dashboard flow.
         let body = input_body.trim().to_owned();
-        if body.is_empty() {
+        if let Some(kind) = comment_validation_kind(&body) {
             self.state = CommentPostState::Error {
                 issue_id: target.issue_id,
-                message: "Comment not posted · enter a non-empty comment".to_owned(),
-                unknown_outcome: false,
-            };
-        } else if body.len() > MAX_COMMENT_BYTES {
-            self.state = CommentPostState::Error {
-                issue_id: target.issue_id,
-                message: "Comment not posted · comment exceeds the byte limit".to_owned(),
-                unknown_outcome: false,
-            };
-        } else if body.chars().count() > MAX_COMMENT_CHARS {
-            self.state = CommentPostState::Error {
-                issue_id: target.issue_id,
-                message: "Comment not posted · comment exceeds the character limit".to_owned(),
-                unknown_outcome: false,
+                copy: comment_outcome_copy(kind),
             };
         } else {
             let chars = body.chars().count();
@@ -161,12 +153,8 @@ impl CommentFlow {
         self.state = CommentPostState::Idle;
     }
 
-    pub(super) fn fail_without_dispatch(&mut self, issue_id: IssueId, message: &'static str) {
-        self.state = CommentPostState::Error {
-            issue_id,
-            message: message.to_owned(),
-            unknown_outcome: false,
-        };
+    pub(super) fn fail_without_dispatch(&mut self, issue_id: IssueId, copy: OutcomeCopy) {
+        self.state = CommentPostState::Error { issue_id, copy };
     }
 
     pub(super) fn has_confirmation_for(&self, current_target: &IssueId) -> bool {
@@ -216,7 +204,10 @@ impl CommentFlow {
     }
 
     pub(super) fn clear_error_on_edit(&mut self) {
-        if matches!(self.state, CommentPostState::Error { .. }) {
+        if matches!(
+            self.state,
+            CommentPostState::Error { copy, .. } if !copy.is_unknown()
+        ) {
             self.state = CommentPostState::Idle;
         }
     }
@@ -225,7 +216,10 @@ impl CommentFlow {
         if self.is_posting() {
             return false;
         }
-        if self.has_unknown_outcome() {
+        if matches!(
+            self.state,
+            CommentPostState::Error { copy, .. } if copy.is_unknown()
+        ) {
             self.state = CommentPostState::Idle;
         }
         true
@@ -255,28 +249,14 @@ impl CommentFlow {
                 CommentCompletion::Succeeded
             }
             Err(error) => {
-                let (message, unknown_outcome) = comment_error_message(error);
+                let copy = comment_error_message(error.kind());
                 self.state = CommentPostState::Error {
                     issue_id: submission.issue_id.clone(),
-                    message: message.to_owned(),
-                    unknown_outcome,
+                    copy,
                 };
-                CommentCompletion::Failed {
-                    message,
-                    unknown_outcome,
-                }
+                CommentCompletion::Failed { copy }
             }
         }
-    }
-
-    fn has_unknown_outcome(&self) -> bool {
-        matches!(
-            self.state,
-            CommentPostState::Error {
-                unknown_outcome: true,
-                ..
-            }
-        )
     }
 }
 
@@ -288,25 +268,8 @@ pub(super) fn comment_target_is_current(
     remote_issue_id.or(selected_issue) == Some(expected_issue)
 }
 
-pub(super) fn comment_error_message(error: &ApplicationError) -> (&'static str, bool) {
-    match error.kind() {
-        ErrorKind::Authentication => (
-            "Comment not posted · Jira authentication was rejected",
-            false,
-        ),
-        ErrorKind::Authorization => ("Comment not posted · Jira denied comment permission", false),
-        ErrorKind::NotFound => ("Comment not posted · the Jira issue was not found", false),
-        ErrorKind::RateLimited => (
-            "Comment not posted · Jira rate limit reached; try later",
-            false,
-        ),
-        ErrorKind::InvalidInput => ("Comment not posted · the comment text is invalid", false),
-        ErrorKind::UnknownOutcome => (
-            "Jira may have accepted this comment. Refresh comments before retrying.",
-            true,
-        ),
-        _ => ("Comment not posted · Jira returned an error", false),
-    }
+pub(super) fn comment_error_message(kind: ErrorKind) -> OutcomeCopy {
+    comment_outcome_copy(CommentOutcomeKind::Error(kind))
 }
 
 #[cfg(test)]
@@ -333,23 +296,24 @@ mod tests {
             .expect("handled");
         assert_eq!(
             flow.error_details(),
-            Some(("Comment not posted · enter a non-empty comment", false,))
+            Some(comment_outcome_copy(CommentOutcomeKind::ValidationEmpty))
         );
 
         flow.begin_confirmation(issue.clone(), &"😀".repeat(MAX_COMMENT_BYTES / 4 + 1))
             .expect("handled");
         assert_eq!(
             flow.error_details(),
-            Some(("Comment not posted · comment exceeds the byte limit", false,))
+            Some(comment_outcome_copy(
+                CommentOutcomeKind::ValidationByteLimit
+            ))
         );
 
         flow.begin_confirmation(issue.clone(), &"x".repeat(MAX_COMMENT_CHARS + 1))
             .expect("handled");
         assert_eq!(
             flow.error_details(),
-            Some((
-                "Comment not posted · comment exceeds the character limit",
-                false,
+            Some(comment_outcome_copy(
+                CommentOutcomeKind::ValidationCharacterLimit
             ))
         );
 
@@ -474,70 +438,99 @@ mod tests {
 
     #[test]
     fn error_mapping_is_exact_safe_and_unknown_outcome_blocks_retry_until_refresh_without_edit() {
+        let kinds = [
+            ErrorKind::Authentication,
+            ErrorKind::Authorization,
+            ErrorKind::NotFound,
+            ErrorKind::RateLimited,
+            ErrorKind::InvalidInput,
+            ErrorKind::UnknownOutcome,
+            ErrorKind::Offline,
+            ErrorKind::Cancelled,
+            ErrorKind::Storage,
+            ErrorKind::Upstream,
+            ErrorKind::Notification,
+            ErrorKind::Internal,
+        ];
         let expected = [
             (
                 ErrorKind::Authentication,
-                (
-                    "Comment not posted · Jira authentication was rejected",
-                    false,
-                ),
+                "Comment not posted · Jira authentication was rejected",
             ),
             (
                 ErrorKind::Authorization,
-                ("Comment not posted · Jira denied comment permission", false),
+                "Comment not posted · Jira denied comment permission",
             ),
             (
                 ErrorKind::NotFound,
-                ("Comment not posted · the Jira issue was not found", false),
+                "Comment not posted · the Jira issue was not found",
             ),
             (
                 ErrorKind::RateLimited,
-                (
-                    "Comment not posted · Jira rate limit reached; try later",
-                    false,
-                ),
+                "Comment not posted · Jira rate limit reached; try later",
             ),
             (
                 ErrorKind::InvalidInput,
-                ("Comment not posted · the comment text is invalid", false),
+                "Comment not posted · the comment text is invalid",
             ),
             (
                 ErrorKind::UnknownOutcome,
-                (
-                    "Jira may have accepted this comment. Refresh comments before retrying.",
-                    true,
-                ),
+                "Jira may have accepted this comment. Refresh comments before retrying.",
             ),
             (
                 ErrorKind::Offline,
-                ("Comment not posted · Jira returned an error", false),
+                "Comment not posted · Jira returned an error",
             ),
             (
                 ErrorKind::Cancelled,
-                ("Comment not posted · Jira returned an error", false),
+                "Comment not posted · Jira returned an error",
             ),
             (
                 ErrorKind::Storage,
-                ("Comment not posted · Jira returned an error", false),
+                "Comment not posted · Jira returned an error",
             ),
             (
                 ErrorKind::Upstream,
-                ("Comment not posted · Jira returned an error", false),
+                "Comment not posted · Jira returned an error",
             ),
             (
                 ErrorKind::Notification,
-                ("Comment not posted · Jira returned an error", false),
+                "Comment not posted · Jira returned an error",
             ),
             (
                 ErrorKind::Internal,
-                ("Comment not posted · Jira returned an error", false),
+                "Comment not posted · Jira returned an error",
             ),
         ];
-        for (kind, expected_tuple) in expected {
-            let detail = "secret detail";
-            let actual = comment_error_message(&error(kind, detail));
-            assert_eq!(actual, expected_tuple, "unexpected mapping for {kind:?}");
-            assert!(!actual.0.contains(detail), "raw detail leaked for {kind:?}");
+        for ((kind, expected_message), listed_kind) in expected.into_iter().zip(kinds) {
+            assert_eq!(listed_kind, kind);
+            let actual = comment_error_message(kind);
+            assert_eq!(
+                actual.message(),
+                expected_message,
+                "unexpected mapping for {kind:?}"
+            );
+            assert_eq!(
+                actual.severity(),
+                crate::presentation::FeedbackSeverity::Error
+            );
+            assert_eq!(
+                actual.certainty(),
+                if kind == ErrorKind::UnknownOutcome {
+                    FeedbackCertainty::Unknown
+                } else {
+                    FeedbackCertainty::Definite
+                }
+            );
+            assert_eq!(
+                actual.recovery(),
+                if kind == ErrorKind::UnknownOutcome {
+                    RecoveryDirective::Refresh
+                } else {
+                    RecoveryDirective::Retry
+                }
+            );
+            assert!(!actual.message().contains("secret detail"));
         }
 
         let mut flow = CommentFlow::new();
@@ -554,8 +547,12 @@ mod tests {
                 Err(&error(ErrorKind::UnknownOutcome, "secret")),
             ),
             CommentCompletion::Failed {
-                message: "Jira may have accepted this comment. Refresh comments before retrying.",
-                unknown_outcome: true,
+                copy: OutcomeCopy::new(
+                    "Jira may have accepted this comment. Refresh comments before retrying.",
+                    crate::presentation::FeedbackSeverity::Error,
+                    FeedbackCertainty::Unknown,
+                    RecoveryDirective::Refresh,
+                ),
             }
         );
         assert!(!flow.is_confirming());
@@ -569,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_any_error_clears_it_including_unknown_outcome() {
+    fn editing_definite_error_clears_but_unknown_outcome_stays_blocked_until_refresh() {
         let mut flow = CommentFlow::new();
         flow.begin_confirmation(target("100", "IX-100"), "body")
             .expect("valid");
@@ -582,12 +579,19 @@ mod tests {
             Some(&submission.issue_id),
             Err(&error(ErrorKind::UnknownOutcome, "secret")),
         );
-        assert!(flow.has_unknown_outcome());
+        assert_eq!(
+            flow.error_details().expect("error copy").recovery(),
+            RecoveryDirective::Refresh
+        );
         flow.clear_error_on_edit();
-        assert!(!flow.has_unknown_outcome());
-        assert!(flow.error_details().is_none());
+        assert!(flow.error_details().is_some());
+        assert!(matches!(
+            flow.begin_confirmation(target("100", "IX-100"), "edited"),
+            Err(CommentValidationError::UnknownOutcomeNeedsRefresh)
+        ));
+        assert!(flow.can_refresh());
         flow.begin_confirmation(target("100", "IX-100"), "edited")
-            .expect("editing clears the error today");
+            .expect("allowed after refresh");
     }
 
     #[test]
@@ -606,7 +610,7 @@ mod tests {
             Err(&error(ErrorKind::UnknownOutcome, "secret")),
         );
         assert!(flow.can_refresh());
-        assert!(!flow.has_unknown_outcome());
+        assert!(flow.error_details().is_none());
         assert!(!flow.is_posting());
     }
 }

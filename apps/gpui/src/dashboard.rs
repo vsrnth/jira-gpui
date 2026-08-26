@@ -50,11 +50,14 @@ use crate::{
         normalize_team_members,
     },
     presentation::{
-        CompactedUpdateRow, IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection,
-        IssueViewModel, UPDATE_PREVIEW_LIMIT, UpdateFilter, UpdateGroupViewModel,
-        compact_update_rows, filtered_update_group_indices, generic_summary_label,
-        hidden_update_row_count, issue_views_for_filter, update_group_event_ids,
-        update_groups_for_events, visible_update_row_count,
+        CompactedUpdateRow, FeedbackSeverity, IssueDetailViewModel, IssueStatusFilter,
+        IssueStatusSelection, IssueViewModel, OutcomeCopy, ReadSurface, RecoveryDirective,
+        SavedLoginOutcomeKind, UPDATE_PREVIEW_LIMIT, UpdateFilter, UpdateGroupViewModel,
+        comment_outcome_copy, compact_update_rows, filtered_update_group_indices,
+        generic_summary_label, hidden_update_row_count, issue_views_for_filter,
+        lookup_workspace_unavailable_copy, read_error_copy, saved_login_outcome_copy,
+        scope_outcome_copy, team_outcome_copy, update_group_event_ids, update_groups_for_events,
+        visible_update_row_count,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
@@ -72,10 +75,13 @@ mod media;
 mod request_epoch;
 mod settings;
 
+#[cfg(test)]
+use crate::presentation::{FeedbackCertainty, IssueEditPhase};
 use comment_flow::{CommentCompletion, CommentFlow, CommentInvalidation, CommentTarget};
+
 use issue_edit_flow::{
-    AssigneeSubmission, IssueEditCompletion, IssueEditFlow, IssueEditOperation, IssueEditState,
-    IssueEditSubmission, TransitionSubmission, status_control_is_editable,
+    AssigneeSubmission, BusyDirective, IssueEditCompletion, IssueEditFlow, IssueEditOperation,
+    IssueEditState, IssueEditSubmission, TransitionSubmission, status_control_is_editable,
 };
 #[cfg(test)]
 use issue_edit_flow::{issue_edit_error_message, issue_edit_target_is_current};
@@ -93,75 +99,16 @@ use media::{
 };
 use request_epoch::{RequestEpoch, RequestSource, RequestTicket};
 
-fn safe_sync_error(error: &ApplicationError) -> &'static str {
-    match error.kind() {
-        jira_application::ErrorKind::Authentication => {
-            "Refresh failed · Jira authentication was rejected"
-        }
-        jira_application::ErrorKind::Authorization => {
-            "Refresh failed · Jira authorization was denied"
-        }
-        jira_application::ErrorKind::RateLimited => "Refresh paused · Jira rate limit reached",
-        jira_application::ErrorKind::Offline => "Refresh failed · Jira is unreachable",
-        jira_application::ErrorKind::Cancelled => "Refresh cancelled",
-        jira_application::ErrorKind::InvalidInput => "Refresh failed · invalid request",
-        jira_application::ErrorKind::NotFound => "Refresh failed · Jira site was not found",
-        jira_application::ErrorKind::Upstream => "Refresh failed · Jira returned an error",
-        jira_application::ErrorKind::Storage
-        | jira_application::ErrorKind::Notification
-        | jira_application::ErrorKind::Internal
-        | jira_application::ErrorKind::UnknownOutcome => "Refresh failed · local application error",
-    }
+fn safe_sync_error(error: &ApplicationError) -> OutcomeCopy {
+    read_error_copy(ReadSurface::Sync, error.kind())
 }
 
-fn safe_detail_error(error: &ApplicationError) -> &'static str {
-    match error.kind() {
-        jira_application::ErrorKind::Authentication => {
-            "Issue details unavailable · Jira authentication was rejected"
-        }
-        jira_application::ErrorKind::Authorization => {
-            "Issue details unavailable · Jira authorization was denied"
-        }
-        jira_application::ErrorKind::NotFound => {
-            "Issue details unavailable · Jira issue was not found"
-        }
-        jira_application::ErrorKind::RateLimited => {
-            "Issue details unavailable · Jira rate limit reached"
-        }
-        jira_application::ErrorKind::Offline => "Issue details unavailable · Jira is unreachable",
-        jira_application::ErrorKind::Cancelled => "Issue details request cancelled",
-        jira_application::ErrorKind::InvalidInput
-        | jira_application::ErrorKind::Upstream
-        | jira_application::ErrorKind::Storage
-        | jira_application::ErrorKind::Notification
-        | jira_application::ErrorKind::Internal
-        | jira_application::ErrorKind::UnknownOutcome => {
-            "Issue details unavailable · Jira returned an error"
-        }
-    }
+fn safe_detail_error(error: &ApplicationError) -> OutcomeCopy {
+    read_error_copy(ReadSurface::Detail, error.kind())
 }
 
-fn safe_lookup_error(error: &ApplicationError) -> &'static str {
-    match error.kind() {
-        jira_application::ErrorKind::Authentication => {
-            "Jira lookup failed · authentication was rejected"
-        }
-        jira_application::ErrorKind::Authorization => {
-            "Jira lookup failed · authorization was denied"
-        }
-        jira_application::ErrorKind::NotFound => "Jira lookup · issue was not found",
-        jira_application::ErrorKind::RateLimited => "Jira lookup paused · rate limit reached",
-        jira_application::ErrorKind::Offline => "Jira lookup failed · Jira is unreachable",
-        jira_application::ErrorKind::Cancelled => "Jira lookup cancelled",
-        jira_application::ErrorKind::InvalidInput
-        | jira_application::ErrorKind::Upstream
-        | jira_application::ErrorKind::Storage
-        | jira_application::ErrorKind::Notification
-        | jira_application::ErrorKind::Internal
-        | jira_application::ErrorKind::UnknownOutcome => {
-            "Jira lookup failed · request was not completed"
-        }
-    }
+fn safe_lookup_error(error: &ApplicationError) -> OutcomeCopy {
+    read_error_copy(ReadSurface::Lookup, error.kind())
 }
 
 const DETAIL_SIDEBAR_MIN_WIDTH: f32 = 320.;
@@ -340,13 +287,6 @@ fn team_summary(displayed: usize, configured_members: usize) -> String {
     )
 }
 
-fn team_feedback_is_loading(feedback: Option<&str>) -> bool {
-    feedback.is_some_and(|message| {
-        message.starts_with("Refreshing team tracker")
-            || message.starts_with("Resolving team members")
-    })
-}
-
 fn persisted_team_member_has_display_name(member: &PersistedTeamMember) -> bool {
     !member.display_name.trim().is_empty()
         && !member.display_name.eq_ignore_ascii_case("unknown user")
@@ -386,21 +326,12 @@ enum SavedLoginDeleteState {
     Completed(SavedLoginDeleteOutcome),
 }
 
-fn saved_login_delete_feedback(outcome: SavedLoginDeleteOutcome) -> (&'static str, bool) {
-    match outcome {
-        SavedLoginDeleteOutcome::Deleted => (
-            "Saved Jira login forgotten. This session remains connected.",
-            false,
-        ),
-        SavedLoginDeleteOutcome::Absent => (
-            "No saved Jira login was present. This session remains connected.",
-            false,
-        ),
-        SavedLoginDeleteOutcome::Error => (
-            "Saved Jira login could not be removed from the system keyring.",
-            true,
-        ),
-    }
+fn saved_login_delete_feedback(outcome: SavedLoginDeleteOutcome) -> OutcomeCopy {
+    saved_login_outcome_copy(match outcome {
+        SavedLoginDeleteOutcome::Deleted => SavedLoginOutcomeKind::Deleted,
+        SavedLoginDeleteOutcome::Absent => SavedLoginOutcomeKind::Absent,
+        SavedLoginDeleteOutcome::Error => SavedLoginOutcomeKind::Error,
+    })
 }
 
 fn can_start_saved_login_delete(state: SavedLoginDeleteState) -> bool {
@@ -463,11 +394,21 @@ fn status_filter_indices(selection: IssueStatusSelection) -> Vec<gpui_component:
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DetailState {
     Empty,
-    Loading { issue_id: IssueId },
-    RemoteLoading { query: String },
+    Loading {
+        issue_id: IssueId,
+    },
+    RemoteLoading {
+        query: String,
+    },
     Loaded(IssueDetailViewModel),
-    Error { issue_id: IssueId, message: String },
-    RemoteError { query: String, message: String },
+    Error {
+        issue_id: IssueId,
+        copy: OutcomeCopy,
+    },
+    RemoteError {
+        query: String,
+        copy: OutcomeCopy,
+    },
 }
 
 fn transition_option_label(transition: &IssueTransition) -> &str {
@@ -498,7 +439,7 @@ enum RemoteLookupState {
     },
     Error {
         query: String,
-        message: String,
+        copy: OutcomeCopy,
     },
 }
 
@@ -619,6 +560,7 @@ pub struct Dashboard {
     team_input: Option<Entity<TextareaState>>,
     team_text: String,
     team_feedback: Option<String>,
+    team_feedback_loading: bool,
     team_task: Option<gpui::Task<()>>,
     team_age_task: Option<gpui::Task<()>>,
     team_automatic_polling_paused: bool,
@@ -721,6 +663,7 @@ impl Dashboard {
             team_input: None,
             team_text: String::new(),
             team_feedback: None,
+            team_feedback_loading: false,
             team_task: None,
             team_age_task: None,
             team_automatic_polling_paused: false,
@@ -815,6 +758,7 @@ impl Dashboard {
             team_input: None,
             team_text: String::new(),
             team_feedback: None,
+            team_feedback_loading: false,
             team_task: None,
             team_age_task: None,
             team_automatic_polling_paused: false,
@@ -1026,6 +970,7 @@ impl Dashboard {
                         this.operation_in_progress = true;
                         this.sync_message = "Automatic refresh…".to_owned();
                         if !this.team_members.is_empty() && !this.team_automatic_polling_paused {
+                            this.team_feedback_loading = true;
                             this.team_feedback = Some("Refreshing team tracker…".to_owned());
                         }
                         cx.notify();
@@ -1065,6 +1010,7 @@ impl Dashboard {
                             if let Some(team_result) = team_result {
                                 match team_result {
                                     Ok(team_result) => {
+                                        this.team_feedback_loading = false;
                                         this.apply_team_cached(team_result.cached, cx);
                                         this.team_feedback = Some(team_refresh_feedback(
                                             "Team tracker refreshed",
@@ -1072,6 +1018,7 @@ impl Dashboard {
                                         ));
                                     }
                                     Err(error) => {
+                                        this.team_feedback_loading = false;
                                         this.team_feedback =
                                             Some(safe_sync_error(&error).to_owned())
                                     }
@@ -1209,7 +1156,7 @@ impl Dashboard {
             self.remote_image_states.clear();
             self.remote_lookup = RemoteLookupState::Error {
                 query,
-                message: "Jira lookup unavailable · live workspace is not ready".to_owned(),
+                copy: lookup_workspace_unavailable_copy(),
             };
             cx.notify();
             return;
@@ -1241,7 +1188,7 @@ impl Dashboard {
                         this.remote_image_states.clear();
                         this.remote_lookup = RemoteLookupState::Error {
                             query: expected_query.clone(),
-                            message: safe_lookup_error(&error).to_owned(),
+                            copy: safe_lookup_error(&error),
                         };
                         cx.notify();
                     });
@@ -1450,7 +1397,7 @@ impl Dashboard {
                         this.selected_image_states.clear();
                         this.detail_state = DetailState::Error {
                             issue_id: issue_id.clone(),
-                            message: safe_detail_error(&error).to_owned(),
+                            copy: safe_detail_error(&error),
                         };
                         cx.notify();
                     });
@@ -1777,13 +1724,12 @@ impl Dashboard {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
-            self.comment_flow.fail_without_dispatch(
-                target.issue_id,
-                "Comment not posted · live Jira workspace is not ready",
-            );
+            let copy =
+                comment_outcome_copy(crate::presentation::CommentOutcomeKind::WorkspaceUnavailable);
+            self.comment_flow
+                .fail_without_dispatch(target.issue_id, copy);
             window.push_notification(
-                Notification::error("Comment not posted · live Jira workspace is not ready")
-                    .id::<CommentNotification>(),
+                Notification::error(copy.message()).id::<CommentNotification>(),
                 cx,
             );
             cx.notify();
@@ -1839,12 +1785,9 @@ impl Dashboard {
                             this.reload_selected_detail(cx);
                         }
                     }
-                    CommentCompletion::Failed {
-                        message,
-                        unknown_outcome: _,
-                    } => {
+                    CommentCompletion::Failed { copy } => {
                         window.push_notification(
-                            Notification::error(message).id::<CommentNotification>(),
+                            Notification::error(copy.message()).id::<CommentNotification>(),
                             cx,
                         );
                     }
@@ -2142,18 +2085,15 @@ impl Dashboard {
                         this.sync_message = "Change applied · reconciling with Jira…".to_owned();
                         this.begin_refresh(window, cx);
                     }
-                    IssueEditCompletion::Failed { .. } => {
+                    IssueEditCompletion::Failed { copy } => {
                         this.operation_in_progress = false;
-                        if let IssueEditState::Error { message, .. } = this.issue_edit_flow.state()
-                        {
-                            window.push_notification(
-                                Notification::error(message.clone()).id::<IssueEditNotification>(),
-                                cx,
-                            );
-                        }
+                        window.push_notification(
+                            Notification::error(copy.message()).id::<IssueEditNotification>(),
+                            cx,
+                        );
                     }
-                    IssueEditCompletion::Ignored { release_busy } => {
-                        if release_busy {
+                    IssueEditCompletion::Ignored { busy } => {
+                        if matches!(busy, BusyDirective::Release) {
                             this.operation_in_progress = false;
                         }
                     }
@@ -2286,12 +2226,14 @@ impl Dashboard {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
+            self.team_feedback_loading = false;
             self.team_feedback =
                 Some("Team tracker is unavailable until Jira is connected".to_owned());
             cx.notify();
             return;
         };
         self.operation_in_progress = true;
+        self.team_feedback_loading = true;
         self.team_feedback = Some("Refreshing team tracker…".to_owned());
         let task = cx.spawn(async move |this, cx| {
             let result = workspace.refresh_team(&CancellationToken::new()).await;
@@ -2300,13 +2242,17 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     Ok(result) => {
+                        this.team_feedback_loading = false;
                         this.apply_team_cached(result.cached, cx);
                         this.team_feedback = Some(team_refresh_feedback(
                             "Team tracker refreshed",
                             &this.team_issues,
                         ));
                     }
-                    Err(error) => this.team_feedback = Some(safe_sync_error(&error).to_owned()),
+                    Err(error) => {
+                        this.team_feedback_loading = false;
+                        this.team_feedback = Some(safe_sync_error(&error).to_owned())
+                    }
                 }
                 cx.notify();
             });
@@ -2333,6 +2279,7 @@ impl Dashboard {
         self.operation_in_progress = true;
         self.sync_message = "Refreshing Jira…".to_owned();
         if !self.team_members.is_empty() && !self.team_automatic_polling_paused {
+            self.team_feedback_loading = true;
             self.team_feedback = Some("Refreshing team tracker…".to_owned());
         }
         cx.notify();
@@ -2353,6 +2300,7 @@ impl Dashboard {
                         this.apply_cached(outcome.cached, cx);
                         match team_result {
                             Ok(team) => {
+                                this.team_feedback_loading = false;
                                 this.apply_team_cached(team.cached, cx);
                                 this.team_feedback = Some(team_refresh_feedback(
                                     "Team tracker refreshed",
@@ -2360,6 +2308,7 @@ impl Dashboard {
                                 ));
                             }
                             Err(error) => {
+                                this.team_feedback_loading = false;
                                 this.team_feedback = Some(safe_sync_error(&error).to_owned())
                             }
                         }
@@ -2370,7 +2319,7 @@ impl Dashboard {
                         this.issue_edit_flow.refresh_failed();
                         let message = safe_sync_error(&error);
                         window.push_notification(
-                            Notification::error(message).id::<RefreshNotification>(),
+                            Notification::error(message.message()).id::<RefreshNotification>(),
                             cx,
                         );
                         this.sync_message = if this.issue_edit_flow.reconciliation_pending() {
@@ -2380,6 +2329,7 @@ impl Dashboard {
                         };
                         match team_result {
                             Ok(team) => {
+                                this.team_feedback_loading = false;
                                 this.apply_team_cached(team.cached, cx);
                                 this.team_feedback = Some(team_refresh_feedback(
                                     "Team tracker refreshed",
@@ -2387,6 +2337,7 @@ impl Dashboard {
                                 ));
                             }
                             Err(error) => {
+                                this.team_feedback_loading = false;
                                 this.team_feedback = Some(safe_sync_error(&error).to_owned())
                             }
                         }
@@ -3095,8 +3046,7 @@ impl Dashboard {
         let (_, displayed_team_count) = team_issue_counts(&self.team_issues);
         let team_loading = configured
             && displayed_team_count == 0
-            && (self.team_task.is_some()
-                || team_feedback_is_loading(self.team_feedback.as_deref()));
+            && (self.team_task.is_some() || self.team_feedback_loading);
         let mobile_rows = self
             .team_issues
             .iter()
@@ -3593,9 +3543,9 @@ impl Dashboard {
             RemoteLookupState::Loading { query } => DetailState::RemoteLoading {
                 query: query.clone(),
             },
-            RemoteLookupState::Error { query, message } => DetailState::RemoteError {
+            RemoteLookupState::Error { query, copy } => DetailState::RemoteError {
                 query: query.clone(),
-                message: message.clone(),
+                copy: *copy,
             },
             RemoteLookupState::Idle => self.detail_state.clone(),
         };
@@ -3614,7 +3564,7 @@ impl Dashboard {
                                 .child(format!("Looking up {query}…")),
                         ),
                     ),
-                DetailState::RemoteError { message, .. } => v_flex()
+                DetailState::RemoteError { copy, .. } => v_flex()
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Jira lookup failed"))
                     .child(
@@ -3623,9 +3573,9 @@ impl Dashboard {
                             .whitespace_normal()
                             .text_sm()
                             .text_color(cx.theme().danger)
-                            .child(message.clone()),
+                            .child(copy.message()),
                     ),
-                DetailState::Error { message, .. } => v_flex()
+                DetailState::Error { copy, .. } => v_flex()
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Unable to load issue details"))
                     .child(
@@ -3634,7 +3584,7 @@ impl Dashboard {
                             .whitespace_normal()
                             .text_sm()
                             .text_color(cx.theme().danger)
-                            .child(message.clone()),
+                            .child(copy.message()),
                     ),
                 DetailState::Loading { .. } => v_flex()
                     .gap_2()
@@ -3884,7 +3834,7 @@ impl Dashboard {
                         .child(format!("Looking up {query}…")),
                 )
                 .into_any_element(),
-            DetailState::Error { message, .. } => v_flex()
+            DetailState::Error { copy, .. } => v_flex()
                 .gap_2()
                 .child(
                     div()
@@ -3896,17 +3846,17 @@ impl Dashboard {
                     div()
                         .text_sm()
                         .text_color(cx.theme().danger)
-                        .child(message.clone()),
+                        .child(copy.message()),
                 )
                 .into_any_element(),
-            DetailState::RemoteError { message, .. } => v_flex()
+            DetailState::RemoteError { copy, .. } => v_flex()
                 .gap_2()
                 .child(div().text_sm().font_semibold().child("Jira lookup"))
                 .child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().danger)
-                        .child(message.clone()),
+                        .child(copy.message()),
                 )
                 .into_any_element(),
             DetailState::Loaded(detail) => {
@@ -4438,17 +4388,19 @@ impl Dashboard {
                 )
                 .into_any_element(),
             IssueEditState::Error {
-                message,
-                unknown_outcome,
-                operation,
-                ..
+                copy, operation, ..
             } => v_flex()
                 .gap_2()
-                .child(div().text_sm().text_color(cx.theme().danger).child(message))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(copy.message()),
+                )
                 .child(
                     h_flex()
                         .gap_2()
-                        .when(!unknown_outcome, |this| {
+                        .when(copy.recovery() == RecoveryDirective::Retry, |this| {
                             this.child(
                                 Button::new("retry-issue-edit")
                                     .compact()
@@ -4466,7 +4418,7 @@ impl Dashboard {
                                     )),
                             )
                         })
-                        .when(unknown_outcome, |this| {
+                        .when(copy.recovery() == RecoveryDirective::Refresh, |this| {
                             this.child(
                                 Button::new("refresh-after-issue-edit")
                                     .compact()
@@ -4557,13 +4509,13 @@ impl Dashboard {
                     .text_color(cx.theme().muted_foreground)
                     .child("Posting comment…"),
             );
-        } else if let Some((message, unknown_outcome)) = self.comment_flow.error_details() {
+        } else if let Some(copy) = self.comment_flow.error_details() {
             composer = composer
                 .child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().danger)
-                        .child(message.to_owned()),
+                        .child(copy.message()),
                 )
                 .child(
                     h_flex()
@@ -4577,7 +4529,7 @@ impl Dashboard {
                                     this.begin_comment_confirmation(cx)
                                 })),
                         )
-                        .when(unknown_outcome, |this| {
+                        .when(copy.recovery() == RecoveryDirective::Refresh, |this| {
                             this.child(
                                 Button::new("refresh-comments-after-unknown")
                                     .secondary()
@@ -4884,6 +4836,7 @@ impl Dashboard {
             |this, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.team_text = input.read(cx).value().to_string();
+                    this.team_feedback_loading = false;
                     this.team_feedback = None;
                     cx.notify();
                 }
@@ -4947,39 +4900,8 @@ impl Dashboard {
                         this.start_automatic_polling(cx);
                     }
                     settings::ScopeSaveResult::Failed(failure) => {
-                        let (message, restore_failed) = match failure {
-                            settings::ScopeSaveFailure::Unchanged(
-                                settings::ScopeUnchangedFailure::Invalid,
-                            ) => (
-                                "Scope is invalid; check the expression and ORDER BY rule",
-                                false,
-                            ),
-                            settings::ScopeSaveFailure::Unchanged(
-                                settings::ScopeUnchangedFailure::Preparation,
-                            ) => ("Scope could not be prepared locally", false),
-                            settings::ScopeSaveFailure::Restored(
-                                settings::ScopeFailureCause::Refresh,
-                            ) => ("Jira rejected the scope; the previous scope remains active", false),
-                            settings::ScopeSaveFailure::RestoreFailed(
-                                settings::ScopeFailureCause::Refresh,
-                            ) => (
-                                "Jira rejected the scope and the previous scope could not be restored",
-                                true,
-                            ),
-                            settings::ScopeSaveFailure::Restored(
-                                settings::ScopeFailureCause::PreferenceSave,
-                            ) => (
-                                "Scope applied remotely, but settings could not be saved locally",
-                                false,
-                            ),
-                            settings::ScopeSaveFailure::RestoreFailed(
-                                settings::ScopeFailureCause::PreferenceSave,
-                            ) => (
-                                "Settings could not be saved and the previous scope could not be restored",
-                                true,
-                            ),
-                        };
-                        if restore_failed {
+                        let copy = scope_outcome_copy(settings::scope_failure_kind(&failure));
+                        if copy.recovery() == RecoveryDirective::InvalidateWorkspace {
                             // Never leave the old cache paired with an unknown active scope.
                             this.workspace = None;
                             this.polling_task.take();
@@ -4989,7 +4911,7 @@ impl Dashboard {
                             this.update_groups.clear();
                             this.selected_issue = None;
                         }
-                        this.settings_feedback = Some(message.to_owned());
+                        this.settings_feedback = Some(copy.to_owned());
                     }
                 }
                 cx.notify();
@@ -5003,6 +4925,7 @@ impl Dashboard {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
+            self.team_feedback_loading = false;
             self.team_feedback = Some("Connect Jira before saving the team tracker".to_owned());
             cx.notify();
             return;
@@ -5013,6 +4936,7 @@ impl Dashboard {
         let previous_accounts = workspace.team_members();
         let issue_jql_scope = workspace.jql_scope();
         self.operation_in_progress = true;
+        self.team_feedback_loading = true;
         self.team_feedback = Some("Resolving team members and refreshing Jira…".to_owned());
         let task = cx.spawn(async move |this, cx| {
             let preferences = settings::ProductionPreferences;
@@ -5029,6 +4953,7 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     settings::TeamSaveResult::Saved { members, refreshed } => {
+                        this.team_feedback_loading = false;
                         this.team_automatic_polling_paused = false;
                         this.team_members = members;
                         this.team_text = this
@@ -5065,48 +4990,18 @@ impl Dashboard {
                         ));
                     }
                     settings::TeamSaveResult::Failed(failure) => {
+                        this.team_feedback_loading = false;
                         this.team_members = previous_members;
                         this.team_text = previous_text;
-                        let (message, restore_failed) = match failure {
-                            settings::TeamSaveFailure::Unchanged(
-                                settings::TeamUnchangedFailure::InvalidInput(message),
-                            ) => (message, false),
-                            settings::TeamSaveFailure::Unchanged(
-                                settings::TeamUnchangedFailure::Search,
-                            ) => ("Jira user search failed; existing team remains active", false),
-                            settings::TeamSaveFailure::Unchanged(
-                                settings::TeamUnchangedFailure::EmailNotFound,
-                            ) => ("Email did not resolve to one active Jira user", false),
-                            settings::TeamSaveFailure::Unchanged(
-                                settings::TeamUnchangedFailure::EmailAmbiguous,
-                            ) => ("Email matched multiple active Jira users; enter an account ID instead", false),
-                            settings::TeamSaveFailure::Unchanged(
-                                settings::TeamUnchangedFailure::Normalization,
-                            ) => ("Team tracker entries are invalid or exceed the member limit", false),
-                            settings::TeamSaveFailure::Unchanged(
-                                settings::TeamUnchangedFailure::Preparation,
-                            ) => ("Team configuration could not be applied; existing team remains active", false),
-                            settings::TeamSaveFailure::Restored(
-                                settings::TeamFailureCause::Refresh,
-                            ) => ("Team refresh failed; existing team remains active", false),
-                            settings::TeamSaveFailure::RestoreFailed(
-                                settings::TeamFailureCause::Refresh,
-                            ) => ("Team refresh failed and the previous team could not be restored; team tracker paused", true),
-                            settings::TeamSaveFailure::Restored(
-                                settings::TeamFailureCause::PreferenceSave,
-                            ) => ("Team refreshed but could not be saved locally; existing team remains active", false),
-                            settings::TeamSaveFailure::RestoreFailed(
-                                settings::TeamFailureCause::PreferenceSave,
-                            ) => ("Team settings could not be saved and the previous team could not be restored; team tracker paused", true),
-                        };
-                        if restore_failed {
+                        let copy = team_outcome_copy(settings::team_failure_kind(&failure));
+                        if copy.recovery() == RecoveryDirective::PauseTeam {
                             this.team_automatic_polling_paused = true;
                             this.team_members.clear();
                             this.team_issues.clear();
                             this.team_events.clear();
                             this.refresh_team_table(cx);
                         }
-                        this.team_feedback = Some(message.to_owned());
+                        this.team_feedback = Some(copy.to_owned());
                     }
                 }
                 cx.notify();
@@ -5365,17 +5260,15 @@ impl Dashboard {
                                             | SavedLoginDeleteState::Deleting => None,
                                         },
                                         |this, outcome| {
-                                            let (message, is_error) =
-                                                saved_login_delete_feedback(outcome);
+                                            let copy = saved_login_delete_feedback(outcome);
                                             this.child(
                                                 div()
                                                     .text_sm()
-                                                    .text_color(if is_error {
-                                                        cx.theme().danger
-                                                    } else {
-                                                        cx.theme().muted_foreground
+                                                    .text_color(match copy.severity() {
+                                                        FeedbackSeverity::Error => cx.theme().danger,
+                                                        FeedbackSeverity::Info => cx.theme().muted_foreground,
                                                     })
-                                                    .child(message),
+                                                    .child(copy.message()),
                                             )
                                         },
                                     ),

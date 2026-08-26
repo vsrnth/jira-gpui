@@ -6,6 +6,7 @@
 mod format;
 mod identity;
 mod issues;
+mod outcomes;
 mod updates;
 
 pub use identity::IdentityDirectory;
@@ -16,6 +17,16 @@ pub use issues::{
 };
 pub use updates::{UpdateGroupViewModel, update_groups_for_events};
 
+pub(crate) use outcomes::{
+    CommentOutcomeKind, FeedbackSeverity, IssueEditPhase, OutcomeCopy, ReadSurface,
+    RecoveryDirective, SavedLoginOutcomeKind, ScopeOutcomeKind, TeamInvalidInputKind,
+    TeamOutcomeKind, comment_outcome_copy, comment_validation_kind, issue_edit_error_copy,
+    issue_edit_workspace_unavailable_copy, lookup_workspace_unavailable_copy, read_error_copy,
+    saved_login_outcome_copy, scope_outcome_copy, team_outcome_copy,
+};
+
+#[cfg(test)]
+pub(crate) use outcomes::FeedbackCertainty;
 #[cfg(test)]
 pub(crate) use updates::UpdateViewModel;
 

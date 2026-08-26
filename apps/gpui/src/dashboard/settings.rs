@@ -8,6 +8,7 @@ use crate::{
         LocalPreferences, MAX_TEAM_MEMBERS, PersistedTeamMember, normalize_issue_jql_scope,
         normalize_team_members, save_preferences,
     },
+    presentation::{ScopeOutcomeKind, TeamInvalidInputKind, TeamOutcomeKind},
 };
 
 pub(super) type TransactionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ()>> + Send + 'a>>;
@@ -176,7 +177,7 @@ pub(super) enum TeamFailureCause {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TeamUnchangedFailure {
-    InvalidInput(&'static str),
+    InvalidInput(TeamInvalidInputKind),
     Search,
     EmailNotFound,
     EmailAmbiguous,
@@ -319,7 +320,7 @@ async fn restore_team<P: SettingsPort>(
     TeamSaveResult::Failed(TeamSaveFailure::Restored(cause))
 }
 
-pub(super) fn team_identifier_lines(value: &str) -> Result<Vec<String>, &'static str> {
+pub(super) fn team_identifier_lines(value: &str) -> Result<Vec<String>, TeamInvalidInputKind> {
     let lines = value
         .lines()
         .map(str::trim)
@@ -327,21 +328,21 @@ pub(super) fn team_identifier_lines(value: &str) -> Result<Vec<String>, &'static
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if lines.len() > MAX_TEAM_MEMBERS {
-        return Err("Team tracker accepts at most 100 members");
+        return Err(TeamInvalidInputKind::TooManyMembers);
     }
     for line in &lines {
         if line.chars().any(char::is_control) || line.len() > 320 {
-            return Err("Team tracker entries must be short, single-line values");
+            return Err(TeamInvalidInputKind::InvalidEntry);
         }
         if !line.contains('@') {
-            let account = AccountId::new(line.clone())
-                .map_err(|_| "Enter a valid Jira account ID or Atlassian email")?;
+            let account =
+                AccountId::new(line.clone()).map_err(|_| TeamInvalidInputKind::InvalidAccount)?;
             if account
                 .as_str()
                 .chars()
                 .any(|character| matches!(character, '"' | '\\'))
             {
-                return Err("Jira account IDs cannot contain quote or backslash characters");
+                return Err(TeamInvalidInputKind::UnsafeAccount);
             }
         }
     }
@@ -350,21 +351,71 @@ pub(super) fn team_identifier_lines(value: &str) -> Result<Vec<String>, &'static
 
 pub(super) fn persisted_direct_team_member(
     identifier: String,
-) -> Result<PersistedTeamMember, &'static str> {
-    let account_id = AccountId::new(identifier.clone())
-        .map_err(|_| "Enter a valid Jira account ID or Atlassian email")?;
+) -> Result<PersistedTeamMember, TeamInvalidInputKind> {
+    let account_id =
+        AccountId::new(identifier.clone()).map_err(|_| TeamInvalidInputKind::InvalidAccount)?;
     if account_id
         .as_str()
         .chars()
         .any(|character| matches!(character, '"' | '\\'))
     {
-        return Err("Jira account IDs cannot contain quote or backslash characters");
+        return Err(TeamInvalidInputKind::UnsafeAccount);
     }
     Ok(PersistedTeamMember {
         identifier,
         account_id: account_id.into_inner(),
         display_name: "Unknown user".to_owned(),
     })
+}
+
+pub(super) fn scope_failure_kind(failure: &ScopeSaveFailure) -> ScopeOutcomeKind {
+    match failure {
+        ScopeSaveFailure::Unchanged(ScopeUnchangedFailure::Invalid) => ScopeOutcomeKind::Invalid,
+        ScopeSaveFailure::Unchanged(ScopeUnchangedFailure::Preparation) => {
+            ScopeOutcomeKind::Preparation
+        }
+        ScopeSaveFailure::Restored(ScopeFailureCause::Refresh) => ScopeOutcomeKind::RefreshRestored,
+        ScopeSaveFailure::RestoreFailed(ScopeFailureCause::Refresh) => {
+            ScopeOutcomeKind::RefreshRollbackFailed
+        }
+        ScopeSaveFailure::Restored(ScopeFailureCause::PreferenceSave) => {
+            ScopeOutcomeKind::PreferenceSaveRestored
+        }
+        ScopeSaveFailure::RestoreFailed(ScopeFailureCause::PreferenceSave) => {
+            ScopeOutcomeKind::PreferenceSaveRollbackFailed
+        }
+    }
+}
+
+pub(super) fn team_failure_kind(failure: &TeamSaveFailure) -> TeamOutcomeKind {
+    match failure {
+        TeamSaveFailure::Unchanged(TeamUnchangedFailure::InvalidInput(kind)) => {
+            TeamOutcomeKind::InvalidInput(*kind)
+        }
+        TeamSaveFailure::Unchanged(TeamUnchangedFailure::Search) => TeamOutcomeKind::Search,
+        TeamSaveFailure::Unchanged(TeamUnchangedFailure::EmailNotFound) => {
+            TeamOutcomeKind::EmailNotFound
+        }
+        TeamSaveFailure::Unchanged(TeamUnchangedFailure::EmailAmbiguous) => {
+            TeamOutcomeKind::EmailAmbiguous
+        }
+        TeamSaveFailure::Unchanged(TeamUnchangedFailure::Normalization) => {
+            TeamOutcomeKind::Normalization
+        }
+        TeamSaveFailure::Unchanged(TeamUnchangedFailure::Preparation) => {
+            TeamOutcomeKind::Preparation
+        }
+        TeamSaveFailure::Restored(TeamFailureCause::Refresh) => TeamOutcomeKind::RefreshRestored,
+        TeamSaveFailure::RestoreFailed(TeamFailureCause::Refresh) => {
+            TeamOutcomeKind::RefreshRollbackFailed
+        }
+        TeamSaveFailure::Restored(TeamFailureCause::PreferenceSave) => {
+            TeamOutcomeKind::PreferenceSaveRestored
+        }
+        TeamSaveFailure::RestoreFailed(TeamFailureCause::PreferenceSave) => {
+            TeamOutcomeKind::PreferenceSaveRollbackFailed
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +429,10 @@ mod tests {
 
     use super::*;
     use crate::live_workspace::CachedWorkspace;
+    use crate::presentation::{
+        FeedbackCertainty, FeedbackSeverity, RecoveryDirective, scope_outcome_copy,
+        team_outcome_copy,
+    };
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Call {
@@ -953,6 +1008,156 @@ mod tests {
                 Call::TeamConfigure(vec![account("old")]),
             ]
         );
+    }
+
+    #[test]
+    fn scope_failure_mapping_covers_every_cause_and_directive() {
+        let cases = [
+            (
+                ScopeSaveFailure::Unchanged(ScopeUnchangedFailure::Invalid),
+                ScopeOutcomeKind::Invalid,
+                "Scope is invalid; check the expression and ORDER BY rule",
+                RecoveryDirective::Retry,
+            ),
+            (
+                ScopeSaveFailure::Unchanged(ScopeUnchangedFailure::Preparation),
+                ScopeOutcomeKind::Preparation,
+                "Scope could not be prepared locally",
+                RecoveryDirective::Retry,
+            ),
+            (
+                ScopeSaveFailure::Restored(ScopeFailureCause::Refresh),
+                ScopeOutcomeKind::RefreshRestored,
+                "Jira rejected the scope; the previous scope remains active",
+                RecoveryDirective::Retry,
+            ),
+            (
+                ScopeSaveFailure::RestoreFailed(ScopeFailureCause::Refresh),
+                ScopeOutcomeKind::RefreshRollbackFailed,
+                "Jira rejected the scope and the previous scope could not be restored",
+                RecoveryDirective::InvalidateWorkspace,
+            ),
+            (
+                ScopeSaveFailure::Restored(ScopeFailureCause::PreferenceSave),
+                ScopeOutcomeKind::PreferenceSaveRestored,
+                "Scope applied remotely, but settings could not be saved locally",
+                RecoveryDirective::Retry,
+            ),
+            (
+                ScopeSaveFailure::RestoreFailed(ScopeFailureCause::PreferenceSave),
+                ScopeOutcomeKind::PreferenceSaveRollbackFailed,
+                "Settings could not be saved and the previous scope could not be restored",
+                RecoveryDirective::InvalidateWorkspace,
+            ),
+        ];
+        for (failure, expected_kind, message, recovery) in cases {
+            assert_eq!(scope_failure_kind(&failure), expected_kind);
+            let copy = scope_outcome_copy(expected_kind);
+            assert_eq!(copy.message(), message);
+            assert_eq!(copy.severity(), FeedbackSeverity::Error);
+            assert_eq!(copy.certainty(), FeedbackCertainty::Definite);
+            assert_eq!(copy.recovery(), recovery);
+        }
+    }
+
+    #[test]
+    fn team_failure_mapping_covers_every_variant_and_directive() {
+        let cases = [
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::InvalidInput(
+                    TeamInvalidInputKind::TooManyMembers,
+                )),
+                TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::TooManyMembers),
+                "Team tracker accepts at most 100 members",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::InvalidInput(
+                    TeamInvalidInputKind::InvalidAccount,
+                )),
+                TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::InvalidAccount),
+                "Enter a valid Jira account ID or Atlassian email",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::InvalidInput(
+                    TeamInvalidInputKind::UnsafeAccount,
+                )),
+                TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::UnsafeAccount),
+                "Jira account IDs cannot contain quote or backslash characters",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::InvalidInput(
+                    TeamInvalidInputKind::InvalidEntry,
+                )),
+                TeamOutcomeKind::InvalidInput(TeamInvalidInputKind::InvalidEntry),
+                "Team tracker entries must be short, single-line values",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::Search),
+                TeamOutcomeKind::Search,
+                "Jira user search failed; existing team remains active",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::EmailNotFound),
+                TeamOutcomeKind::EmailNotFound,
+                "Email did not resolve to one active Jira user",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::EmailAmbiguous),
+                TeamOutcomeKind::EmailAmbiguous,
+                "Email matched multiple active Jira users; enter an account ID instead",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::Normalization),
+                TeamOutcomeKind::Normalization,
+                "Team tracker entries are invalid or exceed the member limit",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Unchanged(TeamUnchangedFailure::Preparation),
+                TeamOutcomeKind::Preparation,
+                "Team configuration could not be applied; existing team remains active",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::Restored(TeamFailureCause::Refresh),
+                TeamOutcomeKind::RefreshRestored,
+                "Team refresh failed; existing team remains active",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::RestoreFailed(TeamFailureCause::Refresh),
+                TeamOutcomeKind::RefreshRollbackFailed,
+                "Team refresh failed and the previous team could not be restored; team tracker paused",
+                RecoveryDirective::PauseTeam,
+            ),
+            (
+                TeamSaveFailure::Restored(TeamFailureCause::PreferenceSave),
+                TeamOutcomeKind::PreferenceSaveRestored,
+                "Team refreshed but could not be saved locally; existing team remains active",
+                RecoveryDirective::Retry,
+            ),
+            (
+                TeamSaveFailure::RestoreFailed(TeamFailureCause::PreferenceSave),
+                TeamOutcomeKind::PreferenceSaveRollbackFailed,
+                "Team settings could not be saved and the previous team could not be restored; team tracker paused",
+                RecoveryDirective::PauseTeam,
+            ),
+        ];
+        for (failure, expected_kind, message, recovery) in cases {
+            assert_eq!(team_failure_kind(&failure), expected_kind);
+            let copy = team_outcome_copy(expected_kind);
+            assert_eq!(copy.message(), message);
+            assert_eq!(copy.severity(), FeedbackSeverity::Error);
+            assert_eq!(copy.certainty(), FeedbackCertainty::Definite);
+            assert_eq!(copy.recovery(), recovery);
+        }
     }
 
     #[test]
