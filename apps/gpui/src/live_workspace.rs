@@ -13,9 +13,9 @@ use jira_application::{
     DefaultIssueDiffer, IssueCachePort, IssueCatalogService, IssueDetailConfig, IssueDetailRequest,
     IssueDetailService, IssueEditCachePort, IssueEditService, IssueListQuery, IssueLocator,
     IssueMediaConfig, IssueMediaService, IssueTransitionsRequest, JiraCommentWritePort,
-    JiraIssueEditPort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncRequest,
-    SyncService, TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSearchRequest,
-    UserSetDraft, UserSetPort, UserSetService, validate_jql_scope,
+    JiraIssueEditPort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncService,
+    TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSearchRequest, UserSetDraft,
+    UserSetPort, UserSetService, validate_jql_scope,
 };
 use jira_desktop_notifications::FreedesktopNotificationPort;
 use jira_domain::{
@@ -32,6 +32,9 @@ const MAX_CACHED_ISSUES: usize = 10_000;
 const MAX_FEED_EVENTS: usize = 500;
 
 mod media;
+mod partition;
+
+use partition::{PartitionSpec, PrimaryPartitionSpecBuilder, TeamPartitionSpecBuilder};
 
 /// The cache and update feed displayed by a workspace shell.
 #[derive(Clone, Debug)]
@@ -563,22 +566,23 @@ impl LiveWorkspace {
 
     /// Load bounded cached data without contacting Jira.
     pub async fn load_cached(&self) -> Result<CachedWorkspace, ApplicationError> {
-        let scope_state = self.scope_state();
-        self.load_cached_for_scope(&scope_state).await
+        let partition = self.primary_partition();
+        self.load_cached_for_partition(&partition).await
     }
 
-    async fn load_cached_for_scope(
-        &self,
-        scope_state: &ScopeState,
-    ) -> Result<CachedWorkspace, ApplicationError> {
-        self.load_cached_for_partition(&scope_state.user_set_id, Some(&scope_state.user_set_id))
-            .await
+    fn primary_partition(&self) -> PartitionSpec {
+        let scope_state = self.scope_state();
+        PrimaryPartitionSpecBuilder::build(&scope_state, self.authenticated_account.as_ref())
+    }
+
+    fn team_partition(&self) -> PartitionSpec {
+        let team_state = self.team_state.read().expect("team state lock").clone();
+        TeamPartitionSpecBuilder::build(&team_state, self.authenticated_account.as_ref())
     }
 
     async fn load_cached_for_partition(
         &self,
-        user_set_id: &UserSetId,
-        required_event_user_set_id: Option<&UserSetId>,
+        partition: &PartitionSpec,
     ) -> Result<CachedWorkspace, ApplicationError> {
         let mut issues = Vec::new();
         for offset in (0..MAX_CACHED_ISSUES).step_by(ISSUE_PAGE_SIZE) {
@@ -586,7 +590,7 @@ impl LiveWorkspace {
                 .catalog
                 .list_cached(&IssueListQuery {
                     site_id: self.site_id.clone(),
-                    user_set_id: user_set_id.clone(),
+                    user_set_id: partition.user_set_id().clone(),
                     text: None,
                     // Membership is already account-scoped by the remote JQL and user-set
                     // identity. Re-filtering by assignee would hide watched issues.
@@ -619,12 +623,10 @@ impl LiveWorkspace {
             .into_iter()
             .filter(|event| displayed_issue_ids.contains(&event.issue_id))
             .filter(|event| {
-                required_event_user_set_id.is_none_or(|user_set_id| {
-                    event
-                        .matching_user_set_ids
-                        .iter()
-                        .any(|id| id == user_set_id)
-                })
+                event
+                    .matching_user_set_ids
+                    .iter()
+                    .any(|id| id == partition.required_event_user_set_id())
             })
             .collect();
         Ok(CachedWorkspace { issues, events })
@@ -632,15 +634,11 @@ impl LiveWorkspace {
 
     /// Load only the configured team's local cache and update feed. This never contacts Jira.
     pub async fn load_cached_team(&self) -> Result<CachedWorkspace, ApplicationError> {
-        let state = self.team_state.read().expect("team state lock").clone();
-        if state.members.is_empty() {
-            return Ok(CachedWorkspace {
-                issues: Vec::new(),
-                events: Vec::new(),
-            });
+        let partition = self.team_partition();
+        if partition.is_empty_team_noop() {
+            return Ok(empty_cached_workspace());
         }
-        self.load_cached_for_partition(&state.user_set_id, Some(&state.user_set_id))
-            .await
+        self.load_cached_for_partition(&partition).await
     }
 
     /// Synchronize Jira and reload bounded local data.
@@ -648,11 +646,11 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let scope_state = self.scope_state();
+        let partition = self.primary_partition();
         let mode = self
-            .next_mode(&scope_state, SyncMode::Reconciliation)
+            .next_mode_for_user_set(partition.user_set_id(), SyncMode::Reconciliation)
             .await?;
-        self.refresh_with_mode(&scope_state, mode, cancellation)
+        self.refresh_with_partition(&partition, mode, cancellation)
             .await
     }
 
@@ -662,18 +660,11 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let scope_state = self.scope_state();
-        let mode = self.next_mode(&scope_state, SyncMode::Incremental).await?;
-        self.refresh_with_mode(&scope_state, mode, cancellation)
-            .await
-    }
-
-    async fn next_mode(
-        &self,
-        scope_state: &ScopeState,
-        subsequent_mode: SyncMode,
-    ) -> Result<SyncMode, ApplicationError> {
-        self.next_mode_for_user_set(&scope_state.user_set_id, subsequent_mode)
+        let partition = self.primary_partition();
+        let mode = self
+            .next_mode_for_user_set(partition.user_set_id(), SyncMode::Incremental)
+            .await?;
+        self.refresh_with_partition(&partition, mode, cancellation)
             .await
     }
 
@@ -694,37 +685,17 @@ impl LiveWorkspace {
         }
     }
 
-    async fn refresh_with_mode(
+    async fn refresh_with_partition(
         &self,
-        scope_state: &ScopeState,
+        partition: &PartitionSpec,
         mode: SyncMode,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
         let outcome = self
             .sync
-            .run(
-                SyncRequest {
-                    site_id: self.site_id.clone(),
-                    user_set_id: scope_state.user_set_id.clone(),
-                    assignees: self
-                        .authenticated_account
-                        .clone()
-                        .map(|account_id| vec![account_id]),
-                    watchers: self
-                        .authenticated_account
-                        .clone()
-                        .map(|account_id| vec![account_id]),
-                    jql_scope: Some(scope_state.normalized_scope.clone()),
-                    notification_assignees: self
-                        .authenticated_account
-                        .clone()
-                        .map(|account_id| vec![account_id]),
-                    mode,
-                },
-                cancellation,
-            )
+            .run(partition.as_sync_request(&self.site_id, mode), cancellation)
             .await?;
-        let cached = self.load_cached_for_scope(scope_state).await?;
+        let cached = self.load_cached_for_partition(partition).await?;
         Ok(RefreshResult { cached, outcome })
     }
 
@@ -734,18 +705,18 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let team_state = self.team_state.read().expect("team state lock").clone();
-        if team_state.members.is_empty() {
+        let partition = self.team_partition();
+        if partition.is_empty_team_noop() {
             cancellation.check()?;
             return Ok(RefreshResult {
-                cached: self.load_cached_team().await?,
+                cached: empty_cached_workspace(),
                 outcome: empty_team_sync_outcome(),
             });
         }
         let mode = self
-            .next_mode_for_user_set(&team_state.user_set_id, SyncMode::Reconciliation)
+            .next_mode_for_user_set(partition.user_set_id(), SyncMode::Reconciliation)
             .await?;
-        self.refresh_team_with_mode(&team_state, mode, cancellation)
+        self.refresh_with_partition(&partition, mode, cancellation)
             .await
     }
 
@@ -755,49 +726,19 @@ impl LiveWorkspace {
         &self,
         cancellation: &jira_application::CancellationToken,
     ) -> Result<RefreshResult, ApplicationError> {
-        let team_state = self.team_state.read().expect("team state lock").clone();
-        if team_state.members.is_empty() {
+        let partition = self.team_partition();
+        if partition.is_empty_team_noop() {
             cancellation.check()?;
             return Ok(RefreshResult {
-                cached: self.load_cached_team().await?,
+                cached: empty_cached_workspace(),
                 outcome: empty_team_sync_outcome(),
             });
         }
         let mode = self
-            .next_mode_for_user_set(&team_state.user_set_id, SyncMode::Incremental)
+            .next_mode_for_user_set(partition.user_set_id(), SyncMode::Incremental)
             .await?;
-        self.refresh_team_with_mode(&team_state, mode, cancellation)
+        self.refresh_with_partition(&partition, mode, cancellation)
             .await
-    }
-
-    async fn refresh_team_with_mode(
-        &self,
-        team_state: &TeamState,
-        mode: SyncMode,
-        cancellation: &jira_application::CancellationToken,
-    ) -> Result<RefreshResult, ApplicationError> {
-        let outcome = self
-            .sync
-            .run(
-                SyncRequest {
-                    site_id: self.site_id.clone(),
-                    user_set_id: team_state.user_set_id.clone(),
-                    assignees: Some(team_state.members.clone()),
-                    watchers: None,
-                    jql_scope: Some(team_jql_scope()),
-                    // Team membership controls fetches only. Desktop notifications remain
-                    // restricted to the authenticated account, matching the primary view.
-                    notification_assignees: self
-                        .authenticated_account
-                        .clone()
-                        .map(|account_id| vec![account_id]),
-                    mode,
-                },
-                cancellation,
-            )
-            .await?;
-        let cached = self.load_cached_team().await?;
-        Ok(RefreshResult { cached, outcome })
     }
 
     /// Mark every currently displayed update as read and reload local data.
@@ -928,12 +869,20 @@ fn workspace_name(scope: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn team_jql_scope() -> String {
     TEAM_STATUS_SCOPE.to_owned()
 }
 
 fn empty_team_user_set_id() -> UserSetId {
     UserSetId::new("configured-team-empty").expect("static team user set ID is valid")
+}
+
+fn empty_cached_workspace() -> CachedWorkspace {
+    CachedWorkspace {
+        issues: Vec::new(),
+        events: Vec::new(),
+    }
 }
 
 fn empty_team_sync_outcome() -> SyncOutcome {
@@ -974,7 +923,11 @@ impl Clock for SystemClock {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Barrier, Mutex},
+        thread,
+    };
 
     use futures_lite::future::block_on;
     use jira_application::{
@@ -982,12 +935,13 @@ mod tests {
         IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage,
         IssueTransition, IssueTransitionsRequest, JiraAttachmentReadPort, JiraIssueActivityPort,
         JiraIssueDetailReadPort, JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort,
-        JiraUserReadPort, PortFuture, TransitionIssueRequest, UserSearchRequest,
+        JiraUserReadPort, PortFuture, SyncCommit, SyncState, TransitionIssueRequest,
+        UserSearchRequest,
     };
     use jira_domain::{
-        AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetailCore, IssueId, IssueKey,
-        IssueType, JiraSiteId, NotificationDelivery, Priority, Project, Status, UpdateReadState,
-        User,
+        AttachmentMetadata, EventId, IssueComment, IssueCommentAuthor, IssueDetailCore, IssueId,
+        IssueKey, IssueType, JiraSiteId, NotificationDelivery, Priority, Project, Status,
+        UpdateKind, UpdateReadState, User,
     };
     use time::macros::datetime;
 
@@ -1002,6 +956,7 @@ mod tests {
         assignee_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
         watcher_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
         jql_scopes: Mutex<Vec<Option<String>>>,
+        request_gate: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
         attachment_images: Mutex<VecDeque<Result<AttachmentImage, ApplicationError>>>,
         attachment_contents: Mutex<VecDeque<Result<AttachmentContent, ApplicationError>>>,
         attachment_image_calls: Mutex<usize>,
@@ -1039,6 +994,14 @@ mod tests {
 
         fn push_page(&self, page: IssuePage) {
             self.pages.lock().expect("pages lock").push_back(page);
+        }
+
+        fn gate_next_request(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            *self.request_gate.lock().expect("request gate lock") =
+                Some((entered.clone(), release.clone()));
+            (entered, release)
         }
 
         fn push_detail(&self, detail: IssueDetailCore) {
@@ -1138,6 +1101,12 @@ mod tests {
             _cancellation: &'a CancellationToken,
         ) -> PortFuture<'a, IssuePage> {
             *self.request_count.lock().expect("request count lock") += 1;
+            if let Some((entered, release)) =
+                self.request_gate.lock().expect("request gate lock").take()
+            {
+                entered.wait();
+                release.wait();
+            }
             self.assignee_filters
                 .lock()
                 .expect("assignee filters lock")
@@ -1380,6 +1349,27 @@ mod tests {
         }
     }
 
+    fn numbered_issue(index: usize) -> Issue {
+        let mut issue = issue("bounded cached issue");
+        issue.id = IssueId::new(format!("cached-{index:04}")).expect("issue id");
+        issue.key = IssueKey::new(format!("APP-{index}")).expect("issue key");
+        issue.updated_at = datetime!(2026-01-01 00:00 UTC)
+            + time::Duration::seconds(i64::try_from(index).expect("index fits"));
+        issue
+    }
+
+    fn issue_with_identity(
+        summary: &str,
+        issue_id: &str,
+        issue_key: &str,
+        assignee: &str,
+    ) -> Issue {
+        let mut issue = issue_for(summary, assignee);
+        issue.id = IssueId::new(issue_id).expect("issue id");
+        issue.key = IssueKey::new(issue_key).expect("issue key");
+        issue
+    }
+
     fn make_workspace(jira: Arc<FakeJira>, cache: Arc<SqliteStore>) -> LiveWorkspace {
         block_on(LiveWorkspace::initialize(
             JiraSiteId::new("site").expect("valid site"),
@@ -1619,18 +1609,71 @@ mod tests {
     }
 
     #[test]
-    fn empty_team_refresh_is_a_safe_local_no_op() {
+    fn empty_team_manual_and_automatic_refreshes_are_cancelled_first_local_no_ops() {
         let jira = Arc::new(FakeJira::default());
-        let workspace = make_workspace(
-            jira.clone(),
-            Arc::new(SqliteStore::in_memory().expect("store")),
-        );
-        let result = block_on(workspace.refresh_team(&CancellationToken::new()))
-            .expect("empty team refresh");
-        assert_eq!(result.outcome.mode, SyncMode::Baseline);
-        assert_eq!(result.outcome.pages_fetched, 0);
-        assert!(result.cached.issues.is_empty());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira.clone(), cache.clone());
+        let empty_id = workspace.team_user_set_id();
+        let site_id = JiraSiteId::new("site").expect("site");
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let manual_error =
+            block_on(workspace.refresh_team(&cancelled)).expect_err("cancelled manual refresh");
+        let automatic_error = block_on(workspace.refresh_team_automatically(&cancelled))
+            .expect_err("cancelled automatic refresh");
+        assert_eq!(manual_error.kind(), ErrorKind::Cancelled);
+        assert_eq!(automatic_error.kind(), ErrorKind::Cancelled);
         assert_eq!(jira.request_count(), 0);
+
+        let manual = block_on(workspace.refresh_team(&CancellationToken::new()))
+            .expect("empty manual refresh");
+        let automatic = block_on(workspace.refresh_team_automatically(&CancellationToken::new()))
+            .expect("empty automatic refresh");
+        for result in [manual, automatic] {
+            assert_eq!(result.outcome.mode, SyncMode::Baseline);
+            assert_eq!(result.outcome.pages_fetched, 0);
+            assert_eq!(result.outcome.issues_fetched, 0);
+            assert_eq!(result.outcome.events_inserted, 0);
+            assert_eq!(result.outcome.notifications_delivered, 0);
+            assert_eq!(result.outcome.notification_failures, 0);
+            assert!(result.cached.issues.is_empty());
+            assert!(result.cached.events.is_empty());
+        }
+        let cached = block_on(workspace.load_cached_team()).expect("empty team cache load");
+        assert!(cached.issues.is_empty());
+        assert!(cached.events.is_empty());
+        assert_eq!(jira.request_count(), 0);
+        assert!(
+            block_on(cache.sync_state(&site_id, &empty_id))
+                .expect("empty team sync state")
+                .is_none()
+        );
+        let sets = block_on(cache.list(&site_id)).expect("list user sets");
+        assert_eq!(sets.len(), 1);
+        assert!(!sets.iter().any(|set| set.id == empty_id));
+    }
+
+    #[test]
+    fn cancelled_nonempty_team_refresh_reaches_sync_service_after_mode_lookup() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira.clone(), cache.clone());
+        block_on(workspace.configure_team_members(vec![account("team-a")]))
+            .expect("configure team");
+        let team_id = workspace.team_user_set_id();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = block_on(workspace.refresh_team(&cancellation))
+            .expect_err("cancelled nonempty team refresh");
+        assert_eq!(error.kind(), ErrorKind::Cancelled);
+        assert_eq!(jira.request_count(), 0);
+        assert!(
+            block_on(cache.sync_state(&JiraSiteId::new("site").expect("site"), &team_id))
+                .expect("team state lookup")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1666,6 +1709,164 @@ mod tests {
         assert_eq!(
             jira.jql_scopes(),
             vec![Some(DEFAULT_JQL_SCOPE.to_owned()), Some(team_jql_scope())]
+        );
+    }
+
+    #[test]
+    fn team_refresh_reloads_the_captured_partition_after_reconfiguration() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue_for("Old team issue", "old-member")));
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = Arc::new(make_workspace(jira.clone(), cache.clone()));
+        block_on(workspace.configure_team_members(vec![account("old-member")]))
+            .expect("configure old team");
+        let old_id = workspace.team_user_set_id();
+        let (entered, release) = jira.gate_next_request();
+        let refresh_workspace = workspace.clone();
+        let refresh_thread = thread::spawn(move || {
+            block_on(refresh_workspace.refresh_team(&CancellationToken::new()))
+                .expect("old team refresh")
+        });
+        entered.wait();
+        block_on(workspace.configure_team_members(vec![account("new-member")]))
+            .expect("configure new team");
+        let new_id = workspace.team_user_set_id();
+        assert_ne!(old_id, new_id);
+        release.wait();
+        let result = refresh_thread.join().expect("refresh thread");
+
+        assert_eq!(result.cached.issues.len(), 1);
+        assert_eq!(result.cached.issues[0].summary, "Old team issue");
+        assert_eq!(
+            block_on(workspace.load_cached_team())
+                .expect("new team cache load")
+                .issues,
+            Vec::<Issue>::new()
+        );
+        assert_eq!(
+            jira.assignee_filters(),
+            vec![Some(vec![account("old-member")])]
+        );
+        assert_eq!(
+            block_on(cache.issues_for_user_set(&JiraSiteId::new("site").expect("site"), &old_id))
+                .expect("old cache partition"),
+            result.cached.issues
+        );
+        assert!(
+            block_on(cache.issues_for_user_set(&JiraSiteId::new("site").expect("site"), &new_id,))
+                .expect("new cache partition")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn public_refresh_paths_capture_partition_requests_and_isolate_modes() {
+        let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue("Primary baseline")));
+        jira.push_page(IssuePage {
+            issues: Vec::new(),
+            next_cursor: None,
+            server_time: Some(datetime!(2026-01-04 00:00 UTC)),
+        });
+        jira.push_page(page(issue_for("Team baseline", "team-b")));
+        jira.push_page(IssuePage {
+            issues: Vec::new(),
+            next_cursor: None,
+            server_time: Some(datetime!(2026-01-05 00:00 UTC)),
+        });
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira.clone(), cache.clone());
+        let cancellation = CancellationToken::new();
+
+        let primary_manual = block_on(workspace.refresh(&cancellation)).expect("primary manual");
+        let primary_automatic =
+            block_on(workspace.refresh_automatically(&cancellation)).expect("primary automatic");
+        block_on(workspace.configure_team_members(vec![account("team-b"), account("team-c")]))
+            .expect("configure team");
+        let team_manual = block_on(workspace.refresh_team(&cancellation)).expect("team manual");
+        let team_automatic =
+            block_on(workspace.refresh_team_automatically(&cancellation)).expect("team automatic");
+
+        assert_eq!(primary_manual.outcome.mode, SyncMode::Baseline);
+        assert_eq!(primary_automatic.outcome.mode, SyncMode::Incremental);
+        assert_eq!(team_manual.outcome.mode, SyncMode::Baseline);
+        assert_eq!(team_automatic.outcome.mode, SyncMode::Incremental);
+        assert_eq!(primary_manual.cached.issues[0].summary, "Primary baseline");
+        assert_eq!(team_manual.cached.issues[0].summary, "Team baseline");
+        assert_eq!(jira.request_count(), 4);
+        assert_eq!(
+            jira.assignee_filters(),
+            vec![
+                Some(vec![account("account-a")]),
+                Some(vec![account("account-a")]),
+                Some(vec![account("team-b"), account("team-c")]),
+                Some(vec![account("team-b"), account("team-c")]),
+            ]
+        );
+        assert_eq!(
+            jira.watcher_filters(),
+            vec![
+                Some(vec![account("account-a")]),
+                Some(vec![account("account-a")]),
+                None,
+                None,
+            ]
+        );
+        assert_eq!(
+            jira.jql_scopes(),
+            vec![
+                Some(DEFAULT_JQL_SCOPE.to_owned()),
+                Some(DEFAULT_JQL_SCOPE.to_owned()),
+                Some(team_jql_scope()),
+                Some(team_jql_scope()),
+            ]
+        );
+        let site_id = JiraSiteId::new("site").expect("site");
+        let primary_state = block_on(cache.sync_state(&site_id, &workspace.user_set_id()))
+            .expect("primary cursor")
+            .expect("primary sync state");
+        let team_state = block_on(cache.sync_state(&site_id, &workspace.team_user_set_id()))
+            .expect("team cursor")
+            .expect("team sync state");
+        assert!(primary_state.last_incremental_succeeded_at.is_some());
+        assert!(team_state.last_incremental_succeeded_at.is_some());
+        assert_ne!(primary_state.user_set_id, team_state.user_set_id);
+        assert_ne!(
+            primary_state.last_incremental_succeeded_at,
+            team_state.last_incremental_succeeded_at
+        );
+        assert_ne!(workspace.user_set_id(), workspace.team_user_set_id());
+    }
+
+    #[test]
+    fn team_partition_notification_assignees_exclude_every_team_member_except_authenticated_account()
+     {
+        let scope = TeamState {
+            user_set_id: UserSetId::new("team-users").expect("user set"),
+            members: vec![account("account-a"), account("team-b"), account("team-c")],
+        };
+        let request = TeamPartitionSpecBuilder::build(&scope, Some(&account("account-a")))
+            .as_sync_request(
+                &JiraSiteId::new("site").expect("site"),
+                SyncMode::Reconciliation,
+            );
+        assert_eq!(
+            request.notification_assignees,
+            Some(vec![account("account-a")])
+        );
+        assert!(
+            !request
+                .notification_assignees
+                .as_ref()
+                .expect("authenticated notification scope")
+                .contains(&account("team-b"))
+        );
+        assert!(
+            !request
+                .notification_assignees
+                .as_ref()
+                .expect("authenticated notification scope")
+                .contains(&account("team-c"))
         );
     }
 
@@ -1834,6 +2035,148 @@ mod tests {
     }
 
     #[test]
+    fn cached_primary_and_team_views_filter_mixed_memberships_and_events_exactly() {
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira, cache.clone());
+        let site_id = JiraSiteId::new("site").expect("site");
+        let primary_id = workspace.user_set_id();
+        block_on(workspace.configure_team_members(vec![account("team-a")]))
+            .expect("configure team");
+        let team_id = workspace.team_user_set_id();
+        let primary_issue = issue_with_identity(
+            "Watched primary issue assigned to another account",
+            "primary-issue",
+            "APP-10",
+            "team-a",
+        );
+        let team_issue = issue_with_identity("Team issue", "team-issue", "APP-11", "team-a");
+        let primary_event = UpdateEvent::new(
+            EventId::new("primary-event").expect("event"),
+            site_id.clone(),
+            primary_issue.id.clone(),
+            primary_issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            datetime!(2026-01-03 00:00 UTC),
+            vec![primary_id.clone()],
+        );
+        let team_event = UpdateEvent::new(
+            EventId::new("team-event").expect("event"),
+            site_id.clone(),
+            team_issue.id.clone(),
+            team_issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            datetime!(2026-01-04 00:00 UTC),
+            vec![team_id.clone()],
+        );
+        let cross_primary_event = UpdateEvent::new(
+            EventId::new("cross-primary-event").expect("event"),
+            site_id.clone(),
+            primary_issue.id.clone(),
+            primary_issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            datetime!(2026-01-05 00:00 UTC),
+            vec![team_id.clone()],
+        );
+        let cross_team_event = UpdateEvent::new(
+            EventId::new("cross-team-event").expect("event"),
+            site_id.clone(),
+            team_issue.id.clone(),
+            team_issue.key.clone(),
+            UpdateKind::IssueUpdated,
+            datetime!(2026-01-06 00:00 UTC),
+            vec![primary_id.clone()],
+        );
+        block_on(cache.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: primary_id.clone(),
+            issues: vec![primary_issue.clone()],
+            update_events: vec![primary_event, cross_primary_event],
+            replace_membership: true,
+            state: SyncState::new(site_id.clone(), primary_id.clone()),
+        }))
+        .expect("commit primary membership");
+        block_on(cache.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: team_id.clone(),
+            issues: vec![team_issue.clone()],
+            update_events: vec![team_event, cross_team_event],
+            replace_membership: true,
+            state: SyncState::new(site_id, team_id.clone()),
+        }))
+        .expect("commit team membership");
+
+        let primary = block_on(workspace.load_cached()).expect("primary cache");
+        let team = block_on(workspace.load_cached_team()).expect("team cache");
+        assert_eq!(primary.issues, vec![primary_issue]);
+        assert_eq!(team.issues, vec![team_issue]);
+        assert_eq!(
+            primary
+                .events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["primary-event"]
+        );
+        assert_eq!(
+            team.events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["team-event"]
+        );
+        assert!(
+            primary
+                .events
+                .iter()
+                .all(|event| event.matching_user_set_ids == vec![primary_id.clone()])
+        );
+        assert!(
+            team.events
+                .iter()
+                .all(|event| event.matching_user_set_ids == vec![team_id.clone()])
+        );
+    }
+
+    #[test]
+    fn cached_loading_pages_more_than_one_issue_page_without_exceeding_bound() {
+        assert_eq!(ISSUE_PAGE_SIZE, 1_000);
+        assert_eq!(MAX_CACHED_ISSUES, 10_000);
+        let jira = Arc::new(FakeJira::default());
+        let cache = Arc::new(SqliteStore::in_memory().expect("store"));
+        let workspace = make_workspace(jira, cache.clone());
+        let site_id = JiraSiteId::new("site").expect("site");
+        let user_set_id = workspace.user_set_id();
+        let issues = (0..1_001).map(numbered_issue).collect::<Vec<_>>();
+        block_on(cache.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            issues,
+            update_events: Vec::new(),
+            replace_membership: true,
+            state: SyncState::new(site_id, user_set_id),
+        }))
+        .expect("commit bounded fixture");
+
+        let cached = block_on(workspace.load_cached()).expect("load paginated cache");
+        assert_eq!(cached.issues.len(), 1_001);
+        assert_eq!(
+            cached.issues.first().expect("first issue").key.as_str(),
+            "APP-1000"
+        );
+        assert_eq!(
+            cached.issues.last().expect("last issue").key.as_str(),
+            "APP-0"
+        );
+        assert!(
+            cached
+                .issues
+                .windows(2)
+                .all(|pair| pair[0].updated_at >= pair[1].updated_at)
+        );
+    }
+
+    #[test]
     fn cached_loading_does_not_contact_jira() {
         let jira = Arc::new(FakeJira::default());
         let cache = Arc::new(SqliteStore::in_memory().expect("store"));
@@ -1954,15 +2297,33 @@ mod tests {
     #[test]
     fn project_wide_workspace_has_no_authenticated_account() {
         let jira = Arc::new(FakeJira::default());
+        jira.push_page(page(issue("Project-wide issue")));
         let cache = Arc::new(SqliteStore::in_memory().expect("store"));
         let result = block_on(LiveWorkspace::initialize(
             JiraSiteId::new("site").expect("valid site"),
             None,
-            jira,
+            jira.clone(),
             cache.clone(),
         ));
         let workspace = result.expect("project-wide workspace initializes");
         assert!(workspace.authenticated_account().is_none());
+        let request = workspace
+            .primary_partition()
+            .as_sync_request(&JiraSiteId::new("site").expect("site"), SyncMode::Baseline);
+        assert_eq!(request.assignees, None);
+        assert_eq!(request.watchers, None);
+        assert_eq!(request.notification_assignees, None);
+        assert_eq!(request.jql_scope, Some(DEFAULT_JQL_SCOPE.to_owned()));
+        assert_eq!(request.mode, SyncMode::Baseline);
+        let result =
+            block_on(workspace.refresh(&CancellationToken::new())).expect("project-wide refresh");
+        assert_eq!(result.outcome.mode, SyncMode::Baseline);
+        assert_eq!(result.cached.issues.len(), 1);
+        assert_eq!(result.cached.issues[0].summary, "Project-wide issue");
+        assert_eq!(jira.request_count(), 1);
+        assert_eq!(jira.assignee_filters(), vec![None]);
+        assert_eq!(jira.watcher_filters(), vec![None]);
+        assert_eq!(jira.jql_scopes(), vec![Some(DEFAULT_JQL_SCOPE.to_owned())]);
         assert_eq!(
             block_on(cache.list(&JiraSiteId::new("site").expect("valid site")))
                 .expect("list sets")
