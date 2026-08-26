@@ -5,11 +5,14 @@ use crate::sample_data::{sample_issues, sample_users};
 use gpui::VisualTestContext;
 use gpui_component::searchable_list::SearchableListDelegate as _;
 use jira_application::{
-    ErrorKind, IssueFetchRequest, IssuePage, JiraAttachmentReadPort, JiraIssueActivityPort,
-    JiraIssueDetailReadPort, JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort, JiraUserReadPort,
-    PortFuture, UserSearchRequest,
+    AddCommentRequest, AssignIssueRequest, AssignableUserSearchRequest, ErrorKind,
+    IssueFetchRequest, IssuePage, IssueTransitionsRequest, JiraAttachmentReadPort,
+    JiraCommentWritePort, JiraIssueActivityPort, JiraIssueDetailReadPort, JiraIssueEditPort,
+    JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort, JiraUserReadPort, PortFuture,
+    TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::JiraSiteId;
+use std::sync::{Arc, Mutex};
 use time::macros::datetime;
 
 struct EmptyJira;
@@ -56,6 +59,97 @@ impl JiraIssueDetailReadPort for EmptyJira {}
 impl JiraAttachmentReadPort for EmptyJira {}
 impl JiraSyncReadPort for EmptyJira {}
 impl JiraReadPort for EmptyJira {}
+
+struct EmptyCommentWriter;
+
+impl JiraCommentWritePort for EmptyCommentWriter {
+    fn create_comment<'a>(
+        &'a self,
+        _request: &'a AddCommentRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, jira_domain::IssueComment> {
+        Box::pin(async { Err(ApplicationError::new(ErrorKind::Internal, "unsupported")) })
+    }
+}
+
+#[derive(Default)]
+struct EditCalls {
+    searches: Vec<AssignableUserSearchRequest>,
+    transition_reads: Vec<IssueTransitionsRequest>,
+    assignments: Vec<AssignIssueRequest>,
+    transition_writes: Vec<TransitionIssueRequest>,
+}
+
+#[derive(Clone)]
+struct RecordingIssueEditor {
+    calls: Arc<Mutex<EditCalls>>,
+    users: Vec<User>,
+    transitions: Vec<IssueTransition>,
+}
+
+impl JiraIssueEditPort for RecordingIssueEditor {
+    fn search_assignable_users<'a>(
+        &'a self,
+        request: &'a AssignableUserSearchRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<User>> {
+        let calls = self.calls.clone();
+        let request = request.clone();
+        let users = self.users.clone();
+        Box::pin(async move {
+            calls.lock().expect("calls lock").searches.push(request);
+            Ok(users)
+        })
+    }
+
+    fn fetch_issue_transitions<'a>(
+        &'a self,
+        request: &'a IssueTransitionsRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Vec<IssueTransition>> {
+        let calls = self.calls.clone();
+        let request = request.clone();
+        let transitions = self.transitions.clone();
+        Box::pin(async move {
+            calls
+                .lock()
+                .expect("calls lock")
+                .transition_reads
+                .push(request);
+            Ok(transitions)
+        })
+    }
+
+    fn assign_issue<'a>(
+        &'a self,
+        request: &'a AssignIssueRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()> {
+        let calls = self.calls.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            calls.lock().expect("calls lock").assignments.push(request);
+            std::future::pending::<Result<(), ApplicationError>>().await
+        })
+    }
+
+    fn transition_issue<'a>(
+        &'a self,
+        request: &'a TransitionIssueRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()> {
+        let calls = self.calls.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            calls
+                .lock()
+                .expect("calls lock")
+                .transition_writes
+                .push(request);
+            std::future::pending::<Result<(), ApplicationError>>().await
+        })
+    }
+}
 
 fn update_view(event_id: &str, change: &str, occurred_at: &str) -> UpdateViewModel {
     UpdateViewModel {
@@ -516,12 +610,14 @@ fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpu
             },
         })
         .collect();
-    dashboard.issue_edit_state = IssueEditState::TransitionChooser {
-        issue_id: issue,
-        issue_key: "DESK-176".to_owned(),
-        transitions,
-    };
-    dashboard.status_popover_open = true;
+    dashboard
+        .issue_edit_flow
+        .set_state_for_test(IssueEditState::TransitionChooser {
+            issue_id: issue,
+            issue_key: "DESK-176".to_owned(),
+            transitions,
+        });
+    dashboard.issue_edit_flow.set_status_popover_open(true);
     let window = cx.open_window(gpui::size(px(720.), px(600.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
@@ -547,12 +643,169 @@ fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpu
     assert!(
         dashboard_entity.read_with(&visual, |dashboard, _| {
             matches!(
-                dashboard.issue_edit_state,
+                dashboard.issue_edit_flow.state(),
                 IssueEditState::ConfirmingTransition { .. }
             )
         }),
         "first transition should be clickable at {option_bounds:?}"
     );
+}
+
+#[gpui::test]
+fn dashboard_issue_edit_reads_and_dispatches_each_confirmed_operation_once(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let site_id = JiraSiteId::new("site").expect("site");
+    let calls = Arc::new(Mutex::new(EditCalls::default()));
+    let users = vec![
+        User {
+            site_id: site_id.clone(),
+            account_id: jira_domain::AccountId::new("acct-b").expect("account"),
+            display_name: "Bob Example".to_owned(),
+            avatar_url: None,
+            active: true,
+        },
+        User {
+            site_id: site_id.clone(),
+            account_id: jira_domain::AccountId::new("acct-a").expect("account"),
+            display_name: "Alice Example".to_owned(),
+            avatar_url: None,
+            active: true,
+        },
+    ];
+    let transitions = vec![IssueTransition {
+        id: "31".to_owned(),
+        name: "Start work".to_owned(),
+        to: jira_domain::Status {
+            id: "3".to_owned(),
+            name: "In Progress".to_owned(),
+            category: None,
+        },
+    }];
+    let editor = Arc::new(RecordingIssueEditor {
+        calls: calls.clone(),
+        users: users.clone(),
+        transitions: transitions.clone(),
+    });
+    let workspace = Arc::new(
+        futures_lite::future::block_on(LiveWorkspace::initialize_with_writers(
+            site_id.clone(),
+            None,
+            Arc::new(EmptyJira),
+            Arc::new(EmptyCommentWriter),
+            editor,
+            Arc::new(jira_storage::SqliteStore::in_memory().expect("store")),
+        ))
+        .expect("workspace"),
+    );
+
+    let mut dashboard = Dashboard::from_sample_data();
+    let issue_id = dashboard.selected_issue.clone().expect("sample issue");
+    let assignee_users = futures_lite::future::block_on(workspace.search_assignable_users(
+        IssueLocator::Id(issue_id.clone()),
+        String::new(),
+        100,
+        &CancellationToken::new(),
+    ))
+    .expect("assignable users");
+    let transition_options = futures_lite::future::block_on(workspace.available_transitions(
+        IssueLocator::Id(issue_id.clone()),
+        &CancellationToken::new(),
+    ))
+    .expect("transitions");
+    assert_eq!(assignee_users, users);
+    assert_eq!(transition_options, transitions);
+    dashboard.workspace = Some(workspace);
+    dashboard
+        .issue_edit_flow
+        .set_state_for_test(IssueEditState::AssigneeChooser {
+            issue_id: issue_id.clone(),
+            issue_key: "IX-100".to_owned(),
+            query: String::new(),
+            users: assignee_users.clone(),
+        });
+    let window = cx.open_window(gpui::size(px(900.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    cx.update_entity(&dashboard_entity, |dashboard, cx| {
+        dashboard.choose_assignee(
+            Some(users[1].account_id.clone()),
+            users[1].display_name.clone(),
+            cx,
+        );
+    });
+    visual.run_until_parked();
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| {
+        matches!(
+            dashboard.issue_edit_flow.state(),
+            IssueEditState::ConfirmingAssignee { .. }
+        )
+    }));
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.submit_assignee(window, cx);
+            dashboard.submit_assignee(window, cx);
+        });
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+    cx.run_until_parked();
+
+    cx.update_entity(&dashboard_entity, |dashboard, cx| {
+        dashboard.operation_in_progress = false;
+        dashboard
+            .issue_edit_flow
+            .set_state_for_test(IssueEditState::TransitionChooser {
+                issue_id: issue_id.clone(),
+                issue_key: "IX-100".to_owned(),
+                transitions: transition_options.clone(),
+            });
+        dashboard.choose_transition(transition_options[0].clone(), cx);
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.submit_transition(window, cx);
+            dashboard.submit_transition(window, cx);
+        });
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+    cx.run_until_parked();
+
+    let calls = calls.lock().expect("calls lock");
+    assert_eq!(calls.searches.len(), 1);
+    assert_eq!(calls.searches[0].site_id, site_id);
+    assert_eq!(
+        calls.searches[0].locator,
+        IssueLocator::Id(issue_id.clone())
+    );
+    assert_eq!(calls.searches[0].query, "");
+    assert_eq!(calls.searches[0].limit, 100);
+    assert_eq!(calls.transition_reads.len(), 1);
+    assert_eq!(
+        calls.transition_reads[0].locator,
+        IssueLocator::Id(issue_id.clone())
+    );
+    assert_eq!(calls.assignments.len(), 1);
+    assert_eq!(
+        calls.assignments[0].locator,
+        IssueLocator::Id(issue_id.clone())
+    );
+    assert_eq!(
+        calls.assignments[0].assignee,
+        Some(users[1].account_id.clone())
+    );
+    assert_eq!(calls.transition_writes.len(), 1);
+    assert_eq!(
+        calls.transition_writes[0].locator,
+        IssueLocator::Id(issue_id)
+    );
+    assert_eq!(calls.transition_writes[0].transition_id, "31");
 }
 
 #[gpui::test]
