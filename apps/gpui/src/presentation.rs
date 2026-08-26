@@ -14,7 +14,16 @@ pub use issues::{
     AttachmentViewModel, CommentViewModel, IssueDetailViewModel, IssueStatusFilter,
     IssueStatusSelection, IssueViewModel, issue_views_for_filter, normalized_issue_key,
 };
-pub use updates::{UpdateGroupViewModel, UpdateViewModel, update_groups_for_events};
+pub use updates::{UpdateGroupViewModel, update_groups_for_events};
+
+#[cfg(test)]
+pub(crate) use updates::UpdateViewModel;
+
+pub(crate) use updates::{
+    CompactedUpdateRow, UPDATE_PREVIEW_LIMIT, UpdateFilter, compact_update_rows,
+    filtered_update_group_indices, generic_summary_label, hidden_update_row_count,
+    update_group_event_ids, visible_update_row_count,
+};
 
 pub(crate) use format::format_timestamp;
 pub(crate) use updates::describe_update_with_directory;

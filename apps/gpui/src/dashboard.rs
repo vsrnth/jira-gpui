@@ -50,8 +50,11 @@ use crate::{
         normalize_issue_jql_scope, normalize_team_members, save_preferences,
     },
     presentation::{
-        IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection, IssueViewModel,
-        UpdateGroupViewModel, UpdateViewModel, issue_views_for_filter, update_groups_for_events,
+        CompactedUpdateRow, IssueDetailViewModel, IssueStatusFilter, IssueStatusSelection,
+        IssueViewModel, UPDATE_PREVIEW_LIMIT, UpdateFilter, UpdateGroupViewModel,
+        compact_update_rows, filtered_update_group_indices, generic_summary_label,
+        hidden_update_row_count, issue_views_for_filter, update_group_event_ids,
+        update_groups_for_events, visible_update_row_count,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
@@ -650,87 +653,6 @@ fn issue_edit_target_is_current(
     expected_generation: u64,
 ) -> bool {
     selected_issue == Some(expected_issue) && generation == expected_generation
-}
-
-fn update_group_event_ids(group: &UpdateGroupViewModel) -> Vec<jira_domain::EventId> {
-    group
-        .events
-        .iter()
-        .map(|event| event.event_id.clone())
-        .collect()
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum UpdateFilter {
-    #[default]
-    All,
-    Unread,
-}
-
-fn filtered_update_group_indices(
-    groups: &[UpdateGroupViewModel],
-    filter: UpdateFilter,
-) -> Vec<usize> {
-    groups
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| filter == UpdateFilter::All || group.unread)
-        .map(|(index, _)| index)
-        .collect()
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum CompactedUpdateRow {
-    Event(UpdateViewModel),
-    GenericSummary { count: usize, occurred_at: String },
-}
-
-fn compact_update_rows(events: &[UpdateViewModel]) -> Vec<CompactedUpdateRow> {
-    let generic_count = events
-        .iter()
-        .filter(|event| event.change == "Issue activity changed")
-        .count();
-    let mut summary_inserted = false;
-    events
-        .iter()
-        .filter_map(|event| {
-            if event.change == "Issue activity changed" {
-                if summary_inserted {
-                    None
-                } else {
-                    summary_inserted = true;
-                    Some(CompactedUpdateRow::GenericSummary {
-                        count: generic_count,
-                        occurred_at: event.occurred_at.clone(),
-                    })
-                }
-            } else {
-                Some(CompactedUpdateRow::Event(event.clone()))
-            }
-        })
-        .collect()
-}
-
-fn generic_summary_label(count: usize) -> String {
-    if count == 1 {
-        "Other Jira activity · exact field not available from sync".to_owned()
-    } else {
-        format!("Other Jira activity · {count} events · exact field not available from sync")
-    }
-}
-
-const UPDATE_PREVIEW_LIMIT: usize = 3;
-
-fn visible_update_row_count(row_count: usize, expanded: bool) -> usize {
-    if expanded {
-        row_count
-    } else {
-        row_count.min(UPDATE_PREVIEW_LIMIT)
-    }
-}
-
-fn hidden_update_row_count(row_count: usize, expanded: bool) -> usize {
-    row_count.saturating_sub(visible_update_row_count(row_count, expanded))
 }
 
 fn comment_error_message(error: &ApplicationError) -> (&'static str, bool) {
