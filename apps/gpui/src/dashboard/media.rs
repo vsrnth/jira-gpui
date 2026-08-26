@@ -12,17 +12,18 @@ use jira_domain::{IssueId, JiraSiteId, RichBlock, RichImage, RichTextDocument};
 
 use crate::{
     diagnostics::{
-        DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageFetchResult, ImagePreflight,
-        ImageSignature, ImageSource, ImageStateReason, ResponseMime,
+        DiagnosticErrorKind, DiagnosticFlow, DiagnosticsSink, ImageFetchResult, ImageSource,
+        ImageStateReason,
     },
     live_workspace::LiveWorkspace,
     presentation::{AttachmentViewModel, IssueDetailViewModel},
     rich_text_view::{RichImageRenderState, RichImageRenderStates},
 };
 
-const MAX_RICH_IMAGES: usize = RichTextDocument::MAX_FALLBACK_IMAGES;
-const MAX_RICH_IMAGE_BYTES: usize = 32 * 1024 * 1024;
-pub(super) const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+mod policy;
+
+pub(super) const MAX_RICH_IMAGES: usize = policy::MAX_RICH_IMAGES;
+pub(super) const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = policy::MAX_ATTACHMENT_DOWNLOAD_BYTES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum AttachmentDownloadState {
@@ -30,97 +31,57 @@ pub(super) enum AttachmentDownloadState {
     Saving { attachment_id: String },
 }
 
-fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
-    match mime_type.trim().to_ascii_lowercase().as_str() {
-        "image/png" => Some(ImageFormat::Png),
-        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
-        "image/gif" => Some(ImageFormat::Gif),
-        "image/webp" => Some(ImageFormat::Webp),
-        _ => None,
+fn diagnostic_mime(mime: policy::MediaMime) -> crate::diagnostics::ResponseMime {
+    match mime {
+        policy::MediaMime::Png => crate::diagnostics::ResponseMime::Png,
+        policy::MediaMime::Jpeg => crate::diagnostics::ResponseMime::Jpeg,
+        policy::MediaMime::Gif => crate::diagnostics::ResponseMime::Gif,
+        policy::MediaMime::Webp => crate::diagnostics::ResponseMime::Webp,
+        policy::MediaMime::OctetStream => crate::diagnostics::ResponseMime::OctetStream,
+        policy::MediaMime::Unsupported => crate::diagnostics::ResponseMime::Unsupported,
     }
 }
 
-fn image_format_from_bytes(bytes: &[u8]) -> Option<ImageFormat> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some(ImageFormat::Png)
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some(ImageFormat::Jpeg)
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some(ImageFormat::Gif)
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some(ImageFormat::Webp)
-    } else {
-        None
+fn diagnostic_signature(signature: policy::MediaSignature) -> crate::diagnostics::ImageSignature {
+    match signature {
+        policy::MediaSignature::Png => crate::diagnostics::ImageSignature::Png,
+        policy::MediaSignature::Jpeg => crate::diagnostics::ImageSignature::Jpeg,
+        policy::MediaSignature::Gif => crate::diagnostics::ImageSignature::Gif,
+        policy::MediaSignature::Webp => crate::diagnostics::ImageSignature::Webp,
+        policy::MediaSignature::Unknown => crate::diagnostics::ImageSignature::Unknown,
     }
 }
 
-/// Cached metadata must identify an allowlisted image. Authenticated responses
-/// may use an allowlisted image MIME or the original-content
-/// `application/octet-stream` MIME; in either case, the bytes must carry a
-/// strict image signature before GPUI decodes them.
-fn fetched_image_format(
-    cached_mime_type: &str,
-    response_mime_type: &str,
-    bytes: &[u8],
-) -> Option<ImageFormat> {
-    image_format_for_mime(cached_mime_type)?;
-    if !response_mime_type
-        .trim()
-        .eq_ignore_ascii_case("application/octet-stream")
-    {
-        image_format_for_mime(response_mime_type)?;
-    }
-    image_format_from_bytes(bytes)
-}
-
-fn image_response_preflight(
-    cached_mime_type: &str,
-    response_mime_type: &str,
-    bytes: &[u8],
-    resident_bytes: usize,
-) -> ImagePreflight {
-    if image_format_for_mime(cached_mime_type).is_none() {
-        ImagePreflight::UnsupportedCachedMime
-    } else if bytes.is_empty() {
-        ImagePreflight::Empty
-    } else if !image_bytes_fit_aggregate(resident_bytes, bytes.len()) {
-        ImagePreflight::AggregateRejected
-    } else if ResponseMime::classify(response_mime_type) == ResponseMime::Unsupported {
-        ImagePreflight::ResponseMimeRejected
-    } else if fetched_image_format(cached_mime_type, response_mime_type, bytes).is_none() {
-        ImagePreflight::SignatureRejected
-    } else {
-        ImagePreflight::Accepted
+fn diagnostic_preflight(preflight: policy::MediaPreflight) -> crate::diagnostics::ImagePreflight {
+    match preflight {
+        policy::MediaPreflight::Accepted => crate::diagnostics::ImagePreflight::Accepted,
+        policy::MediaPreflight::Empty => crate::diagnostics::ImagePreflight::Empty,
+        policy::MediaPreflight::UnsupportedCachedMime => {
+            crate::diagnostics::ImagePreflight::UnsupportedCachedMime
+        }
+        policy::MediaPreflight::ResponseMimeRejected => {
+            crate::diagnostics::ImagePreflight::ResponseMimeRejected
+        }
+        policy::MediaPreflight::SignatureRejected => {
+            crate::diagnostics::ImagePreflight::SignatureRejected
+        }
+        policy::MediaPreflight::AggregateRejected => {
+            crate::diagnostics::ImagePreflight::AggregateRejected
+        }
     }
 }
 
-/// Keep only a leaf filename suitable for a portal suggestion. The selected
-/// destination remains controlled by the user and is never derived from Jira.
+fn gpui_image_format(format: policy::MediaFormat) -> ImageFormat {
+    match format {
+        policy::MediaFormat::Png => ImageFormat::Png,
+        policy::MediaFormat::Jpeg => ImageFormat::Jpeg,
+        policy::MediaFormat::Gif => ImageFormat::Gif,
+        policy::MediaFormat::Webp => ImageFormat::Webp,
+    }
+}
+
 pub(super) fn sanitized_attachment_filename(filename: &str) -> String {
-    let candidate = filename
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect::<String>();
-    let candidate = candidate.trim().trim_matches('.').trim();
-    if candidate.is_empty() {
-        "jira-attachment".to_owned()
-    } else {
-        let mut bounded = String::new();
-        for character in candidate.chars() {
-            if bounded.len().saturating_add(character.len_utf8()) > 255 {
-                break;
-            }
-            bounded.push(character);
-        }
-        if bounded.is_empty() {
-            "jira-attachment".to_owned()
-        } else {
-            bounded
-        }
-    }
+    policy::sanitized_attachment_filename(filename)
 }
 
 fn choose_portal_download_directory(
@@ -128,11 +89,7 @@ fn choose_portal_download_directory(
     downloads: Option<&Path>,
     current: &Path,
 ) -> PathBuf {
-    downloads
-        .filter(|path| path.is_dir())
-        .or_else(|| home.filter(|path| path.is_dir()))
-        .unwrap_or(current)
-        .to_path_buf()
+    policy::choose_portal_download_directory(home, downloads, current)
 }
 
 pub(super) fn portal_download_directory() -> PathBuf {
@@ -144,13 +101,7 @@ pub(super) fn portal_download_directory() -> PathBuf {
 }
 
 pub(super) fn attachment_temp_path(destination: &Path, unique_token: &str) -> PathBuf {
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    let filename = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("jira-attachment");
-    parent.join(format!(".{filename}.jira-desk-{unique_token}.part"))
+    policy::attachment_temp_path(destination, unique_token)
 }
 
 pub(super) fn attachment_temp_token() -> String {
@@ -199,11 +150,8 @@ pub(super) fn attachment_download_is_current(
     expected_generation: u64,
     cancellation: &CancellationToken,
 ) -> bool {
-    current_generation == expected_generation && !cancellation.is_cancelled()
-}
-
-fn image_bytes_fit_aggregate(current: usize, next: usize) -> bool {
-    next <= MAX_RICH_IMAGE_BYTES && current <= MAX_RICH_IMAGE_BYTES.saturating_sub(next)
+    policy::attachment_generation_is_current(current_generation, expected_generation)
+        && !cancellation.is_cancelled()
 }
 
 pub(super) fn image_result_is_current(
@@ -228,22 +176,16 @@ pub(super) fn attachment_issue_id(
     selected_issue: Option<&IssueId>,
     remote_issue: Option<&IssueId>,
 ) -> Option<IssueId> {
-    remote_issue.cloned().or_else(|| selected_issue.cloned())
+    policy::attachment_issue_id(selected_issue, remote_issue)
 }
 
+#[cfg(test)]
 fn unique_attachment_for_id(
     attachments: &[AttachmentViewModel],
     attachment_id: &str,
 ) -> Option<AttachmentViewModel> {
-    if attachment_id.trim().is_empty() {
-        return None;
-    }
-
-    let mut matches = attachments
-        .iter()
-        .filter(|attachment| !attachment.id.trim().is_empty() && attachment.id == attachment_id);
-    let attachment = matches.next()?.clone();
-    matches.next().is_none().then_some(attachment)
+    policy::unique_exact_id_index(attachments, attachment_id, |attachment| &attachment.id)
+        .map(|index| attachments[index].clone())
 }
 
 pub(super) fn inline_attachment_for_download(
@@ -252,9 +194,14 @@ pub(super) fn inline_attachment_for_download(
     attachments: &[AttachmentViewModel],
     attachment_id: &str,
 ) -> Option<AttachmentViewModel> {
-    (expected_issue_id == active_issue_id)
-        .then(|| unique_attachment_for_id(attachments, attachment_id))
-        .flatten()
+    policy::inline_attachment_index(
+        expected_issue_id,
+        active_issue_id,
+        attachments,
+        attachment_id,
+        |attachment| &attachment.id,
+    )
+    .map(|index| attachments[index].clone())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -520,17 +467,17 @@ pub(super) async fn fetch_rich_image_states(
             surface_ordinal,
             source,
         );
-        if image_format_for_mime(&image.mime_type).is_none() {
+        if policy::image_format_for_mime(&image.mime_type).is_none() {
             diagnostics.image_response(
                 flow,
                 load_token,
                 candidate_ordinal,
                 surface_ordinal,
                 source,
-                ResponseMime::classify(&image.mime_type),
-                ImageSignature::Unknown,
+                diagnostic_mime(policy::MediaMime::classify(&image.mime_type)),
+                diagnostic_signature(policy::MediaSignature::Unknown),
                 0,
-                ImagePreflight::UnsupportedCachedMime,
+                diagnostic_preflight(policy::MediaPreflight::UnsupportedCachedMime),
             );
             diagnostics.image_fetch_result(
                 flow,
@@ -563,18 +510,19 @@ pub(super) async fn fetch_rich_image_states(
                     site_id: site_id.clone(),
                     issue_id: issue_id.clone(),
                     attachment_id: image.attachment_id.clone(),
-                    width: 1_600,
-                    height: 1_200,
-                    max_bytes: 8 * 1024 * 1024,
+                    width: policy::MAX_IMAGE_REQUEST_WIDTH,
+                    height: policy::MAX_IMAGE_REQUEST_HEIGHT,
+                    max_bytes: policy::MAX_IMAGE_REQUEST_BYTES,
                 },
                 &cancellation,
             )
             .await;
         match result {
             Ok(image_bytes) => {
-                let response_mime = ResponseMime::classify(&image_bytes.mime_type);
-                let signature = ImageSignature::classify(&image_bytes.bytes);
-                let preflight = image_response_preflight(
+                let response_mime =
+                    diagnostic_mime(policy::MediaMime::classify(&image_bytes.mime_type));
+                let signature = diagnostic_signature(policy::image_signature(&image_bytes.bytes));
+                let preflight = policy::image_response_preflight(
                     &image.mime_type,
                     &image_bytes.mime_type,
                     &image_bytes.bytes,
@@ -589,10 +537,10 @@ pub(super) async fn fetch_rich_image_states(
                     response_mime,
                     signature,
                     image_bytes.bytes.len(),
-                    preflight,
+                    diagnostic_preflight(preflight),
                 );
-                if preflight == ImagePreflight::Accepted {
-                    let format = fetched_image_format(
+                if preflight == policy::MediaPreflight::Accepted {
+                    let format = policy::fetched_image_format(
                         &image.mime_type,
                         &image_bytes.mime_type,
                         &image_bytes.bytes,
@@ -618,7 +566,7 @@ pub(super) async fn fetch_rich_image_states(
                     states.insert_with_context(
                         image.attachment_id,
                         RichImageRenderState::Ready(Arc::new(Image::from_bytes(
-                            format,
+                            gpui_image_format(format),
                             image_bytes.bytes,
                         ))),
                         candidate_ordinal,
@@ -698,6 +646,53 @@ pub(super) async fn fetch_rich_image_states(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_adapters_map_every_neutral_policy_variant_losslessly() {
+        use crate::diagnostics::{ImagePreflight, ImageSignature, ResponseMime};
+
+        for (policy, diagnostic) in [
+            (policy::MediaMime::Png, ResponseMime::Png),
+            (policy::MediaMime::Jpeg, ResponseMime::Jpeg),
+            (policy::MediaMime::Gif, ResponseMime::Gif),
+            (policy::MediaMime::Webp, ResponseMime::Webp),
+            (policy::MediaMime::OctetStream, ResponseMime::OctetStream),
+            (policy::MediaMime::Unsupported, ResponseMime::Unsupported),
+        ] {
+            assert_eq!(diagnostic_mime(policy), diagnostic);
+        }
+        for (policy, diagnostic) in [
+            (policy::MediaSignature::Png, ImageSignature::Png),
+            (policy::MediaSignature::Jpeg, ImageSignature::Jpeg),
+            (policy::MediaSignature::Gif, ImageSignature::Gif),
+            (policy::MediaSignature::Webp, ImageSignature::Webp),
+            (policy::MediaSignature::Unknown, ImageSignature::Unknown),
+        ] {
+            assert_eq!(diagnostic_signature(policy), diagnostic);
+        }
+        for (policy, diagnostic) in [
+            (policy::MediaPreflight::Accepted, ImagePreflight::Accepted),
+            (policy::MediaPreflight::Empty, ImagePreflight::Empty),
+            (
+                policy::MediaPreflight::UnsupportedCachedMime,
+                ImagePreflight::UnsupportedCachedMime,
+            ),
+            (
+                policy::MediaPreflight::ResponseMimeRejected,
+                ImagePreflight::ResponseMimeRejected,
+            ),
+            (
+                policy::MediaPreflight::SignatureRejected,
+                ImagePreflight::SignatureRejected,
+            ),
+            (
+                policy::MediaPreflight::AggregateRejected,
+                ImagePreflight::AggregateRejected,
+            ),
+        ] {
+            assert_eq!(diagnostic_preflight(policy), diagnostic);
+        }
+    }
 
     #[test]
     fn inline_attachment_download_requires_one_nonempty_exact_id() {
@@ -824,173 +819,6 @@ mod tests {
         assert_eq!(
             images.last().map(|image| image.attachment_id.as_str()),
             Some("candidate-15")
-        );
-    }
-
-    #[test]
-    fn image_aggregate_limit_accepts_boundary_and_rejects_overflow() {
-        assert!(image_bytes_fit_aggregate(0, MAX_RICH_IMAGE_BYTES));
-        assert!(!image_bytes_fit_aggregate(1, MAX_RICH_IMAGE_BYTES));
-        assert!(!image_bytes_fit_aggregate(MAX_RICH_IMAGE_BYTES, 1));
-    }
-
-    #[test]
-    fn image_response_preflight_distinguishes_rejection_causes() {
-        assert_eq!(
-            image_response_preflight("application/pdf", "image/png", b"", 0),
-            ImagePreflight::UnsupportedCachedMime
-        );
-        assert_eq!(
-            image_response_preflight("image/png", "text/html", b"not image", 0),
-            ImagePreflight::ResponseMimeRejected
-        );
-        assert_eq!(
-            image_response_preflight("image/png", "image/png", b"not image", 0),
-            ImagePreflight::SignatureRejected
-        );
-        assert_eq!(
-            image_response_preflight(
-                "image/png",
-                "image/png",
-                b"\x89PNG\r\n\x1a\n",
-                MAX_RICH_IMAGE_BYTES,
-            ),
-            ImagePreflight::AggregateRejected
-        );
-    }
-
-    #[test]
-    fn image_response_preflight_accepts_authenticated_thumbnail_mime_variants() {
-        assert_eq!(
-            image_response_preflight(
-                "image/png",
-                "application/octet-stream",
-                b"\x89PNG\r\n\x1a\nvalid png",
-                0,
-            ),
-            ImagePreflight::Accepted,
-            "authenticated original-content responses may be octet-stream when bytes are PNG"
-        );
-        assert_eq!(
-            image_response_preflight("image/jpg", "image/jpg", b"\xff\xd8\xff\xe0valid jpeg", 0,),
-            ImagePreflight::Accepted,
-            "Jira's image/jpg response must be accepted when bytes are JPEG"
-        );
-    }
-
-    #[test]
-    fn image_response_preflight_rejects_unsupported_mime_or_bad_signature() {
-        assert_eq!(
-            image_response_preflight(
-                "image/png",
-                "application/pdf",
-                b"\x89PNG\r\n\x1a\nvalid png",
-                0,
-            ),
-            ImagePreflight::ResponseMimeRejected
-        );
-        assert_eq!(
-            image_response_preflight("image/jpg", "image/jpg", b"not a jpeg", 0,),
-            ImagePreflight::SignatureRejected
-        );
-    }
-
-    #[test]
-    fn image_mime_mapping_accepts_only_supported_render_formats() {
-        assert_eq!(image_format_for_mime(" image/png "), Some(ImageFormat::Png));
-        assert_eq!(image_format_for_mime("image/jpg"), Some(ImageFormat::Jpeg));
-        assert_eq!(image_format_for_mime("image/jpeg"), Some(ImageFormat::Jpeg));
-        assert_eq!(image_format_for_mime("image/svg+xml"), None);
-        assert_eq!(image_format_for_mime("application/pdf"), None);
-    }
-
-    #[test]
-    fn fetched_image_format_uses_bytes_after_mime_preflight() {
-        assert_eq!(
-            fetched_image_format("image/jpeg", " image/png ", b"\x89PNG\r\n\x1a\nrest of png",),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "image/svg+xml", b"\x89PNG\r\n\x1a\n"),
-            None,
-            "unsupported authenticated responses must not be decoded"
-        );
-        assert_eq!(
-            fetched_image_format("application/pdf", "image/png", b"\x89PNG\r\n\x1a\n"),
-            None,
-            "non-image ADF metadata must still fail preflight"
-        );
-    }
-
-    #[test]
-    fn image_bytes_are_strictly_signature_detected() {
-        assert_eq!(
-            image_format_from_bytes(b"\x89PNG\r\n\x1a\nfixture"),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            image_format_from_bytes(b"\xff\xd8\xff\xe0fixture"),
-            Some(ImageFormat::Jpeg)
-        );
-        assert_eq!(
-            image_format_from_bytes(b"GIF87afixture"),
-            Some(ImageFormat::Gif)
-        );
-        assert_eq!(
-            image_format_from_bytes(b"GIF89afixture"),
-            Some(ImageFormat::Gif)
-        );
-
-        let mut webp = b"RIFFxxxxWEBP".to_vec();
-        webp.extend_from_slice(b"fixture");
-        assert_eq!(image_format_from_bytes(&webp), Some(ImageFormat::Webp));
-        assert_eq!(image_format_from_bytes(b"not an image"), None);
-    }
-
-    #[test]
-    fn fetched_image_format_accepts_bytes_when_response_mime_differs() {
-        assert_eq!(
-            fetched_image_format(
-                "image/png",
-                "image/jpeg",
-                b"\x89PNG\r\n\x1a\nvalid signature",
-            ),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "image/png", b"not an image"),
-            None
-        );
-    }
-
-    #[test]
-    fn fetched_image_format_allows_octet_stream_only_for_known_images() {
-        assert_eq!(
-            fetched_image_format(
-                "image/png",
-                " application/octet-stream ",
-                b"\x89PNG\r\n\x1a\nvalid signature",
-            ),
-            Some(ImageFormat::Png)
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "application/octet-stream", b"not an image"),
-            None,
-            "octet-stream responses must have a strict image signature"
-        );
-        assert_eq!(
-            fetched_image_format(
-                "application/octet-stream",
-                "application/octet-stream",
-                b"\x89PNG\r\n\x1a\nvalid signature",
-            ),
-            None,
-            "cached attachment metadata must be an allowlisted image"
-        );
-        assert_eq!(
-            fetched_image_format("image/png", "application/pdf", b"\x89PNG\r\n\x1a\n"),
-            None,
-            "only octet-stream may use the original-content MIME exception"
         );
     }
 

@@ -117,6 +117,7 @@ pub(crate) enum ResponseMime {
 
 impl ResponseMime {
     /// Classifies a response MIME without retaining the supplied value.
+    #[cfg(test)]
     pub(crate) fn classify(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "image/png" => Self::Png,
@@ -151,6 +152,7 @@ pub(crate) enum ImageSignature {
 
 impl ImageSignature {
     /// Classifies only the leading bytes and never retains or serializes them.
+    #[cfg(test)]
     pub(crate) fn classify(bytes: &[u8]) -> Self {
         if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
             Self::Png
