@@ -16,11 +16,10 @@ mod local_data;
 mod presentation;
 mod responsive;
 mod rich_text_view;
+#[cfg(test)]
 mod sample_data;
 mod semantic_icons;
 mod team_table;
 
 pub use app_shell::AppShell;
 pub use config::{StartupSelection, startup_from_environment};
-pub use dashboard::Dashboard;
-pub use live_workspace::{CachedWorkspace, FeedActionResult, LiveWorkspace, RefreshResult};

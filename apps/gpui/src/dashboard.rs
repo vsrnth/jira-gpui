@@ -34,8 +34,11 @@ use jira_application::{
 use jira_desktop_notifications::{TEST_NOTIFICATION_BODY, TEST_NOTIFICATION_SUMMARY};
 use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
+#[cfg(test)]
+use crate::sample_data::{sample_issues, sample_updates, sample_users};
+
 use crate::{
-    config::{LiveSession, StartupError, ensure_authenticated_user},
+    config::{LiveSession, ensure_authenticated_user},
     credential_store::{self, DeleteOutcome},
     diagnostics::{
         DesktopNotificationTestResult as DiagnosticDesktopNotificationTestResult,
@@ -55,7 +58,6 @@ use crate::{
         RichAttachmentCardAction, RichImageRenderStates, RichTextPalette, render_rich_text,
         render_rich_text_with_actions,
     },
-    sample_data::{sample_issues, sample_updates, sample_users},
     semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
     team_table::{TeamTicketTableDelegate, TeamTicketTableStateExt},
 };
@@ -967,10 +969,12 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
+    #[cfg(test)]
     pub fn from_sample_data() -> Self {
         Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled())
     }
 
+    #[cfg(test)]
     fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink) -> Self {
         let domain_issues = sample_issues();
         let users = sample_users();
@@ -1405,22 +1409,6 @@ impl Dashboard {
             }
         });
         self.polling_task = Some(task);
-    }
-
-    pub fn from_configuration_error(error: StartupError) -> Self {
-        let mut dashboard = Self::from_sample_data();
-        dashboard.domain_issues.clear();
-        dashboard.issues.clear();
-        dashboard.update_groups.clear();
-        dashboard.selected_issue = None;
-        dashboard.invalidate_detail_selection();
-        dashboard.users.clear();
-        dashboard.workspace_name = "Jira projects".to_owned();
-        dashboard.workspace_members = "Connect Jira to load this view".to_owned();
-        dashboard.site_label = "Jira site unavailable".to_owned();
-        dashboard.mode_label = "Startup configuration error".to_owned();
-        dashboard.sync_message = format!("Configuration error · {error}");
-        dashboard
     }
 
     fn apply_live_issues(

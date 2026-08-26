@@ -91,6 +91,7 @@ impl LiveWorkspace {
     }
 
     /// Open the configured workspace, reusing its local user set when present.
+    #[cfg(test)]
     pub async fn initialize(
         site_id: JiraSiteId,
         authenticated_account: Option<AccountId>,
@@ -107,6 +108,7 @@ impl LiveWorkspace {
         .await
     }
 
+    #[cfg(test)]
     pub async fn initialize_with_comment_writer(
         site_id: JiraSiteId,
         authenticated_account: Option<AccountId>,
@@ -125,6 +127,7 @@ impl LiveWorkspace {
         .await
     }
 
+    #[cfg(test)]
     pub async fn initialize_with_writers(
         site_id: JiraSiteId,
         authenticated_account: Option<AccountId>,
@@ -248,6 +251,7 @@ impl LiveWorkspace {
         &self.site_id
     }
 
+    #[cfg(test)]
     pub fn authenticated_account(&self) -> Option<&AccountId> {
         self.authenticated_account.as_ref()
     }
@@ -281,6 +285,7 @@ impl LiveWorkspace {
             .clone()
     }
 
+    #[cfg(test)]
     pub fn team_user_set_id(&self) -> UserSetId {
         self.team_state
             .read()
@@ -326,6 +331,7 @@ impl LiveWorkspace {
     }
 
     /// Product-facing alias for replacing configured team members.
+    #[cfg(test)]
     pub async fn replace_team_members(
         &self,
         members: Vec<AccountId>,
@@ -333,6 +339,7 @@ impl LiveWorkspace {
         self.configure_team_members(members).await
     }
 
+    #[cfg(test)]
     pub fn user_set_id(&self) -> UserSetId {
         self.scope_state
             .read()
@@ -843,9 +850,11 @@ impl LiveWorkspace {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct UnsupportedCommentWriter;
 
+#[cfg(test)]
 impl JiraCommentWritePort for UnsupportedCommentWriter {
     fn create_comment<'a>(
         &'a self,
@@ -859,9 +868,11 @@ impl JiraCommentWritePort for UnsupportedCommentWriter {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct UnsupportedIssueEditor;
 
+#[cfg(test)]
 impl JiraIssueEditPort for UnsupportedIssueEditor {
     fn search_assignable_users<'a>(
         &'a self,

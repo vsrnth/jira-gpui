@@ -11,7 +11,7 @@ mod schema;
 
 use std::{
     collections::{HashSet, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -19,12 +19,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use persistence::{
-    DIAGNOSTICS_BACKUP_FILENAME, DIAGNOSTICS_FILENAME, append_line, prepare_directory,
-};
+#[cfg(test)]
+use persistence::prepare_directory;
+use persistence::{DIAGNOSTICS_BACKUP_FILENAME, DIAGNOSTICS_FILENAME, append_line};
 use schema::serialize_event;
 #[cfg(test)]
 use schema::{MAX_CANDIDATE_ORDINAL, MAX_LINE_BYTES};
+#[cfg(test)]
+use std::path::Path;
 
 const MAX_ONCE_EVENTS: usize = 256;
 
@@ -63,12 +65,13 @@ impl DiagnosticsSink {
     /// Injectable constructor used by the GPUI adapter and tests. The path is
     /// treated as the final app directory and receives the same safety checks
     /// and permissions as the environment-selected directory.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn for_directory(directory: &Path) -> Self {
         let directory = prepare_directory(directory).ok();
         Self::from_prepared_directory(directory)
     }
 
+    #[cfg(test)]
     pub(crate) fn disabled() -> Self {
         Self::from_prepared_directory(None)
     }
@@ -254,7 +257,7 @@ impl DiagnosticsSink {
         ));
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn gpui_decode_fallback(
         &self,
         flow: DiagnosticFlow,

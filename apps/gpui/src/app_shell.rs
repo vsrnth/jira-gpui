@@ -19,11 +19,11 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::Dashboard;
 use crate::config::{LiveSession, StartupSelection, live_session_from_manual_configuration};
 use crate::credential_store::{
     CredentialStoreError, SavedCredentials, load_saved_credentials, save_credentials,
 };
+use crate::dashboard::Dashboard;
 use crate::diagnostics::DiagnosticsSink;
 use crate::responsive::layout_for_width;
 
