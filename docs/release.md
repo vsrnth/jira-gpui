@@ -1,27 +1,35 @@
 # Release and validation
 
-## Supported Phase 1 target
+## Supported Linux artifact
 
-Phase 1 is Linux x86_64 on native Wayland, packaged as an AppImage. The GPUI
-build enables Wayland and does not support X11 as a runtime target. macOS is
-Phase 2. The AppImage build instructions and host-library notes live in
-[`packaging/appimage/README.md`](../packaging/appimage/README.md).
+Linux x86_64 on native Wayland is supported and distributed as an AppImage.
+The GPUI build enables Wayland and does not support X11 as a runtime target.
+The AppImage build instructions and host-library notes live in
+[`packaging/appimage/README.md`](../packaging/appimage/README.md). Linux-only
+release behavior includes per-user desktop registration, Wayland title-bar
+controls, Freedesktop notifications, and XDG portal/runtime smoke checks.
 
-## Phase 2 macOS local DMG
+## Supported macOS artifact
 
-A native macOS host can build the local Phase 2 DMG with the system packaging
-tools and the instructions in
-[`packaging/macos/README.md`](../packaging/macos/README.md):
+Native macOS arm64 and x86_64 are supported and packaged as a DMG. A native
+macOS host can build the local DMG with the system packaging tools and the
+instructions in [`packaging/macos/README.md`](../packaging/macos/README.md):
 
 ```sh
 VERSION=0.1.34-local packaging/macos/build-dmg.sh
 ```
 
-The script selects `arm64` or `x86_64` from `uname`, builds and validates a
+The script selects the host architecture from `uname`, builds and validates a
 signed `Jira Desk.app`, and writes a compressed read-only DMG plus adjacent
-SHA-256 checksum under `dist/`. Use `--skip-build` only with an existing
-native release binary. This is a local artifact path, not a Phase 1 Linux
-release or a cross-compilation target.
+SHA-256 checksum under `dist/`. Use `--skip-build` only with an existing native
+release binary built for that host. This procedure does not cross-compile and
+macOS validation is independent of Linux AppImage validation. macOS uses native
+GPUI support, the native keyring feature, native file picker behavior, and
+`~/Library/Application Support/dev.jiradesk.JiraDesk` plus
+`~/Library/Logs/dev.jiradesk.JiraDesk`; the Freedesktop notification adapter
+and test are unavailable, while in-app feed and feedback remain available.
+
+## Linux AppImage build and inspection
 
 Build from Linux with the required Wayland development libraries:
 
@@ -64,6 +72,32 @@ directory and remain untracked source artifacts. Publish them through the
 release workflow or an explicitly selected artifact store; do not add them to
 the source commit.
 
+## macOS DMG validation
+
+On the native macOS build host, validate the checksum and inspect the
+compressed read-only DMG without launching the app:
+
+```sh
+VERSION=0.1.34-local
+arch="$(uname -m)"
+dmg="dist/Jira_Desk-${VERSION}-${arch}.dmg"
+(cd dist && shasum -a 256 --check "$(basename "$dmg").sha256")
+hdiutil imageinfo "$dmg" >/dev/null
+mount_point="$(mktemp -d "${TMPDIR:-/tmp}/jira-desk-dmg-check.XXXXXXXX")"
+attached=$(hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg" \
+  | awk 'END { print $NF }')
+test -d "$mount_point/Jira Desk.app/Contents/MacOS"
+test -x "$mount_point/Jira Desk.app/Contents/MacOS/jira-gpui"
+test -L "$mount_point/Applications"
+hdiutil detach "$attached" >/dev/null
+rmdir "$mount_point"
+```
+
+The native macOS build validates the bundle layout, plist values, icon, and
+code signature before creating the DMG. Ad-hoc signing is local validation,
+not notarization or a public-release readiness claim. Remove the output DMG
+and checksum before rebuilding the same version.
+
 ## Validation baseline
 
 Validation is command-based rather than tied to a fixed test-count snapshot.
@@ -79,7 +113,7 @@ cargo clippy --workspace --lib --bins --locked -- -D warnings
 git diff --check
 ```
 
-For a focused GPUI pass:
+For a focused GPUI pass on either supported native host:
 
 ```bash
 RUST_FONTCONFIG_DLOPEN=1 cargo test -p jira-gpui --lib
@@ -88,23 +122,29 @@ RUST_FONTCONFIG_DLOPEN=1 cargo check -p jira-gpui --lib
 
 ## Known limits
 
-The artifact build, extraction checks, checksums, required desktop files, and
-library inspection are automated. A local Wayland smoke run was exercised for
-the historical `0.1.4-local` milestone. GNOME, KDE, and wlroots compositor
-coverage; real Jira permission/account combinations; notification-daemon
-delivery; FUSE execution on multiple distributions; public OAuth release; and
-long-running offline/reconnect behavior still need broader release testing.
+The Linux artifact build, extraction checks, checksums, required desktop files,
+and library inspection are automated. A local Wayland smoke run was exercised
+for the historical `0.1.4-local` milestone. Native macOS build, bundle, code
+signature, DMG layout, checksum, and read-only mount checks are documented in
+the macOS packaging README but still need broader host coverage. GNOME, KDE,
+and wlroots compositor coverage; real Jira permission/account combinations;
+Linux notification-daemon delivery; FUSE execution on multiple distributions;
+macOS runtime behavior; public OAuth release; and long-running
+offline/reconnect behavior still need broader release testing.
 
 The application is intentionally session-oriented: polling runs only while the
 process is alive, and the current API-token flow is not suitable for public
-distribution. No X11, Windows, or macOS artifact should be inferred from the
-Linux build.
+distribution. X11 and Windows remain unsupported. Linux AppImage and macOS DMG
+artifacts must be built and validated natively on their respective hosts; one
+platform's artifact does not validate the other.
 
-The release smoke should also exercise the responsive dashboard at narrow and
-wide window sizes, drag the desktop list/detail divider, select multiple status
-categories and clear them back to All, verify the issue-list scrollbar and
-refresh spinner, and confirm that every manual refresh raises one in-app
-summary even when there are no new updates. Verify update timestamps use the
+### Linux Wayland runtime smoke
+
+The Linux Wayland release smoke should exercise the responsive dashboard at
+narrow and wide window sizes, drag the desktop list/detail divider, select
+multiple status categories and clear them back to All, verify the issue-list
+scrollbar and refresh spinner, and confirm that every manual refresh raises one
+in-app summary even when there are no new updates. Verify update timestamps use the
 system local timezone with an explicit offset, exercise the Unread and All
 feed filters, and confirm generic activity uses compact fallback wording with
 progressive disclosure. The refresh summary's desktop counts must be checked
@@ -117,7 +157,7 @@ not be required), and confirm that the registered component asset bundle
 renders title-bar and semantic icons. Rich-text placeholders and inert links
 must remain safe.
 
-Update-feed smoke must create multiple detected events for one issue, verify
+Linux update-feed smoke must create multiple detected events for one issue, verify
 that they render in one ticket group in newest-first order, and verify the
 group's Mark as read action persists every contained event locally without a
 Jira request. Jira-edit smoke must verify that the first assignable-user read
@@ -128,14 +168,14 @@ next read, while the separate confirmation step dispatches exactly one
 assignment or transition request. Safe definite failures and
 refresh-required handling for unknown outcomes remain required.
 
-Update-feed smoke should also verify that changed cached/incoming snapshots
+Linux update-feed smoke should also verify that changed cached/incoming snapshots
 use the bounded bulk-changelog read, that history timestamps are filtered to
 the snapshot window, and that safe field changes render directly as
 `Field: old → new`. A changelog failure or unsupported gateway must leave the
 sync successful and show only the generic fallback for the affected issue;
 pagination, cancellation, and the eight-page safety cap remain bounded.
 
-Media and attachment smoke must cover:
+Linux media and attachment smoke must cover:
 
 - an unambiguous description image loading as an authenticated Jira thumbnail;
 - an IX-1873-like ADF media node containing a Media Services UUID that cannot
@@ -158,8 +198,8 @@ Media and attachment smoke must cover:
 - cancellation before and during thumbnail loading, including stale-selection
   protection;
 - per-image 8 MiB, 16-reference, and 32 MiB aggregate rejection boundaries;
-- an explicit attachment download showing the XDG portal, cancellation, and
-  successful local destination write;
+- an explicit attachment download showing the Linux XDG portal, cancellation,
+  and successful local destination write;
 - rejection of oversize or redirected content and verification of downloaded
   contents; and
 - isolation between remote Jira/cache state and the selected local file.
@@ -167,18 +207,29 @@ Media and attachment smoke must cover:
 No media action should be automatic or mutate Jira. Comments/details and
 thumbnails are remote and memory-only, so a restart test should expect cached
 issue snapshots but not cached comment bodies or thumbnail bytes. Confirm that
-OS Freedesktop alerts remain delivered independently throughout media loads and
-local download activity.
+Linux OS Freedesktop alerts remain delivered independently throughout media
+loads and local download activity.
 
-Image diagnostics smoke should use a fresh temporary `XDG_STATE_HOME` for the
-run, preserving any existing user diagnostics logs, then inspect the JSONL
-records after exercising an IX-1873-like unresolved ADF
-Media Services UUID. Confirm that the record distinguishes each pre-GPUI
+Linux image diagnostics smoke should use a fresh temporary `XDG_STATE_HOME`
+for the run, preserving any existing user diagnostics logs, then inspect the
+JSONL records after exercising an IX-1873-like unresolved ADF Media Services
+UUID. Confirm that the record distinguishes each pre-GPUI
 failed or pre-GPUI missing state from the safe `gpui_decode_fallback` category,
 without exposing any excluded identifiers, URLs, filenames, text, payloads, or
 raw errors. Exercise enough image activity to verify rotation leaves no more
 than a 256 KiB active log and one 256 KiB backup. Verify the state directory is
 `0700` and both log files are `0600`; a missing or unwritable log must not block
-startup. Finally, confirm that the existing OS Freedesktop desktop alerts are
+startup. Finally, confirm that the existing Linux OS Freedesktop desktop alerts are
 unchanged and still delivered independently of diagnostics and in-app
 notifications.
+
+### macOS runtime smoke
+
+On a native macOS host, smoke the same core dashboard, sync, detail, confirmed
+write, cancellation, and in-app feedback paths. Verify native GPUI window
+behavior, native keyring save/load, the native file picker for an explicit
+attachment download, and application data/log locations under
+`~/Library/Application Support/dev.jiradesk.JiraDesk` and
+`~/Library/Logs/dev.jiradesk.JiraDesk`. Do not require per-user Linux desktop
+registration, Wayland controls, XDG portals, Freedesktop notifications, or the
+Freedesktop notification test: that adapter/test is unavailable on macOS.

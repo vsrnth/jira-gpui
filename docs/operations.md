@@ -78,11 +78,16 @@ responsible for its exposure.
 
 ## Local data and sync
 
-The SQLite database is stored at `$XDG_DATA_HOME/jira-desk/jira-desk.sqlite3`
-when `XDG_DATA_HOME` is a non-empty absolute path, otherwise at
-`$HOME/.local/share/jira-desk/jira-desk.sqlite3`. Relative roots are rejected.
-The application directory is created with mode `0700` and a new database with
-mode `0600`. Credentials and raw Jira transport payloads are not stored.
+On Linux, the SQLite database is stored at
+`$XDG_DATA_HOME/jira-desk/jira-desk.sqlite3` when `XDG_DATA_HOME` is a
+non-empty absolute path, otherwise at
+`$HOME/.local/share/jira-desk/jira-desk.sqlite3`. On macOS, it defaults to
+`~/Library/Application Support/dev.jiradesk.JiraDesk/jira-desk.sqlite3`. On
+either supported platform, an explicit non-empty absolute `XDG_DATA_HOME`
+override takes precedence over the platform default; relative roots are
+rejected. The application directory is created with mode `0700` and a new
+database with mode `0600`. Credentials and raw Jira transport payloads are not
+stored.
 
 The first successful refresh writes a quiet baseline. Manual refresh performs
 full reconciliation; automatic polling is incremental with a five-minute
@@ -99,27 +104,31 @@ Mark-read operations change only local state.
 Remote membership uses `(assignee OR watcher)` for the authenticated account.
 The cache trusts that user-set membership so watched issues remain visible.
 The issue list is ordered by Jira `updated_at` newest first, and issue-detail
-comments are displayed newest first. Freedesktop alerts for ordinary issue
-activity intentionally remain assigned-only; watched issues are available in
-the dashboard and local update feed without silently widening OS alert delivery.
-On later update-emitting syncs, direct ADF mentions of the authenticated account
-also create stable, locally deduplicated comment/update events and desktop
-alerts on watcher-only tickets. Mention detection is read-only, examines only
-the newest 100 comments for snapshots whose `updated_at` changed, and does not
-add Jira writes. Local update metadata contains only a bounded excerpt; full
-comment bodies remain memory-only.
+comments are displayed newest first. On Linux, Freedesktop alerts for ordinary
+issue activity intentionally remain assigned-only; watched issues are available
+in the dashboard and local update feed on both supported platforms without
+silently widening OS alert delivery. On later update-emitting syncs, direct ADF
+mentions of the authenticated account also create stable, locally deduplicated
+comment/update events on both supported platforms and desktop alerts on Linux
+for watcher-only tickets. Mention detection is read-only, examines only the
+newest 100 comments for snapshots whose `updated_at` changed, and does not add
+Jira writes. Local update metadata contains only a bounded excerpt; full comment
+bodies remain memory-only.
 
 ## Image diagnostics
 
-Image decode and rendering diagnostics are best-effort. They are written as
-JSON Lines to `$XDG_STATE_HOME/jira-desk/diagnostics.jsonl`
-when `XDG_STATE_HOME` is a non-empty absolute path, otherwise to
-`$HOME/.local/state/jira-desk/diagnostics.jsonl`. The state directory is mode
-`0700`; the active log and its single backup are mode `0600`. Rotation keeps at
-most 256 KiB in the active file plus one 256 KiB backup. A missing, unreadable,
-or unwritable diagnostics log must not prevent the application from starting or
-serving Jira data; diagnostic setup and write failures are isolated from normal
-Jira operation.
+Image decode and rendering diagnostics are best-effort. On Linux, they are
+written as JSON Lines to `$XDG_STATE_HOME/jira-desk/diagnostics.jsonl` when
+`XDG_STATE_HOME` is a non-empty absolute path, otherwise to
+`$HOME/.local/state/jira-desk/diagnostics.jsonl`. On macOS, they default to
+`~/Library/Logs/dev.jiradesk.JiraDesk/diagnostics.jsonl`. On either supported
+platform, an explicit non-empty absolute `XDG_STATE_HOME` override takes
+precedence over the platform default; relative roots are rejected. The state
+or log directory is mode `0700`; the active log and its single backup are mode
+`0600`. Rotation keeps at most 256 KiB in the active file plus one 256 KiB
+backup. A missing, unreadable, or unwritable diagnostics log must not prevent
+the application from starting or serving Jira data; diagnostic setup and write
+failures are isolated from normal Jira operation.
 
 Each record contains only structured safe enums and integers describing the
 diagnostic stage, outcome, bounded image limits, and decode/fallback category.
@@ -163,11 +172,12 @@ and are not written to SQLite or another automatic cache.
 
 An attachment download is explicit and separate from description rendering.
 It reads the configured authenticated Jira origin, rejects redirect behavior,
-and caps the original content at 64 MiB. The user selects the destination via
-the XDG document portal; only then does a background local write begin. Cancel
-or success is reported to the UI, no automatic download or retry is performed,
-and no Jira attachment or issue mutation occurs. The remote Jira state and the
-local destination are intentionally separate.
+and caps the original content at 64 MiB. On Linux, the user selects the
+destination via the XDG document portal; on macOS, the native file picker is
+used. Only then does a background local write begin. Cancel or success is
+reported to the UI, no automatic download or retry is performed, and no Jira
+attachment or issue mutation occurs. The remote Jira state and the local
+destination are intentionally separate.
 
 Issue snapshots, including display metadata and rich descriptions, are retained
 in the local SQLite cache. Selected issue details and comments are fetched
@@ -182,9 +192,9 @@ title-bar and semantic icons rendered at rest. Client-side minimize, maximize,
 and close controls remain discoverable when the window is idle; hover styling
 adds emphasis but is not required to find the controls.
 
-When started from an AppImage, startup also best-effort installs the current
-launcher and icon for the current user before creating the GPUI window. With
-an absolute `XDG_DATA_HOME`, the files are
+On Linux, when started from an AppImage, startup also best-effort installs the
+current launcher and icon for the current user before creating the GPUI window.
+With an absolute `XDG_DATA_HOME`, the files are
 `$XDG_DATA_HOME/applications/dev.jiradesk.JiraDesk.desktop` and
 `$XDG_DATA_HOME/icons/hicolor/256x256/apps/dev.jiradesk.JiraDesk.png`, plus
 the content-addressed
@@ -213,9 +223,11 @@ selected categories means All statuses. The issue list has its own component
 scrollbar so long result sets do not expand the surrounding layout.
 
 Refresh uses a loading spinner in the button while work is in progress. Refresh
-and confirmed-write outcomes also appear as in-app notifications. These in-app
-notifications are additive and do not disable or replace the existing
-Freedesktop OS desktop alerts for update delivery.
+and confirmed-write outcomes also appear as in-app notifications. On Linux,
+these in-app notifications are additive and do not disable or replace the
+existing Freedesktop OS desktop alerts for update delivery. On macOS, in-app
+notifications and the local update feed remain available, but Freedesktop
+delivery is unavailable.
 
 The local update feed groups detected events by Jira issue. Marking one ticket
 read updates all event IDs in that group in SQLite only; Mark all read applies
@@ -224,14 +236,18 @@ Jira.
 
 The first successful refresh is a quiet baseline. Mention detection starts on
 later syncs that emit updates, so the baseline does not produce comment alerts.
-Desktop delivery counts mean notifications accepted by the desktop notification
-API; they do not guarantee a GNOME or other shell banner.
+On Linux, desktop delivery counts mean notifications accepted by the desktop
+notification API; they do not guarantee a GNOME or other shell banner. On macOS,
+the in-app feed and feedback remain available, but Freedesktop delivery is
+unavailable.
 
-Settings provides a test desktop notification. It makes no Jira call and writes
-no database event, uses the production Freedesktop app identity, and displays
-the daemon-assigned ID or error category with a timestamp. It writes only
-privacy-safe fixed-schema start/result entries to bounded `diagnostics.jsonl`.
-API acceptance does not prove that GNOME or another shell rendered a banner.
+On Linux, Settings provides a test Freedesktop desktop notification. It makes
+no Jira call and writes no database event, uses the production Freedesktop app
+identity, and displays the daemon-assigned ID or error category with a
+timestamp. It writes only privacy-safe fixed-schema start/result entries to
+bounded `diagnostics.jsonl`. API acceptance does not prove that GNOME or another
+shell rendered a banner. On macOS, the in-app feed and feedback remain
+available, but Freedesktop delivery and the test are unavailable.
 
 ## Jira write policy
 
@@ -259,6 +275,8 @@ background Jira writes are supported. A local attachment download is the sole
 exception to the “no background write” wording: it is a user-selected local
 file write, never a Jira mutation or an automatic action.
 
-Freedesktop OS alerts remain enabled for update delivery independently of the
-in-app notification layer. Media loading, local download cancellation, and
-file-write errors must not disable or replace those OS alerts.
+On Linux, Freedesktop OS alerts remain enabled for update delivery independently
+of the in-app notification layer. Media loading, local download cancellation,
+and file-write errors must not disable or replace those OS alerts. On macOS,
+in-app notifications and feed feedback remain available; Freedesktop alerts are
+unavailable.

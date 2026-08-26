@@ -15,7 +15,7 @@
 3. Delegate every implementation and code-writing task to Luna subagents, whether or not parallel execution is useful. Sol may inspect code and request revisions, but Luna must author every code change.
 4. Have Sol review all resulting diffs for architecture, correctness, security, and unintended changes.
 5. Run formatting, focused tests, workspace tests, and Clippy as appropriate before committing.
-6. Keep Linux Wayland as the only Phase 1 runtime target. macOS remains Phase 2.
+6. Keep native macOS (arm64/x86_64) and Linux x86_64 Wayland as the supported desktop runtime targets; X11 and Windows remain out of scope.
 7. Keep Jira writes limited to explicit, user-confirmed comment creation, assignment changes, and status transitions through dedicated write ports. Dispatch each confirmed write once and prohibit automatic Jira writes, retries, deletes, other issue edits, and attachment mutations; local cache, preferences, notification state, and sync cursors may be written locally.
 8. Keep commits granular and Mitchell-style: each commit should contain one coherent, independently reviewable and validated change where practical, use an imperative conventional-style subject, avoid unrelated cleanup or mixed milestones, and separate policy or documentation-only changes when sensible. Sol is the only agent that creates commits; Luna workers must not commit.
 

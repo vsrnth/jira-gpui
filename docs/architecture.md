@@ -9,14 +9,21 @@ Tokio, or SQLite.
 
 | Path | Responsibility |
 | --- | --- |
-| `apps/gpui` | Linux desktop shell, onboarding, dashboard, detail views, window controls, and per-user desktop registration |
+| `apps/gpui` | Cross-platform native GPUI desktop shell, onboarding, dashboard, detail views, and platform-specific window/file integrations |
 | `crates/domain` | Jira-independent identifiers, issues, comments, users, and update values |
 | `crates/application` | Use cases, ports, cancellation, sync, detail/media loading, comments, and polling policy |
 | `crates/jira` | Pure Jira JSON/JQL mapping and bounded request construction |
 | `crates/jira-http` | Jira Cloud transport, pagination, cancellation, response limits, and safe error mapping |
 | `crates/storage` | Worker-thread SQLite adapter, migrations, cache, membership, cursors, and local feed state |
-| `crates/desktop-notifications` | Best-effort Freedesktop notification adapter |
-| `packaging/appimage` | Linux Wayland AppImage build and inspection scripts |
+| `crates/desktop-notifications` | Linux-only best-effort Freedesktop notification adapter; unavailable on macOS |
+| `packaging/appimage` | Linux x86_64 native Wayland AppImage build and inspection scripts |
+| `packaging/macos` | Native macOS arm64/x86_64 DMG build and inspection procedures |
+
+The GPUI shell uses native platform support on both targets. Linux enables
+native Wayland controls, Freedesktop notifications, and XDG portals; macOS
+uses the native keyring feature, native file picker, and macOS data locations:
+`~/Library/Application Support/dev.jiradesk.JiraDesk` for application data and
+`~/Library/Logs/dev.jiradesk.JiraDesk` for logs. X11 and Windows are unsupported.
 
 ## Runtime flow
 
@@ -25,7 +32,7 @@ GPUI shell
   -> application services and ports
       -> Jira HTTP adapter       (remote reads/media plus confirmed bounded writes)
       -> SQLite storage adapter  (local cache and update state)
-      -> desktop notification adapter (best effort)
+      -> Linux Freedesktop notification adapter (best effort; unavailable on macOS)
 ```
 
 Synchronous environment bootstrap validates configuration, constructs the Jira
@@ -37,11 +44,11 @@ applies the user-editable JQL scope and a remote `(assignee OR watcher)` filter
 for the authenticated account; the dashboard trusts that user-set membership
 and infers project labels from returned issue snapshots. A successful first
 refresh is a quiet baseline. Later polls compare normalized snapshots and
-persist deterministic update events. Desktop alerts retain the narrower
-assigned-only policy. The issue list follows Jira `updated_at` newest first,
-while issue-detail comments render newest first. A direct ADF mention of the
-authenticated account also emits a local comment update and alert for a
-watcher-only ticket.
+persist deterministic update events. On Linux, desktop alerts retain the
+narrower assigned-only policy. The issue list follows Jira `updated_at` newest
+first, while issue-detail comments render newest first. A direct ADF mention of
+the authenticated account also emits a local comment update and, on Linux, an
+alert for a watcher-only ticket.
 
 ## Dashboard behavior
 
@@ -89,9 +96,10 @@ Media Services URLs are never followed.
 
 An explicit attachment download is a separate user action. It reads the
 configured Jira origin with authentication, caps the response at 64 MiB, and
-writes only to the destination selected through the XDG portal. The local
-write runs in the background after selection; it is not automatic, is not
-retried automatically, and does not mutate Jira. Comment creation, assignment,
+writes only to the destination selected through a platform-native picker. On
+Linux, that picker is the XDG document portal; macOS uses its native file
+picker. The local write runs in the background after selection; it is not
+automatic, is not retried automatically, and does not mutate Jira. Comment creation, assignment,
 and status transition each use a dedicated confirmed request path and do not
 share retry behavior with reads.
 
@@ -116,16 +124,19 @@ best-effort: the sync still succeeds with one honest generic `IssueUpdated`
 fallback for that issue.
 
 For those same update-emitting snapshots, mention detection is read-only and
-examines only the newest 100 comments. A direct ADF mention of the authenticated
-account creates a stable, locally deduplicated `CommentAdded`/update event and
+examines only the newest 100 comments. On both supported platforms, a direct
+ADF mention of the authenticated account creates a stable, locally deduplicated
+`CommentAdded`/update event for the local feed; on Linux, it also creates a
 desktop alert, including when the issue is watcher-only. Mention detection
 begins on later syncs after the quiet baseline; it adds no Jira writes.
 
-Settings also exposes a test desktop notification. It makes no Jira call or
-database event, uses the production Freedesktop app identity, and reports the
-daemon-assigned ID or error category with a timestamp. Fixed-schema, privacy-safe
-start/result records go to bounded `diagnostics.jsonl`; API acceptance is not
-proof that GNOME rendered a banner.
+On Linux, Settings also exposes a test Freedesktop desktop notification. It
+makes no Jira call or database event, uses the production app identity, and
+reports the daemon-assigned ID or error category with a timestamp. Fixed-schema,
+privacy-safe start/result records go to bounded `diagnostics.jsonl`; API
+acceptance is not proof that GNOME rendered a banner. The Freedesktop adapter
+and test are unavailable on macOS, where in-app feed and feedback remain
+available.
 
 The local update feed is derived from cache transitions. It is Jira Desk's
 view of detected changes, not Jira's bell or inbox notification stream. Events
@@ -136,11 +147,12 @@ Manual refresh always produces one in-app summary, including when no new
 updates were found. Feed navigation offers Unread and All filters. Generic
 activity without an exact field uses compact fallback wording and progressive
 disclosure rather than exposing raw internal event names. Event timestamps are
-rendered in the system's local timezone with an explicit UTC offset. These are
-additive feedback: the Freedesktop desktop notification adapter remains
-enabled for update alerts; its counts mean notifications accepted by the
-desktop service, not guaranteed shell display, and delivery is best effort and
-never makes a sync fail.
+rendered in the system's local timezone with an explicit UTC offset. On Linux,
+these are additive feedback: the Freedesktop desktop notification adapter
+remains enabled for update alerts; its counts mean notifications accepted by
+the desktop service, not guaranteed shell display, and delivery is best effort
+and never makes a sync fail. On macOS, the in-app feed and feedback are
+available, but the Freedesktop adapter and test are unavailable.
 
 ## Dashboard components
 
@@ -155,8 +167,8 @@ the interaction rather than duplicating them in the shell:
   duplicate activation while a refresh is running.
 - Status filtering uses the component combobox in multiple-selection mode. It
   is a local presentation filter, not a change to the Jira query.
-- In-app outcome messages use the component notification layer. They do not
-  replace OS/Freedesktop desktop alerts. The application registers the
+- In-app outcome messages use the component notification layer. On Linux they
+  do not replace Freedesktop desktop alerts. The application registers the
   `gpui-component-assets` bundle so TitleBar and semantic icon assets render;
   idle minimize, maximize, and close controls stay discoverable, with hover
   styling as an enhancement rather than the only cue.

@@ -1,19 +1,19 @@
 # UI component audit
 
-This is the concise inventory for `gpui-component` adoption in the Phase 1
-Wayland shell. The goal is semantic behavior and keyboard/accessibility
-correctness, not replacing working custom controls merely to increase library
-usage.
+This is the concise inventory for `gpui-component` adoption in the supported
+native GPUI shells: Linux x86_64 on Wayland and native macOS arm64/x86_64. The
+goal is semantic behavior and keyboard/accessibility correctness, not replacing
+working custom controls merely to increase library usage.
 
 ## Current baseline
 
-The shell already uses or intentionally composes:
+The shell already uses or intentionally composes on both supported platforms:
 
 - `Root`, `TitleBar`, and `Resizable` for the application frame and list/detail
   split;
 - `Input` and `Combobox` for onboarding, local search, and status filters;
-- `Notification` for in-app refresh/comment outcomes, while Freedesktop alerts
-  remain independent;
+- `Notification` for in-app refresh/comment outcomes; on Linux, Freedesktop
+  alerts remain independent, while the adapter/test is unavailable on macOS;
 - the registered `gpui-component-assets` bundle for TitleBar and semantic icon
   assets, keeping idle minimize/maximize/close controls discoverable while
   retaining hover emphasis;
@@ -68,9 +68,11 @@ resolves its compatible GPUI/Zed revision to
 through the lockfile rather than adding a second GPUI source identity. Rust
 1.95 remains sufficient for the
 current component set; Rust 1.97.1 is not required. Any upgrade must preserve
-Linux native Wayland as the only Phase 1 runtime target and rerun the release
-smoke, including media cancellation, portal download, and independent OS alert
-checks. The media smoke should include an unresolved ADF Media Services UUID,
+native GPUI support on Linux Wayland and macOS, and rerun the platform-specific
+release smoke. Linux smoke includes media cancellation, XDG portal download,
+and independent Freedesktop alert checks; macOS smoke uses its native file
+picker and does not require the unavailable Freedesktop adapter/test. The media
+smoke should include an unresolved ADF Media Services UUID,
 the bounded labeled fallback gallery, thumbnail-404 and precise unknown-MIME/
 unrecognized-signature thumbnail-unavailable original-content fallback, and
 byte-signature format selection after MIME allowlists. OS alerts remain

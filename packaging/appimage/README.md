@@ -1,6 +1,6 @@
 # Jira Desk AppImage packaging
 
-This directory builds the Phase 1 Linux x86_64 Wayland AppImage. The scaffold follows the [AppImage AppDir specification](https://docs.appimage.org/packaging-guide/manual.html) and uses [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) plus [appimagetool](https://github.com/AppImage/appimagetool).
+This directory builds the supported Linux x86_64 native Wayland AppImage. The scaffold follows the [AppImage AppDir specification](https://docs.appimage.org/packaging-guide/manual.html) and uses [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) plus [appimagetool](https://github.com/AppImage/appimagetool).
 
 ## Prerequisites
 

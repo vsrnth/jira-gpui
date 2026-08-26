@@ -4,8 +4,9 @@ Jira Desk is a focused Jira Cloud desktop client for keeping an authenticated
 user's assigned or watched issues visible. It keeps a local cache, detects changes, and
 shows a local update feed without turning Jira into a second system of record.
 
-Phase 1 targets Linux on native Wayland and ships as an x86_64 AppImage.
-macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
+Supported desktop targets are Linux x86_64 on native Wayland, distributed as an
+AppImage, and native macOS on arm64 or x86_64, packaged as a DMG. X11 and
+Windows are unsupported.
 
 ## What it does
 
@@ -28,20 +29,23 @@ macOS is planned for Phase 2; X11 and Windows are out of scope for Phase 1.
   cannot be converted through Jira's documented REST APIs, the renderer shows a
   clearly labeled, bounded gallery of remaining allowlisted Jira image
   attachments without claiming those candidates occupy the unresolved ADF
-  position. Explicit attachment downloads use a user-selected XDG portal
-  destination and are separate from description rendering.
+  position. Explicit attachment downloads use a user-selected destination and
+  are separate from description rendering. Linux uses the XDG document portal;
+  macOS uses its native file picker.
 - Shows user display names in the interface while retaining stable Jira
   account IDs only for matching and local application state.
 - Keeps a durable local update feed grouped by ticket, with local per-ticket
-  and global mark-read actions, in-app operation feedback, and best-effort OS
-  desktop notifications.
-- Desktop alerts remain limited to assigned issues; watched issues appear in
-  the list and local feed without expanding ordinary OS alerts. Direct ADF
-  mentions of the authenticated account also create local comment updates and
-  desktop alerts on watcher-only tickets.
+  and global mark-read actions and in-app operation feedback. Linux also has
+  best-effort Freedesktop desktop notifications; macOS currently uses the
+  in-app feed and feedback only.
+- On Linux, desktop alerts remain limited to assigned issues; watched issues
+  appear in the list and local feed without expanding ordinary OS alerts.
+  Direct ADF mentions of the authenticated account also create local comment
+  updates and desktop alerts on watcher-only tickets.
 - Lets the user explicitly choose and confirm an assignee change or one of the
   issue's currently available workflow transitions.
-- Provides client-side Wayland title-bar controls and a local SQLite cache.
+- Provides client-side Wayland title-bar controls on Linux and a local SQLite
+  cache on both supported targets.
 - Keeps bounded, privacy-safe image diagnostics in the local state directory;
   diagnostic setup and write failures never prevent startup, and logging is
   best-effort.
@@ -67,25 +71,29 @@ writes in the background only after the user selects a destination, and never
 starts automatically or retries itself.
 
 The GPUI asset bundle is registered at application startup so title-bar and
-semantic icons render without a hover-only discovery dependency. Window
-minimize, maximize, and close controls remain client-side Wayland controls;
-hover may provide emphasis, but idle controls remain discoverable. OS alerts
-remain unchanged and independent of in-app notifications. Image diagnostics use
-only safe structured enums and integers, rotate within 256 KiB plus one backup,
-and exclude credentials, URLs, Jira identifiers, user content, payloads, and
-raw errors.
+semantic icons render without a hover-only discovery dependency. On Linux,
+window minimize, maximize, and close controls are client-side Wayland controls;
+hover may provide emphasis, but idle controls remain discoverable. Image
+diagnostics use only safe structured enums and integers, rotate within 256 KiB
+plus one backup, and exclude credentials, URLs, Jira identifiers, user content,
+payloads, and raw errors.
 
-Settings can send a test desktop notification without making a Jira call or
-creating a database event. The diagnostic uses the production Freedesktop app
-identity, shows the daemon-assigned ID/error category and timestamp, and writes
-privacy-safe fixed-schema start/result entries to bounded `diagnostics.jsonl`.
-API acceptance does not prove that GNOME or another shell rendered a banner.
+On Linux, Settings can send a test Freedesktop desktop notification without
+making a Jira call or creating a database event. The diagnostic uses the
+production app identity, shows the daemon-assigned ID/error category and
+timestamp, and writes privacy-safe fixed-schema start/result entries to bounded
+`diagnostics.jsonl`. API acceptance does not prove that GNOME or another shell
+rendered a banner. The Freedesktop adapter and test are unavailable on macOS;
+its in-app feed and feedback remain available.
 
 ## Prerequisites
 
-- Linux with a Wayland compositor and the build dependencies listed in
-  [`packaging/appimage/README.md`](packaging/appimage/README.md).
-- Rust 1.95 or newer, installed through [rustup](https://rustup.rs/).
+- Linux x86_64 with a Wayland compositor and the build dependencies listed in
+  [`packaging/appimage/README.md`](packaging/appimage/README.md), or native
+  macOS arm64/x86_64 with the tools listed in
+  [`packaging/macos/README.md`](packaging/macos/README.md).
+- Rust 1.95 or newer, installed through [rustup](https://rustup.rs/). GPUI is
+  native on both supported targets.
 - A Jira Cloud site and a scoped Atlassian API token for local development. Tokens
   are secrets: do not commit, log, or paste them into issue reports.
 
@@ -107,9 +115,9 @@ write:jira-work
 Jira Desk discovers the Cloud ID automatically from the site URL, and Jira
 permissions still apply. “Remember securely in system keyring” is enabled by
 default; when selected, the URL, email, and token are stored only in the
-system keyring after successful authentication. Uncheck it for a session-only
-login. See [operations and security](docs/operations.md) for credential
-handling and local data.
+system keyring after successful authentication. The macOS build uses its native
+keyring feature. Uncheck it for a session-only login. See [operations and
+security](docs/operations.md) for credential handling and local data.
 
 ## Development commands
 
@@ -120,8 +128,10 @@ cargo clippy --workspace --lib --bins --locked -- -D warnings
 cargo run -p jira-gpui
 ```
 
-For the AppImage workflow and current validation boundaries, see
-[release and validation](docs/release.md). For system boundaries and data
+For the Linux AppImage and macOS DMG workflows and current validation
+boundaries, see [release and validation](docs/release.md),
+[Linux packaging](packaging/appimage/README.md), and
+[macOS packaging](packaging/macos/README.md). For system boundaries and data
 flow, see [architecture](docs/architecture.md). The current roadmap is in
 [the implementation plan](docs/implementation-plan.md).
 

@@ -1,6 +1,6 @@
 # Jira Desk macOS DMG packaging
 
-This directory builds a native macOS Phase 2 artifact. The script supports
+This directory builds the supported native macOS artifact. The script supports
 only native `arm64` and `x86_64` hosts; it does not cross-compile or package
 Linux builds. It does not copy credentials, preferences, Jira data, or cache
 files into the application.
