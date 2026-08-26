@@ -65,8 +65,11 @@ use crate::{
     team_table::{TeamTicketTableDelegate, TeamTicketTableStateExt},
 };
 
+mod comment_flow;
 mod media;
 mod settings;
+
+use comment_flow::{CommentCompletion, CommentFlow, CommentInvalidation, CommentTarget};
 
 use media::{
     AttachmentDownloadState, MAX_ATTACHMENT_DOWNLOAD_BYTES, attachment_download_button_label,
@@ -455,26 +458,6 @@ enum DetailState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum CommentPostState {
-    Idle,
-    Confirming {
-        issue_id: IssueId,
-        issue_key: String,
-        body: String,
-        chars: usize,
-        bytes: usize,
-    },
-    Posting {
-        issue_id: IssueId,
-    },
-    Error {
-        issue_id: IssueId,
-        message: String,
-        unknown_outcome: bool,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 enum IssueEditState {
     Idle,
     LoadingAssignees {
@@ -600,51 +583,6 @@ fn issue_edit_target_is_current(
     expected_generation: u64,
 ) -> bool {
     selected_issue == Some(expected_issue) && generation == expected_generation
-}
-
-fn comment_error_message(error: &ApplicationError) -> (&'static str, bool) {
-    match error.kind() {
-        jira_application::ErrorKind::Authentication => (
-            "Comment not posted · Jira authentication was rejected",
-            false,
-        ),
-        jira_application::ErrorKind::Authorization => {
-            ("Comment not posted · Jira denied comment permission", false)
-        }
-        jira_application::ErrorKind::NotFound => {
-            ("Comment not posted · the Jira issue was not found", false)
-        }
-        jira_application::ErrorKind::RateLimited => (
-            "Comment not posted · Jira rate limit reached; try later",
-            false,
-        ),
-        jira_application::ErrorKind::InvalidInput => {
-            ("Comment not posted · the comment text is invalid", false)
-        }
-        jira_application::ErrorKind::UnknownOutcome => (
-            "Jira may have accepted this comment. Refresh comments before retrying.",
-            true,
-        ),
-        _ => ("Comment not posted · Jira returned an error", false),
-    }
-}
-
-fn confirmed_comment_snapshot(
-    state: &CommentPostState,
-    selected_issue: Option<&IssueId>,
-) -> Option<(IssueId, String)> {
-    let CommentPostState::Confirming { issue_id, body, .. } = state else {
-        return None;
-    };
-    (selected_issue == Some(issue_id)).then(|| (issue_id.clone(), body.clone()))
-}
-
-fn comment_target_is_current(
-    remote_issue_id: Option<&IssueId>,
-    selected_issue: Option<&IssueId>,
-    expected_issue: &IssueId,
-) -> bool {
-    remote_issue_id.or(selected_issue) == Some(expected_issue)
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -809,8 +747,7 @@ pub struct Dashboard {
     remote_lookup_task: Option<gpui::Task<()>>,
     comment_input: Option<Entity<TextareaState>>,
     comment_subscriptions: Vec<Subscription>,
-    comment_state: CommentPostState,
-    comment_generation: u64,
+    comment_flow: CommentFlow,
     comment_cancellation: Option<CancellationToken>,
     comment_task: Option<gpui::Task<()>>,
     issue_edit_state: IssueEditState,
@@ -912,8 +849,7 @@ impl Dashboard {
             remote_lookup_task: None,
             comment_input: None,
             comment_subscriptions: Vec::new(),
-            comment_state: CommentPostState::Idle,
-            comment_generation: 0,
+            comment_flow: CommentFlow::new(),
             comment_cancellation: None,
             comment_task: None,
             issue_edit_state: IssueEditState::Idle,
@@ -1014,8 +950,7 @@ impl Dashboard {
             remote_lookup_task: None,
             comment_input: None,
             comment_subscriptions: Vec::new(),
-            comment_state: CommentPostState::Idle,
-            comment_generation: 0,
+            comment_flow: CommentFlow::new(),
             comment_cancellation: None,
             comment_task: None,
             issue_edit_state: IssueEditState::Idle,
@@ -1530,20 +1465,19 @@ impl Dashboard {
     }
 
     fn invalidate_comment_selection(&mut self) {
-        self.comment_generation = self.comment_generation.wrapping_add(1);
         self.comment_input = None;
         self.comment_subscriptions.clear();
-        if !matches!(&self.comment_state, CommentPostState::Posting { .. }) {
+        if matches!(
+            self.comment_flow.invalidate_selection(),
+            CommentInvalidation::CancelPreDispatch
+        ) {
             if let Some(cancellation) = self.comment_cancellation.take() {
                 cancellation.cancel();
             }
             self.comment_task.take();
-            self.comment_state = CommentPostState::Idle;
-        } else {
-            // A dispatched POST may have succeeded even if its UI selection is
-            // gone; its completion is ignored by the generation guard.
-            self.comment_state = CommentPostState::Idle;
         }
+        // A dispatched POST is never cancelled; its completion is ignored by
+        // the flow's generation guard after selection invalidation.
     }
 
     fn invalidate_issue_edit_selection(&mut self) {
@@ -1949,78 +1883,46 @@ impl Dashboard {
     }
 
     fn begin_comment_confirmation(&mut self, cx: &mut Context<Self>) {
-        if matches!(
-            &self.comment_state,
-            CommentPostState::Error {
-                unknown_outcome: true,
-                ..
-            }
-        ) {
-            self.sync_message =
-                "Refresh comments before retrying a comment with an unknown outcome".to_owned();
-            cx.notify();
-            return;
-        }
         let Some(input) = self.comment_input.as_ref() else {
             return;
         };
         let Some(issue) = self.comment_target_issue() else {
             return;
         };
-        let body = input.read(cx).value().to_string().trim().to_owned();
-        if body.trim().is_empty() {
-            self.comment_state = CommentPostState::Error {
-                issue_id: issue.id.clone(),
-                message: "Comment not posted · enter a non-empty comment".to_owned(),
-                unknown_outcome: false,
-            };
-        } else if body.len() > jira_application::MAX_COMMENT_BYTES {
-            self.comment_state = CommentPostState::Error {
-                issue_id: issue.id.clone(),
-                message: "Comment not posted · comment exceeds the byte limit".to_owned(),
-                unknown_outcome: false,
-            };
-        } else if body.chars().count() > jira_application::MAX_COMMENT_CHARS {
-            self.comment_state = CommentPostState::Error {
-                issue_id: issue.id.clone(),
-                message: "Comment not posted · comment exceeds the character limit".to_owned(),
-                unknown_outcome: false,
-            };
-        } else {
-            let chars = body.chars().count();
-            let bytes = body.len();
-            self.comment_state = CommentPostState::Confirming {
-                issue_id: issue.id.clone(),
-                issue_key: issue.key.as_str().to_owned(),
-                body,
-                chars,
-                bytes,
-            };
+        let target = CommentTarget {
+            issue_id: issue.id.clone(),
+            issue_key: issue.key.as_str().to_owned(),
+        };
+        if let Err(comment_flow::CommentValidationError::UnknownOutcomeNeedsRefresh) = self
+            .comment_flow
+            .begin_confirmation(target, input.read(cx).value().as_ref())
+        {
+            self.sync_message =
+                "Refresh comments before retrying a comment with an unknown outcome".to_owned();
         }
         cx.notify();
     }
 
     fn cancel_comment_confirmation(&mut self, cx: &mut Context<Self>) {
-        self.comment_state = CommentPostState::Idle;
+        self.comment_flow.cancel_confirmation();
         cx.notify();
     }
 
     fn post_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target_issue_id) = self.comment_target_issue().map(|issue| issue.id.clone())
-        else {
+        let Some(target) = self.comment_target_issue().map(|issue| CommentTarget {
+            issue_id: issue.id.clone(),
+            issue_key: issue.key.as_str().to_owned(),
+        }) else {
             return;
         };
-        let Some((issue_id, body)) =
-            confirmed_comment_snapshot(&self.comment_state, Some(&target_issue_id))
-        else {
+        if !self.comment_flow.has_confirmation_for(&target.issue_id) {
             return;
-        };
+        }
         let Some(workspace) = self.workspace.clone() else {
-            self.comment_state = CommentPostState::Error {
-                issue_id,
-                message: "Comment not posted · live Jira workspace is not ready".to_owned(),
-                unknown_outcome: false,
-            };
+            self.comment_flow.fail_without_dispatch(
+                target.issue_id,
+                "Comment not posted · live Jira workspace is not ready",
+            );
             window.push_notification(
                 Notification::error("Comment not posted · live Jira workspace is not ready")
                     .id::<CommentNotification>(),
@@ -2029,39 +1931,41 @@ impl Dashboard {
             cx.notify();
             return;
         };
-        let generation = self.comment_generation.wrapping_add(1);
-        self.comment_generation = generation;
+        let Some(submission) = self.comment_flow.consume_submission(&target.issue_id) else {
+            return;
+        };
         let cancellation = CancellationToken::new();
         self.comment_cancellation = Some(cancellation.clone());
-        self.comment_state = CommentPostState::Posting {
-            issue_id: issue_id.clone(),
-        };
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = workspace
-                .create_comment(IssueLocator::Id(issue_id.clone()), body, &cancellation)
+                .create_comment(
+                    IssueLocator::Id(submission.issue_id.clone()),
+                    submission.body.clone(),
+                    &cancellation,
+                )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.comment_generation != generation
-                    || !comment_target_is_current(
-                        match &this.remote_lookup {
-                            RemoteLookupState::Loaded { issue, .. } => Some(&issue.id),
-                            RemoteLookupState::Idle
-                            | RemoteLookupState::Loading { .. }
-                            | RemoteLookupState::Error { .. } => None,
-                        },
-                        this.selected_issue.as_ref(),
-                        &issue_id,
-                    )
-                {
+                let remote_issue_id = match &this.remote_lookup {
+                    RemoteLookupState::Loaded { issue, .. } => Some(&issue.id),
+                    RemoteLookupState::Idle
+                    | RemoteLookupState::Loading { .. }
+                    | RemoteLookupState::Error { .. } => None,
+                };
+                let completion = this.comment_flow.finish_submission(
+                    &submission,
+                    remote_issue_id,
+                    this.selected_issue.as_ref(),
+                    result.as_ref().map(|_| ()),
+                );
+                if matches!(completion, CommentCompletion::Ignored) {
                     return;
                 }
                 this.comment_cancellation = None;
                 this.comment_task = None;
-                match result {
-                    Ok(_) => {
+                match completion {
+                    CommentCompletion::Succeeded => {
                         this.comment_input = None;
                         this.comment_subscriptions.clear();
-                        this.comment_state = CommentPostState::Idle;
                         window.push_notification(
                             Notification::success("Comment posted to Jira.")
                                 .id::<CommentNotification>(),
@@ -2069,25 +1973,24 @@ impl Dashboard {
                         );
                         if matches!(
                             &this.remote_lookup,
-                            RemoteLookupState::Loaded { issue, .. } if issue.id == issue_id
+                            RemoteLookupState::Loaded { issue, .. }
+                                if issue.id == submission.issue_id
                         ) {
                             this.search_jira(cx);
                         } else {
                             this.reload_selected_detail(cx);
                         }
                     }
-                    Err(error) => {
-                        let (message, unknown_outcome) = comment_error_message(&error);
+                    CommentCompletion::Failed {
+                        message,
+                        unknown_outcome: _,
+                    } => {
                         window.push_notification(
                             Notification::error(message).id::<CommentNotification>(),
                             cx,
                         );
-                        this.comment_state = CommentPostState::Error {
-                            issue_id: issue_id.clone(),
-                            message: message.to_owned(),
-                            unknown_outcome,
-                        };
                     }
+                    CommentCompletion::Ignored => unreachable!(),
                 }
                 cx.notify();
             });
@@ -2097,21 +2000,13 @@ impl Dashboard {
     }
 
     fn refresh_comments(&mut self, cx: &mut Context<Self>) {
-        if !matches!(&self.comment_state, CommentPostState::Posting { .. }) {
-            if matches!(
-                &self.comment_state,
-                CommentPostState::Error {
-                    unknown_outcome: true,
-                    ..
-                }
-            ) {
-                self.comment_state = CommentPostState::Idle;
-            }
-            if matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }) {
-                self.search_jira(cx);
-            } else {
-                self.reload_selected_detail(cx);
-            }
+        if !self.comment_flow.can_refresh() {
+            return;
+        }
+        if matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }) {
+            self.search_jira(cx);
+        } else {
+            self.reload_selected_detail(cx);
         }
     }
 
@@ -4849,13 +4744,10 @@ impl Dashboard {
         let Some(input) = self.comment_input.as_ref() else {
             return div().into_any_element();
         };
-        let state = self.comment_state.clone();
-        let body = match &state {
-            CommentPostState::Confirming { body, .. } => body.clone(),
-            _ => input.read(cx).value().to_string(),
-        };
-        let posting = matches!(&state, CommentPostState::Posting { .. });
-        let editing_confirmed = matches!(&state, CommentPostState::Confirming { .. });
+        let input_body = input.read(cx).value().to_string();
+        let body = self.comment_flow.composer_body(&input_body);
+        let posting = self.comment_flow.is_posting();
+        let editing_confirmed = self.comment_flow.is_confirming();
         let mut composer = v_flex()
             .min_w_0()
             .gap_2()
@@ -4882,14 +4774,8 @@ impl Dashboard {
                         body.len()
                     )),
             );
-        composer = match state {
-            CommentPostState::Confirming {
-                issue_key,
-                body: _,
-                chars,
-                bytes,
-                ..
-            } => composer
+        if let Some((issue_key, _, chars, bytes)) = self.comment_flow.confirmation_details() {
+            composer = composer
                 .child(
                     div()
                         .min_w_0()
@@ -4916,19 +4802,22 @@ impl Dashboard {
                         .child(Button::new("cancel-comment").label("Cancel").on_click(
                             cx.listener(|this, _, _, cx| this.cancel_comment_confirmation(cx)),
                         )),
-                ),
-            CommentPostState::Posting { .. } => composer.child(
+                );
+        } else if posting {
+            composer = composer.child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child("Posting comment…"),
-            ),
-            CommentPostState::Error {
-                message,
-                unknown_outcome,
-                ..
-            } => composer
-                .child(div().text_sm().text_color(cx.theme().danger).child(message))
+            );
+        } else if let Some((message, unknown_outcome)) = self.comment_flow.error_details() {
+            composer = composer
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(message.to_owned()),
+                )
                 .child(
                     h_flex()
                         .when(layout.is_mobile(), |this| this.flex_col())
@@ -4937,7 +4826,6 @@ impl Dashboard {
                             Button::new("post-comment")
                                 .primary()
                                 .label("Post comment")
-                                .disabled(posting)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.begin_comment_confirmation(cx)
                                 })),
@@ -4954,15 +4842,15 @@ impl Dashboard {
                                     ),
                             )
                         }),
-                ),
-            CommentPostState::Idle => composer.child(
+                );
+        } else {
+            composer = composer.child(
                 Button::new("post-comment")
                     .primary()
                     .label("Post comment")
-                    .disabled(posting)
                     .on_click(cx.listener(|this, _, _, cx| this.begin_comment_confirmation(cx))),
-            ),
-        };
+            );
+        }
         composer.into_any_element()
     }
 
@@ -5079,9 +4967,7 @@ impl Dashboard {
             |this, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
-                    if matches!(&this.comment_state, CommentPostState::Error { .. }) {
-                        this.comment_state = CommentPostState::Idle;
-                    }
+                    this.comment_flow.clear_error_on_edit();
                 }
             },
         ));

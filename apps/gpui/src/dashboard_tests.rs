@@ -939,30 +939,6 @@ fn clearing_search_cancels_and_removes_remote_result() {
 }
 
 #[test]
-fn comment_failures_have_definite_and_unknown_outcome_messages() {
-    let definite = ApplicationError::new(
-        jira_application::ErrorKind::Authorization,
-        "server detail must not reach UI",
-    );
-    let (message, unknown) = comment_error_message(&definite);
-    assert_eq!(
-        message,
-        "Comment not posted · Jira denied comment permission"
-    );
-    assert!(!unknown);
-    assert!(!message.contains("server detail"));
-
-    let uncertain = ApplicationError::new(
-        jira_application::ErrorKind::UnknownOutcome,
-        "secret response",
-    );
-    let (message, unknown) = comment_error_message(&uncertain);
-    assert!(unknown);
-    assert!(message.contains("Refresh comments"));
-    assert!(!message.contains("secret response"));
-}
-
-#[test]
 fn issue_edit_failures_have_safe_definite_and_unknown_copy() {
     let definite = ApplicationError::new(
         jira_application::ErrorKind::Authorization,
@@ -1026,81 +1002,6 @@ fn grouped_activity_dispatch_ids_include_read_and_unread_events() {
         ],
     };
     assert_eq!(update_group_event_ids(&group), vec![first, second]);
-}
-
-#[test]
-fn comment_post_state_keeps_confirmation_issue_and_sizes() {
-    let issue_id = IssueId::new("100").expect("issue");
-    let state = CommentPostState::Confirming {
-        issue_id: issue_id.clone(),
-        issue_key: "IX-100".to_owned(),
-        body: "hello".to_owned(),
-        chars: 5,
-        bytes: 7,
-    };
-    assert_eq!(
-        state,
-        CommentPostState::Confirming {
-            issue_id,
-            issue_key: "IX-100".to_owned(),
-            body: "hello".to_owned(),
-            chars: 5,
-            bytes: 7,
-        }
-    );
-}
-
-#[test]
-fn confirmed_comment_snapshot_uses_original_body_and_rejects_other_issue() {
-    let issue_a = IssueId::new("100").expect("issue");
-    let issue_b = IssueId::new("200").expect("issue");
-    let state = CommentPostState::Confirming {
-        issue_id: issue_a.clone(),
-        issue_key: "IX-100".to_owned(),
-        body: "original body".to_owned(),
-        chars: 13,
-        bytes: 13,
-    };
-
-    let edited_editor_value = "edited after confirmation";
-    let snapshot = confirmed_comment_snapshot(&state, Some(&issue_a));
-    assert_eq!(
-        snapshot,
-        Some((issue_a.clone(), "original body".to_owned()))
-    );
-    assert_ne!(
-        snapshot.as_ref().map(|(_, body)| body),
-        Some(&edited_editor_value.to_owned())
-    );
-    assert_eq!(confirmed_comment_snapshot(&state, Some(&issue_b)), None);
-    assert_eq!(confirmed_comment_snapshot(&state, None), None);
-    assert_eq!(
-        confirmed_comment_snapshot(
-            &CommentPostState::Posting {
-                issue_id: issue_a.clone()
-            },
-            Some(&issue_a)
-        ),
-        None
-    );
-}
-
-#[test]
-fn remote_lookup_identity_can_authorize_comment_independently_of_local_selection() {
-    let remote_id = IssueId::new("remote-100").expect("issue");
-    let local_id = IssueId::new("local-200").expect("issue");
-
-    assert!(comment_target_is_current(
-        Some(&remote_id),
-        Some(&local_id),
-        &remote_id
-    ));
-    assert!(!comment_target_is_current(
-        Some(&remote_id),
-        Some(&local_id),
-        &local_id
-    ));
-    assert!(comment_target_is_current(None, Some(&local_id), &local_id));
 }
 
 #[test]
