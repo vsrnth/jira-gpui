@@ -31,6 +31,8 @@ const ISSUE_PAGE_SIZE: usize = 1_000;
 const MAX_CACHED_ISSUES: usize = 10_000;
 const MAX_FEED_EVENTS: usize = 500;
 
+mod media;
+
 /// The cache and update feed displayed by a workspace shell.
 #[derive(Clone, Debug)]
 pub struct CachedWorkspace {
@@ -422,7 +424,7 @@ impl LiveWorkspace {
         request: AttachmentImageRequest,
         cancellation: &CancellationToken,
     ) -> Result<AttachmentImage, ApplicationError> {
-        self.media.fetch(request, cancellation).await
+        media::fetch_attachment_image(&self.media, request, cancellation).await
     }
 
     /// Fetch one bounded authenticated original attachment for an explicit download.
@@ -431,7 +433,7 @@ impl LiveWorkspace {
         request: AttachmentDownloadRequest,
         cancellation: &CancellationToken,
     ) -> Result<AttachmentContent, ApplicationError> {
-        self.media.download(request, cancellation).await
+        media::download_attachment(&self.media, request, cancellation).await
     }
 
     /// Create exactly one explicitly confirmed Jira comment. The application
@@ -1000,9 +1002,41 @@ mod tests {
         assignee_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
         watcher_filters: Mutex<Vec<Option<Vec<AccountId>>>>,
         jql_scopes: Mutex<Vec<Option<String>>>,
+        attachment_images: Mutex<VecDeque<Result<AttachmentImage, ApplicationError>>>,
+        attachment_contents: Mutex<VecDeque<Result<AttachmentContent, ApplicationError>>>,
+        attachment_image_calls: Mutex<usize>,
+        attachment_content_calls: Mutex<usize>,
     }
 
     impl FakeJira {
+        fn push_attachment_image(&self, result: Result<AttachmentImage, ApplicationError>) {
+            self.attachment_images
+                .lock()
+                .expect("attachment images lock")
+                .push_back(result);
+        }
+
+        fn push_attachment_content(&self, result: Result<AttachmentContent, ApplicationError>) {
+            self.attachment_contents
+                .lock()
+                .expect("attachment contents lock")
+                .push_back(result);
+        }
+
+        fn attachment_image_calls(&self) -> usize {
+            *self
+                .attachment_image_calls
+                .lock()
+                .expect("attachment image calls lock")
+        }
+
+        fn attachment_content_calls(&self) -> usize {
+            *self
+                .attachment_content_calls
+                .lock()
+                .expect("attachment content calls lock")
+        }
+
         fn push_page(&self, page: IssuePage) {
             self.pages.lock().expect("pages lock").push_back(page);
         }
@@ -1136,7 +1170,57 @@ mod tests {
     }
 
     impl JiraIssueActivityPort for FakeJira {}
-    impl JiraAttachmentReadPort for FakeJira {}
+
+    impl JiraAttachmentReadPort for FakeJira {
+        fn fetch_attachment_image<'a>(
+            &'a self,
+            request: &'a AttachmentImageRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, AttachmentImage> {
+            *self
+                .attachment_image_calls
+                .lock()
+                .expect("attachment image calls lock") += 1;
+            let result = self
+                .attachment_images
+                .lock()
+                .expect("attachment images lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(ApplicationError::new(
+                        ErrorKind::Internal,
+                        "missing fake attachment image",
+                    ))
+                });
+            let _ = request;
+            Box::pin(async move { result })
+        }
+
+        fn fetch_attachment_content<'a>(
+            &'a self,
+            request: &'a AttachmentDownloadRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, AttachmentContent> {
+            *self
+                .attachment_content_calls
+                .lock()
+                .expect("attachment content calls lock") += 1;
+            let result = self
+                .attachment_contents
+                .lock()
+                .expect("attachment contents lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(ApplicationError::new(
+                        ErrorKind::Internal,
+                        "missing fake attachment content",
+                    ))
+                });
+            let _ = request;
+            Box::pin(async move { result })
+        }
+    }
+
     impl JiraSyncReadPort for FakeJira {}
     impl JiraReadPort for FakeJira {}
 
@@ -1304,6 +1388,96 @@ mod tests {
             cache,
         ))
         .expect("workspace initializes")
+    }
+
+    #[test]
+    fn public_media_methods_use_one_underlying_call_and_propagate_success_or_nonfallback_errors() {
+        let successful_jira = Arc::new(FakeJira::default());
+        successful_jira.push_attachment_image(Ok(AttachmentImage {
+            attachment_id: "image-1".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: b"\x89PNG\r\n\x1a\nvalid".to_vec(),
+        }));
+        successful_jira.push_attachment_content(Ok(AttachmentContent {
+            attachment_id: "file-1".to_owned(),
+            mime_type: "application/pdf".to_owned(),
+            bytes: b"pdf".to_vec(),
+        }));
+        let successful_workspace = make_workspace(
+            successful_jira.clone(),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        );
+        let site_id = JiraSiteId::new("site").expect("site");
+        let issue_id = IssueId::new("issue").expect("issue");
+        let cancellation = CancellationToken::new();
+        let image = block_on(successful_workspace.fetch_attachment_image(
+            AttachmentImageRequest {
+                site_id: site_id.clone(),
+                issue_id: issue_id.clone(),
+                attachment_id: "image-1".to_owned(),
+                width: 1,
+                height: 1,
+                max_bytes: 1,
+            },
+            &cancellation,
+        ))
+        .expect("image success");
+        let content = block_on(successful_workspace.download_attachment(
+            AttachmentDownloadRequest {
+                site_id: site_id.clone(),
+                issue_id: issue_id.clone(),
+                attachment_id: "file-1".to_owned(),
+                max_bytes: 64 * 1024,
+            },
+            &cancellation,
+        ))
+        .expect("download success");
+        assert_eq!(image.attachment_id, "image-1");
+        assert_eq!(content.attachment_id, "file-1");
+        assert_eq!(successful_jira.attachment_image_calls(), 1);
+        assert_eq!(successful_jira.attachment_content_calls(), 1);
+
+        let failing_jira = Arc::new(FakeJira::default());
+        failing_jira.push_attachment_image(Err(ApplicationError::new(
+            ErrorKind::Offline,
+            "image service unavailable",
+        )));
+        failing_jira.push_attachment_content(Err(ApplicationError::new(
+            ErrorKind::Offline,
+            "download service unavailable",
+        )));
+        let failing_workspace = make_workspace(
+            failing_jira.clone(),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        );
+        let image_error = block_on(failing_workspace.fetch_attachment_image(
+            AttachmentImageRequest {
+                site_id: site_id.clone(),
+                issue_id: issue_id.clone(),
+                attachment_id: "image-2".to_owned(),
+                width: 1,
+                height: 1,
+                max_bytes: 1,
+            },
+            &cancellation,
+        ))
+        .expect_err("image error");
+        let content_error = block_on(failing_workspace.download_attachment(
+            AttachmentDownloadRequest {
+                site_id,
+                issue_id,
+                attachment_id: "file-2".to_owned(),
+                max_bytes: 64 * 1024,
+            },
+            &cancellation,
+        ))
+        .expect_err("download error");
+        assert_eq!(image_error.kind(), ErrorKind::Offline);
+        assert_eq!(image_error.message(), "image service unavailable");
+        assert_eq!(content_error.kind(), ErrorKind::Offline);
+        assert_eq!(content_error.message(), "download service unavailable");
+        assert_eq!(failing_jira.attachment_image_calls(), 1);
+        assert_eq!(failing_jira.attachment_content_calls(), 1);
     }
 
     fn make_edit_workspace(
