@@ -535,6 +535,54 @@ fn status_filter_rebuilds_from_loaded_domain_issues_without_remote_state() {
     assert_eq!(done[0].key, "DESK-163");
 }
 
+#[gpui::test]
+fn selected_without_workspace_finishes_epoch_and_drops_task(cx: &mut gpui::TestAppContext) {
+    let dashboard = cx.new(|_| Dashboard::from_sample_data());
+    let issue_id = sample_issues().into_iter().next().expect("issue").id;
+    let before_generation = cx.read_entity(&dashboard, |dashboard, _| {
+        dashboard.detail_epoch.generation()
+    });
+
+    cx.update_entity(&dashboard, |dashboard, cx| {
+        dashboard.select_issue(issue_id, cx, true);
+    });
+
+    let (generation, idle, task_is_none, state) = cx.read_entity(&dashboard, |dashboard, _| {
+        (
+            dashboard.detail_epoch.generation(),
+            dashboard.detail_epoch.is_idle(),
+            dashboard.detail_task.is_none(),
+            dashboard.detail_state.clone(),
+        )
+    });
+    assert_eq!(generation, before_generation + 1);
+    assert!(
+        idle,
+        "workspace-unavailable selection must not retain a ticket"
+    );
+    assert!(task_is_none);
+    assert_eq!(state, DetailState::Empty);
+}
+
+#[test]
+fn selected_supersession_and_invalidation_cancel_exactly_the_prior_ticket() {
+    let mut dashboard = Dashboard::from_sample_data();
+    let first = dashboard.detail_epoch.begin(
+        RequestSource::SelectedDetail,
+        IssueId::new("10001").expect("issue"),
+    );
+    let second = dashboard.detail_epoch.begin(
+        RequestSource::SelectedDetail,
+        IssueId::new("10002").expect("issue"),
+    );
+
+    assert!(first.cancellation().is_cancelled());
+    assert!(dashboard.detail_epoch.is_current(&second));
+    dashboard.invalidate_detail_selection();
+    assert!(second.cancellation().is_cancelled());
+    assert!(dashboard.detail_epoch.is_idle());
+}
+
 #[test]
 fn stale_detail_results_are_rejected_after_selection_changes() {
     let first = IssueId::new("10001").expect("issue");
@@ -1183,12 +1231,16 @@ fn clearing_search_cancels_and_removes_remote_result() {
         query: "IX-404".to_owned(),
         message: "not found".to_owned(),
     };
-    let generation = dashboard.remote_lookup_generation;
+    let ticket = dashboard
+        .remote_lookup_epoch
+        .begin(RequestSource::RemoteLookup, "IX-404".to_owned());
+    let generation = dashboard.remote_lookup_epoch.generation();
 
     dashboard.clear_remote_lookup();
 
+    assert!(ticket.cancellation().is_cancelled());
     assert_eq!(dashboard.remote_lookup, RemoteLookupState::Idle);
-    assert_eq!(dashboard.remote_lookup_generation, generation + 1);
+    assert_eq!(dashboard.remote_lookup_epoch.generation(), generation + 1);
 }
 
 #[test]

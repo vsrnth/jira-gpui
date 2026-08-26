@@ -66,8 +66,10 @@ use crate::{
 };
 
 mod comment_flow;
+mod detail_payload;
 mod issue_edit_flow;
 mod media;
+mod request_epoch;
 mod settings;
 
 use comment_flow::{CommentCompletion, CommentFlow, CommentInvalidation, CommentTarget};
@@ -78,14 +80,18 @@ use issue_edit_flow::{
 #[cfg(test)]
 use issue_edit_flow::{issue_edit_error_message, issue_edit_target_is_current};
 
+use detail_payload::{
+    DetailReadRequest, detail_image_issue_id, fetch_detail_images, prepare_detail_payload,
+    read_detail,
+};
 use media::{
     AttachmentDownloadState, MAX_ATTACHMENT_DOWNLOAD_BYTES, attachment_download_button_label,
     attachment_download_is_current, attachment_issue_id, attachment_temp_path,
-    attachment_temp_token, cleanup_attachment_temp, collect_detail_images_with_context,
-    fetch_rich_image_states, image_result_is_current, inline_attachment_for_download,
-    loading_image_states, portal_download_directory, rich_image_contexts,
-    sanitized_attachment_filename, write_attachment_temp,
+    attachment_temp_token, cleanup_attachment_temp, image_result_is_current,
+    inline_attachment_for_download, portal_download_directory, sanitized_attachment_filename,
+    write_attachment_temp,
 };
+use request_epoch::{RequestEpoch, RequestSource, RequestTicket};
 
 fn safe_sync_error(error: &ApplicationError) -> &'static str {
     match error.kind() {
@@ -505,6 +511,7 @@ fn detail_result_is_current(
     generation == expected_generation && selected_issue == Some(expected_issue)
 }
 
+#[cfg(test)]
 fn remote_lookup_result_is_current(
     current_query: &str,
     expected_query: &str,
@@ -629,14 +636,12 @@ pub struct Dashboard {
     search_subscriptions: Vec<Subscription>,
     detail_state: DetailState,
     detail_sidebar_width: Pixels,
-    detail_generation: u64,
-    detail_cancellation: Option<CancellationToken>,
+    detail_epoch: RequestEpoch<RequestSource, IssueId>,
     detail_task: Option<gpui::Task<()>>,
     selected_image_states: RichImageRenderStates,
     remote_image_states: RichImageRenderStates,
     remote_lookup: RemoteLookupState,
-    remote_lookup_generation: u64,
-    remote_lookup_cancellation: Option<CancellationToken>,
+    remote_lookup_epoch: RequestEpoch<RequestSource, String>,
     remote_lookup_task: Option<gpui::Task<()>>,
     comment_input: Option<Entity<TextareaState>>,
     comment_subscriptions: Vec<Subscription>,
@@ -665,6 +670,19 @@ pub struct Dashboard {
 }
 
 impl Dashboard {
+    fn selected_detail_ticket_is_current(
+        &self,
+        ticket: &RequestTicket<RequestSource, IssueId>,
+    ) -> bool {
+        self.detail_epoch.is_current(ticket)
+            && image_result_is_current(
+                self.selected_issue.as_ref(),
+                ticket.key(),
+                ticket.generation(),
+                ticket.generation(),
+            )
+    }
+
     #[cfg(test)]
     pub fn from_sample_data() -> Self {
         Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled())
@@ -720,8 +738,7 @@ impl Dashboard {
             search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
             detail_sidebar_width: px(DETAIL_SIDEBAR_DEFAULT_WIDTH),
-            detail_generation: 0,
-            detail_cancellation: None,
+            detail_epoch: RequestEpoch::default(),
             detail_task: None,
             selected_image_states: RichImageRenderStates::with_context(
                 diagnostics.clone(),
@@ -734,8 +751,7 @@ impl Dashboard {
                 0,
             ),
             remote_lookup: RemoteLookupState::Idle,
-            remote_lookup_generation: 0,
-            remote_lookup_cancellation: None,
+            remote_lookup_epoch: RequestEpoch::default(),
             remote_lookup_task: None,
             comment_input: None,
             comment_subscriptions: Vec::new(),
@@ -818,8 +834,7 @@ impl Dashboard {
             search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
             detail_sidebar_width: px(DETAIL_SIDEBAR_DEFAULT_WIDTH),
-            detail_generation: 0,
-            detail_cancellation: None,
+            detail_epoch: RequestEpoch::default(),
             detail_task: None,
             selected_image_states: RichImageRenderStates::with_context(
                 diagnostics.clone(),
@@ -832,8 +847,7 @@ impl Dashboard {
                 0,
             ),
             remote_lookup: RemoteLookupState::Idle,
-            remote_lookup_generation: 0,
-            remote_lookup_cancellation: None,
+            remote_lookup_epoch: RequestEpoch::default(),
             remote_lookup_task: None,
             comment_input: None,
             comment_subscriptions: Vec::new(),
@@ -1160,11 +1174,8 @@ impl Dashboard {
     fn clear_remote_lookup(&mut self) {
         self.invalidate_attachment_download();
         self.remote_image_states.clear();
-        if let Some(cancellation) = self.remote_lookup_cancellation.take() {
-            cancellation.cancel();
-        }
+        self.remote_lookup_epoch.invalidate();
         self.remote_lookup_task.take();
-        self.remote_lookup_generation = self.remote_lookup_generation.wrapping_add(1);
         self.remote_lookup = RemoteLookupState::Idle;
         self.issue_edit_flow.set_status_popover_open(false);
     }
@@ -1186,7 +1197,16 @@ impl Dashboard {
 
         let load_token = self.diagnostics.begin_image_load();
         self.invalidate_comment_selection();
+        let expected_query = query.clone();
+        let ticket = self
+            .remote_lookup_epoch
+            .begin(RequestSource::RemoteLookup, expected_query.clone());
+        // Drop the prior task at the same point as its cancellation: before
+        // installing or spawning the replacement task.
+        self.remote_lookup_task.take();
         let Some(workspace) = self.workspace.clone() else {
+            self.remote_lookup_epoch.finish(&ticket);
+            self.remote_image_states.clear();
             self.remote_lookup = RemoteLookupState::Error {
                 query,
                 message: "Jira lookup unavailable · live workspace is not ready".to_owned(),
@@ -1195,40 +1215,28 @@ impl Dashboard {
             return;
         };
 
-        if let Some(cancellation) = self.remote_lookup_cancellation.take() {
-            cancellation.cancel();
-        }
-        self.remote_lookup_task.take();
-        self.remote_lookup_generation = self.remote_lookup_generation.wrapping_add(1);
-        let generation = self.remote_lookup_generation;
-        let cancellation = CancellationToken::new();
-        self.remote_lookup_cancellation = Some(cancellation.clone());
+        let cancellation = ticket.cancellation().clone();
         self.remote_image_states.set_context(
             self.diagnostics.clone(),
             DiagnosticFlow::RemoteLookup,
             load_token,
         );
         self.remote_lookup = RemoteLookupState::Loading {
-            query: query.clone(),
+            query: expected_query.clone(),
         };
-        let expected_query = query.clone();
+        let read_request = DetailReadRequest::Remote { key };
         let users = self.users.clone();
         let diagnostics = self.diagnostics.clone();
         let task = cx.spawn(async move |this, cx| {
-            let result = workspace.lookup_issue(key, &cancellation).await;
+            let result = read_detail(workspace.as_ref(), read_request.clone(), &cancellation).await;
             let detail = match result {
                 Ok(detail) => detail,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        if !remote_lookup_result_is_current(
-                            &this.search_query,
-                            &expected_query,
-                            this.remote_lookup_generation,
-                            generation,
-                        ) {
+                        if !this.remote_lookup_epoch.is_current(&ticket) {
                             return;
                         }
-                        this.remote_lookup_cancellation = None;
+                        this.remote_lookup_epoch.finish(&ticket);
                         this.remote_lookup_task = None;
                         this.remote_image_states.clear();
                         this.remote_lookup = RemoteLookupState::Error {
@@ -1240,31 +1248,27 @@ impl Dashboard {
                     return;
                 }
             };
-            let issue = detail.core.issue.clone();
-            let view = IssueDetailViewModel::from_domain(&detail, &users);
-            let images = collect_detail_images_with_context(&view);
-            let image_contexts = rich_image_contexts(&images);
-            let loading = loading_image_states(
-                &images,
+            let payload = prepare_detail_payload(
+                &detail,
+                &users,
                 &diagnostics,
                 DiagnosticFlow::RemoteLookup,
                 load_token,
             );
-            let site_id = workspace.site_id().clone();
+            let image_contexts = payload.image_contexts.clone();
+            let issue = payload.issue.clone();
+            let image_issue_id = detail_image_issue_id(&read_request, &issue.id);
+            let view = payload.view.clone();
+            let loading = payload.loading.clone();
             let applied = this
                 .update(cx, |this, cx| {
-                    if !remote_lookup_result_is_current(
-                        &this.search_query,
-                        &expected_query,
-                        this.remote_lookup_generation,
-                        generation,
-                    ) {
+                    if !this.remote_lookup_epoch.is_current(&ticket) {
                         return false;
                     }
                     this.remote_lookup = RemoteLookupState::Loaded {
                         query: expected_query.clone(),
-                        issue: issue.clone(),
-                        detail: view.clone(),
+                        issue,
+                        detail: view,
                     };
                     this.remote_image_states = loading;
                     cx.notify();
@@ -1286,11 +1290,10 @@ impl Dashboard {
                 }
                 return;
             }
-            let states = fetch_rich_image_states(
+            let states = fetch_detail_images(
                 workspace,
-                site_id,
-                issue.id.clone(),
-                images,
+                image_issue_id,
+                payload,
                 cancellation,
                 diagnostics.clone(),
                 DiagnosticFlow::RemoteLookup,
@@ -1299,15 +1302,10 @@ impl Dashboard {
             .await;
             let applied = this
                 .update(cx, |this, cx| {
-                    if !remote_lookup_result_is_current(
-                        &this.search_query,
-                        &expected_query,
-                        this.remote_lookup_generation,
-                        generation,
-                    ) {
+                    if !this.remote_lookup_epoch.is_current(&ticket) {
                         return false;
                     }
-                    this.remote_lookup_cancellation = None;
+                    this.remote_lookup_epoch.finish(&ticket);
                     this.remote_lookup_task = None;
                     if let Ok(states) = states {
                         this.remote_image_states = states;
@@ -1338,11 +1336,8 @@ impl Dashboard {
     fn invalidate_detail_selection(&mut self) {
         self.invalidate_attachment_download();
         self.selected_image_states.clear();
-        if let Some(cancellation) = self.detail_cancellation.take() {
-            cancellation.cancel();
-        }
+        self.detail_epoch.invalidate();
         self.detail_task.take();
-        self.detail_generation = self.detail_generation.wrapping_add(1);
         self.selected_issue = None;
         self.selected_issue_core = None;
         self.detail_state = DetailState::Empty;
@@ -1406,9 +1401,9 @@ impl Dashboard {
             return;
         }
         let load_token = self.diagnostics.begin_image_load();
-        if let Some(cancellation) = self.detail_cancellation.take() {
-            cancellation.cancel();
-        }
+        let ticket = self
+            .detail_epoch
+            .begin(RequestSource::SelectedDetail, issue_id.clone());
         self.invalidate_attachment_download();
         self.selected_image_states.set_context(
             self.diagnostics.clone(),
@@ -1417,44 +1412,40 @@ impl Dashboard {
         );
         self.invalidate_comment_selection();
         self.invalidate_issue_edit_selection();
+        // Preserve the prior task-drop position after all selection
+        // invalidations; begin above already cancelled its token.
         self.detail_task.take();
-        self.detail_generation = self.detail_generation.wrapping_add(1);
         if selection_changed {
             self.selected_issue_core = None;
         }
-        let generation = self.detail_generation;
         self.selected_issue = Some(issue_id.clone());
 
         let Some(workspace) = self.workspace.clone() else {
+            self.detail_epoch.finish(&ticket);
             self.detail_state = DetailState::Empty;
             cx.notify();
             return;
         };
 
-        let cancellation = CancellationToken::new();
-        self.detail_cancellation = Some(cancellation.clone());
+        let cancellation = ticket.cancellation().clone();
         self.detail_state = DetailState::Loading {
+            issue_id: issue_id.clone(),
+        };
+        let read_request = DetailReadRequest::Selected {
             issue_id: issue_id.clone(),
         };
         let users = self.users.clone();
         let diagnostics = self.diagnostics.clone();
         let task = cx.spawn(async move |this, cx| {
-            let result = workspace
-                .fetch_issue_detail(IssueLocator::Id(issue_id.clone()), &cancellation)
-                .await;
+            let result = read_detail(workspace.as_ref(), read_request.clone(), &cancellation).await;
             let detail = match result {
                 Ok(detail) => detail,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        if !detail_result_is_current(
-                            this.selected_issue.as_ref(),
-                            &issue_id,
-                            this.detail_generation,
-                            generation,
-                        ) {
+                        if !this.selected_detail_ticket_is_current(&ticket) {
                             return;
                         }
-                        this.detail_cancellation = None;
+                        this.detail_epoch.finish(&ticket);
                         this.detail_task = None;
                         this.selected_image_states.clear();
                         this.detail_state = DetailState::Error {
@@ -1466,29 +1457,25 @@ impl Dashboard {
                     return;
                 }
             };
-            let issue = detail.core.issue.clone();
-            let view = IssueDetailViewModel::from_domain(&detail, &users);
-            let images = collect_detail_images_with_context(&view);
-            let image_contexts = rich_image_contexts(&images);
-            let loading = loading_image_states(
-                &images,
+            let payload = prepare_detail_payload(
+                &detail,
+                &users,
                 &diagnostics,
                 DiagnosticFlow::SelectedDetail,
                 load_token,
             );
-            let site_id = workspace.site_id().clone();
+            let image_contexts = payload.image_contexts.clone();
+            let issue = payload.issue.clone();
+            let image_issue_id = detail_image_issue_id(&read_request, &issue.id);
+            let view = payload.view.clone();
+            let loading = payload.loading.clone();
             let applied = this
                 .update(cx, |this, cx| {
-                    if !image_result_is_current(
-                        this.selected_issue.as_ref(),
-                        &issue_id,
-                        this.detail_generation,
-                        generation,
-                    ) {
+                    if !this.selected_detail_ticket_is_current(&ticket) {
                         return false;
                     }
-                    this.selected_issue_core = Some(issue.clone());
-                    this.detail_state = DetailState::Loaded(view.clone());
+                    this.selected_issue_core = Some(issue);
+                    this.detail_state = DetailState::Loaded(view);
                     this.selected_image_states = loading;
                     cx.notify();
                     true
@@ -1509,11 +1496,10 @@ impl Dashboard {
                 }
                 return;
             }
-            let states = fetch_rich_image_states(
+            let states = fetch_detail_images(
                 workspace,
-                site_id,
-                issue_id.clone(),
-                images,
+                image_issue_id,
+                payload,
                 cancellation,
                 diagnostics.clone(),
                 DiagnosticFlow::SelectedDetail,
@@ -1522,15 +1508,10 @@ impl Dashboard {
             .await;
             let applied = this
                 .update(cx, |this, cx| {
-                    if !image_result_is_current(
-                        this.selected_issue.as_ref(),
-                        &issue_id,
-                        this.detail_generation,
-                        generation,
-                    ) {
+                    if !this.selected_detail_ticket_is_current(&ticket) {
                         return false;
                     }
-                    this.detail_cancellation = None;
+                    this.detail_epoch.finish(&ticket);
                     this.detail_task = None;
                     if let Ok(states) = states {
                         this.selected_image_states = states;
