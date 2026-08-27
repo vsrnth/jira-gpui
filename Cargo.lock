@@ -3421,6 +3421,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "image",
  "jira-application",
  "jira-desktop-notifications",
  "jira-domain",

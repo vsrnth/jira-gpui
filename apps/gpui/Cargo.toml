@@ -15,13 +15,14 @@ required-features = ["ui-lab"]
 default = []
 # Development-only native UI capture lab. This enables GPUI's direct offscreen
 # Metal renderer without changing the production binary or its package.
-ui-lab = ["gpui/test-support", "gpui_platform/test-support"]
+ui-lab = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
 
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+image = { workspace = true, optional = true }
 jira-application = { path = "../../crates/application" }
 jira-desktop-notifications = { path = "../../crates/desktop-notifications" }
 jira-domain = { path = "../../crates/domain" }

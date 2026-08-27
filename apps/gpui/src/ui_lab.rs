@@ -5,18 +5,15 @@
 
 use std::path::PathBuf;
 
+pub(crate) mod publication;
+
 #[cfg(target_os = "macos")]
-use std::{
-    fs::{self, OpenOptions},
-    io::ErrorKind,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{fs, path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
+
+pub mod matrix;
+pub mod visual;
 #[cfg(target_os = "macos")]
 use gpui::{AppContext as _, Size, VisualTestAppContext, px, size};
 #[cfg(target_os = "macos")]
@@ -191,9 +188,6 @@ pub struct UiLabCaptureReport {
     pub height: u32,
 }
 
-#[cfg(target_os = "macos")]
-static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
-
 /// Captures one scenario directly from GPUI's offscreen renderer.
 #[cfg(target_os = "macos")]
 pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
@@ -257,66 +251,17 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
         (image, report)
     };
 
-    publish_png(&request.output, |temporary| {
-        image.save(temporary).map_err(anyhow::Error::from)
+    publish_png(&request.output, |file| {
+        image
+            .write_to(file, image::ImageFormat::Png)
+            .map_err(anyhow::Error::from)
     })?;
     Ok(report)
 }
 
 #[cfg(target_os = "macos")]
-fn unique_temporary_path(output: &Path) -> Result<PathBuf> {
-    let parent = output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let name = output
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("output path must name a PNG file"))?
-        .to_string_lossy();
-    for _ in 0..100 {
-        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let path = parent.join(format!(
-            ".{name}.jira-ui-capture-{}-{id}.png",
-            std::process::id()
-        ));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => {
-                drop(file);
-                return Ok(path);
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("create temporary PNG {}", path.display()));
-            }
-        }
-    }
-    bail!(
-        "could not allocate a unique temporary PNG beside {}",
-        output.display()
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn publish_png(output: &Path, save: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-    if let Some(parent) = output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create capture directory {}", parent.display()))?;
-    }
-    let temporary = unique_temporary_path(output)?;
-    let result = (|| {
-        save(&temporary).with_context(|| format!("write temporary PNG {}", temporary.display()))?;
-        fs::rename(&temporary, output)
-            .with_context(|| format!("atomically publish PNG {}", output.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+fn publish_png(output: &Path, save: impl FnOnce(&mut fs::File) -> Result<()>) -> Result<()> {
+    publication::publish_file(output, "capture", save)
 }
 
 /// Returns a clear platform error instead of making the normal Linux binary a second capture
@@ -338,9 +283,9 @@ mod tests {
     };
 
     #[cfg(target_os = "macos")]
-    use super::{NEXT_TEMP_ID, publish_png, unique_temporary_path};
+    use super::{publication::create_temporary_file, publish_png};
     #[cfg(target_os = "macos")]
-    use std::{fs, path::Path};
+    use std::{fs, io::Write, path::Path};
 
     #[test]
     fn scenario_parser_accepts_only_named_semantic_scenarios() {
@@ -434,41 +379,32 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn temporary_capture_paths_are_unique_pngs() {
-        let root = std::env::temp_dir().join(format!(
-            "jira-ui-lab-test-{}-{}",
-            std::process::id(),
-            NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+    fn temporary_capture_files_are_unique_and_reserved() {
+        let root = std::env::temp_dir().join(format!("jira-ui-lab-test-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let output = root.join("capture.png");
-        let first = unique_temporary_path(Path::new(&output)).unwrap();
-        let second = unique_temporary_path(Path::new(&output)).unwrap();
+        let (first, first_file) = create_temporary_file(Path::new(&output), "capture").unwrap();
+        let (second, second_file) = create_temporary_file(Path::new(&output), "capture").unwrap();
         assert_ne!(first, second);
-        assert_eq!(
-            first.extension().and_then(|value| value.to_str()),
-            Some("png")
-        );
-        assert_eq!(
-            second.extension().and_then(|value| value.to_str()),
-            Some("png")
-        );
+        drop(first_file);
+        drop(second_file);
+        fs::remove_file(first).unwrap();
+        fs::remove_file(second).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn png_publish_is_atomic_and_cleans_failed_temporary_files() {
-        let root = std::env::temp_dir().join(format!(
-            "jira-ui-lab-publish-test-{}-{}",
-            std::process::id(),
-            NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let root =
+            std::env::temp_dir().join(format!("jira-ui-lab-publish-test-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let output = root.join("capture.png");
 
         publish_png(Path::new(&output), |temporary| {
-            fs::write(temporary, b"published PNG bytes").map_err(anyhow::Error::from)
+            temporary
+                .write_all(b"published PNG bytes")
+                .map_err(anyhow::Error::from)
         })
         .unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"published PNG bytes");
