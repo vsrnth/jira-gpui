@@ -1,11 +1,15 @@
 use super::*;
+use crate::responsive::{effective_sidebar_is_rail, effective_sidebar_width};
+use gpui_component::{Selectable, tooltip::Tooltip};
 
 impl Dashboard {
     fn render_sidebar(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
-        let rail = layout.is_rail();
+        let rail = effective_sidebar_is_rail(layout, self.sidebar_collapsed);
         v_flex()
+            .id("dashboard-sidebar")
+            .debug_selector(|| "dashboard-sidebar".to_owned())
             .h_full()
-            .w(px(layout.sidebar_width()))
+            .w(px(effective_sidebar_width(layout, self.sidebar_collapsed)))
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
@@ -19,54 +23,71 @@ impl Dashboard {
                     .when(rail, |this| this.justify_center().px_2().gap_0())
                     .border_b_1()
                     .border_color(cx.theme().sidebar_border)
-                    .child(
+                    .child(if !rail {
+                        h_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .size_8()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(cx.theme().radius)
+                                    .bg(cx.theme().sidebar_primary)
+                                    .text_color(cx.theme().sidebar_primary_foreground)
+                                    .font_bold()
+                                    .child("JD"),
+                            )
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .child(self.workspace_name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(self.workspace_members.clone()),
+                                    ),
+                            )
+                            .child(self.render_sidebar_toggle(layout, false, cx))
+                            .into_any_element()
+                    } else if self.sidebar_collapsed && layout.supports_manual_sidebar_collapse() {
+                        self.render_sidebar_toggle(layout, true, cx)
+                            .into_any_element()
+                    } else {
                         div()
                             .flex()
-                            .size_9()
+                            .size_8()
                             .items_center()
                             .justify_center()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().sidebar_primary)
                             .text_color(cx.theme().sidebar_primary_foreground)
                             .font_bold()
-                            .child("JD"),
-                    )
-                    .child(v_flex().min_w_0().gap_0p5().when(!rail, |this| {
-                        this.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .font_semibold()
-                                .child(self.workspace_name.clone()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(self.workspace_members.clone()),
-                        )
-                    })),
+                            .child("JD")
+                            .into_any_element()
+                    }),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .p_3()
+                    .when(rail, |this| this.p_2())
                     .gap_1()
-                    .when(!rail, |this| {
-                        this.child(
-                            div()
-                                .px_3()
-                                .pt_2()
-                                .pb_1()
-                                .text_xs()
-                                .font_semibold()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Workspace"),
-                        )
-                    })
                     .child(self.nav_item(
                         "Issues",
                         Some(self.issues.len()),
@@ -123,6 +144,49 @@ impl Dashboard {
             })
     }
 
+    fn render_sidebar_toggle(
+        &self,
+        layout: LayoutMode,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (icon, label) = if collapsed {
+            (IconName::PanelLeftOpen, "Expand sidebar")
+        } else {
+            (IconName::PanelLeftClose, "Collapse sidebar")
+        };
+
+        div()
+            .id("sidebar-toggle")
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(label)
+            .tab_index(0)
+            .size(px(32.))
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .rounded(cx.theme().radius)
+            .text_color(cx.theme().sidebar_foreground)
+            .cursor_pointer()
+            .hover(|style| {
+                style
+                    .bg(cx.theme().sidebar_accent)
+                    .text_color(cx.theme().sidebar_accent_foreground)
+            })
+            .focus(|style| style.border_1().border_color(cx.theme().primary))
+            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_sidebar(layout, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if is_activation_key(event) {
+                    window.prevent_default();
+                    this.toggle_sidebar(layout, cx);
+                }
+            }))
+            .child(Icon::new(icon).size(px(16.)))
+    }
+
     fn nav_item(
         &self,
         label: &'static str,
@@ -152,25 +216,28 @@ impl Dashboard {
         div()
             .id(label)
             .role(gpui::accesskit::Role::Button)
-            .aria_label(tooltip)
+            .aria_label(tooltip.clone())
             .aria_selected(selected)
             .tab_index(0)
             .w_full()
+            .h(px(36.))
             .px_3()
-            .py_2()
             .rounded(cx.theme().radius)
             .accessibility_id(label)
             .cursor_pointer()
             .when(selected, |this| {
                 this.bg(cx.theme().sidebar_accent)
-                    .border_l_2()
-                    .border_color(cx.theme().primary)
                     .text_color(cx.theme().sidebar_accent_foreground)
             })
             .when(!selected, |this| {
                 this.hover(|style| style.bg(cx.theme().sidebar_accent))
             })
-            .when(rail, |this| this.w(px(48.)).overflow_hidden().px_1())
+            .when(rail, |this| {
+                this.w(px(48.))
+                    .overflow_hidden()
+                    .px_1()
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.activate_section(section, cx);
             }))
@@ -196,14 +263,9 @@ impl Dashboard {
                         this.child(
                             div()
                                 .flex_shrink_0()
-                                .min_w(px(26.))
                                 .ml_auto()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(cx.theme().muted)
-                                .text_center()
                                 .text_xs()
+                                .text_color(cx.theme().muted_foreground)
                                 .child(count.to_string()),
                         )
                     }),
@@ -229,73 +291,37 @@ impl Dashboard {
         cx.notify();
     }
 
-    fn render_header(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
-        let mobile = layout.is_mobile();
+    fn render_mobile_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .id("header")
-            .debug_selector(|| "header".to_owned())
-            .h(px(if mobile { 88. } else { 76. }))
-            .px(px(if mobile { 12. } else { 20. }))
-            .py(px(if mobile { 9. } else { 10. }))
+            .id("mobile-sync-status")
+            .debug_selector(|| "mobile-sync-status".to_owned())
+            .w_full()
+            .min_w_0()
             .flex_shrink_0()
+            .px_3()
+            .py_2()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_lg()
-                            .font_semibold()
-                            .child(match self.section {
-                                Section::Issues => "Jira issues",
-                                Section::Updates => "Local updates",
-                                Section::Team => "Team tracker",
-                                Section::Settings => "Settings",
-                            }),
-                    )
-                    .when(self.section != Section::Settings, |this| {
-                        this.child(
-                            Button::new("refresh")
-                                .compact()
-                                .primary()
-                                .flex_shrink_0()
-                                .label(if self.operation_in_progress {
-                                    "Refreshing…"
-                                } else {
-                                    "Refresh"
-                                })
-                                .loading(self.operation_in_progress)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.begin_refresh(window, cx)
-                                })),
-                        )
-                    }),
-            )
-            .child(
                 div()
-                    .flex_1()
+                    .id("mobile-sync-status-text")
+                    .aria_label(self.sync_message.clone())
                     .min_w_0()
-                    .max_w(px(if mobile { 420. } else { 720. }))
-                    .max_h(px(if mobile { 44. } else { 36. }))
+                    .max_h(px(56.))
                     .overflow_y_scrollbar()
                     .whitespace_normal()
                     .text_xs()
-                    .px_2()
-                    .py_1()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().secondary.opacity(0.45))
                     .text_color(cx.theme().muted_foreground)
                     .child(self.sync_message.clone()),
             )
     }
 
     fn render_mobile_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let issues_active = self.section == Section::Issues;
+        let updates_active = self.section == Section::Updates;
+        let team_active = self.section == Section::Team;
+        let settings_active = self.section == Section::Settings;
+
         h_flex()
             .w_full()
             .h(px(48.))
@@ -311,7 +337,9 @@ impl Dashboard {
                     .compact()
                     .flex_1()
                     .min_w(px(76.))
-                    .when(self.section == Section::Issues, |this| this.primary())
+                    .selected(issues_active)
+                    .toggled(issues_active)
+                    .when(issues_active, |this| this.primary())
                     .label(format!("Issues · {}", self.issues.len()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.section = Section::Issues;
@@ -324,7 +352,9 @@ impl Dashboard {
                     .compact()
                     .flex_1()
                     .min_w(px(76.))
-                    .when(self.section == Section::Updates, |this| this.primary())
+                    .selected(updates_active)
+                    .toggled(updates_active)
+                    .when(updates_active, |this| this.primary())
                     .label(format!("Updates · {}", self.unread_count()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.section = Section::Updates;
@@ -337,7 +367,9 @@ impl Dashboard {
                     .compact()
                     .flex_1()
                     .min_w(px(76.))
-                    .when(self.section == Section::Team, |this| this.primary())
+                    .selected(team_active)
+                    .toggled(team_active)
+                    .when(team_active, |this| this.primary())
                     .label(format!("Team · {}", team_issue_counts(&self.team_issues).1))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if this.selected_issue.as_ref().is_some_and(|selected| {
@@ -362,7 +394,9 @@ impl Dashboard {
                     .compact()
                     .flex_1()
                     .min_w(px(76.))
-                    .when(self.section == Section::Settings, |this| this.primary())
+                    .selected(settings_active)
+                    .toggled(settings_active)
+                    .when(settings_active, |this| this.primary())
                     .label("Settings")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.section = Section::Settings;
@@ -389,6 +423,7 @@ impl Render for Dashboard {
                 f32::from(window.viewport_size().width),
                 layout,
                 table_mode,
+                self.sidebar_collapsed,
             ));
         }
         let content = match self.section {
@@ -405,10 +440,11 @@ impl Render for Dashboard {
         };
 
         let main = v_flex()
+            .id("dashboard-main")
+            .debug_selector(|| "dashboard-main".to_owned())
             .h_full()
             .min_w_0()
             .flex_1()
-            .child(self.render_header(layout, cx))
             .child(div().min_w_0().min_h_0().flex_1().child(content));
 
         if layout.is_mobile() {
@@ -418,6 +454,10 @@ impl Render for Dashboard {
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(self.render_mobile_nav(cx))
+                .when(
+                    status_placement_for_layout(layout) == HeaderStatusPlacement::MobileRow,
+                    |this| this.child(self.render_mobile_status(cx)),
+                )
                 .child(main)
         } else {
             h_flex()

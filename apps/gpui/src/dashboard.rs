@@ -5,13 +5,13 @@ use time::UtcOffset;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px,
+    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, Theme, WindowExt as _,
     button::Button,
     button::ButtonVariants as _,
     combobox::{Combobox, ComboboxEvent, ComboboxState},
@@ -39,6 +39,7 @@ use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 use crate::sample_data::{sample_issues, sample_updates, sample_users};
 
 use crate::{
+    app_shell::AppearancePreference,
     config::{LiveSession, ensure_authenticated_user},
     credential_store::{self, DeleteOutcome},
     diagnostics::{
@@ -211,6 +212,45 @@ enum Section {
     Updates,
     Team,
     Settings,
+}
+
+impl Section {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Issues => "Jira issues",
+            Self::Updates => "Local updates",
+            Self::Team => "Team tracker",
+            Self::Settings => "Settings",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeaderStatusPlacement {
+    TitleBar,
+    MobileRow,
+}
+
+pub(crate) fn status_placement_for_layout(layout: LayoutMode) -> HeaderStatusPlacement {
+    if layout.is_mobile() {
+        HeaderStatusPlacement::MobileRow
+    } else {
+        HeaderStatusPlacement::TitleBar
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DashboardHeaderSnapshot {
+    pub(crate) section_label: &'static str,
+    pub(crate) sync_message: String,
+    pub(crate) refreshing: bool,
+    pub(crate) refresh_visible: bool,
+    pub(crate) sidebar_collapsed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DashboardEvent {
+    AppearanceChanged(AppearancePreference),
 }
 
 #[cfg(feature = "ui-lab")]
@@ -520,6 +560,8 @@ fn should_defer_detail_refresh(
 pub struct Dashboard {
     diagnostics: DiagnosticsSink,
     section: Section,
+    sidebar_collapsed: bool,
+    appearance_preference: AppearancePreference,
     domain_issues: Vec<Issue>,
     issues: Vec<IssueViewModel>,
     update_groups: Vec<UpdateGroupViewModel>,
@@ -596,7 +638,50 @@ pub struct Dashboard {
     desktop_notification_test_task: Option<gpui::Task<()>>,
 }
 
+impl EventEmitter<DashboardEvent> for Dashboard {}
+
 impl Dashboard {
+    #[cfg(any(test, feature = "ui-lab"))]
+    pub(crate) fn initialize_appearance_preference(&mut self, preference: AppearancePreference) {
+        self.appearance_preference = preference;
+    }
+
+    pub(crate) fn select_appearance_preference(
+        &mut self,
+        preference: AppearancePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.appearance_preference = preference;
+        match preference.manual_theme_mode() {
+            Some(mode) => Theme::change(mode, Some(window), cx),
+            None => Theme::sync_system_appearance(Some(window), cx),
+        }
+        cx.emit(DashboardEvent::AppearanceChanged(preference));
+        cx.notify();
+    }
+
+    pub(crate) fn header_snapshot(&self) -> DashboardHeaderSnapshot {
+        DashboardHeaderSnapshot {
+            section_label: self.section.label(),
+            sync_message: self.sync_message.clone(),
+            refreshing: self.operation_in_progress,
+            refresh_visible: self.section != Section::Settings,
+            sidebar_collapsed: self.sidebar_collapsed,
+        }
+    }
+
+    pub(crate) fn toggle_sidebar(&mut self, layout: LayoutMode, cx: &mut Context<Self>) {
+        if layout.supports_manual_sidebar_collapse() {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn begin_refresh_from_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_refresh(window, cx);
+    }
+
     fn selected_detail_ticket_is_current(
         &self,
         ticket: &RequestTicket<RequestSource, IssueId>,
@@ -688,6 +773,8 @@ impl Dashboard {
         Self {
             diagnostics: diagnostics.clone(),
             section,
+            sidebar_collapsed: false,
+            appearance_preference: AppearancePreference::System,
             domain_issues,
             issues,
             update_groups,
@@ -781,6 +868,8 @@ impl Dashboard {
         let dashboard = Self {
             diagnostics: diagnostics.clone(),
             section: Section::Issues,
+            sidebar_collapsed: false,
+            appearance_preference: AppearancePreference::System,
             domain_issues: Vec::new(),
             issues: Vec::new(),
             update_groups: Vec::new(),

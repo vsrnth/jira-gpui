@@ -53,6 +53,10 @@ impl LayoutMode {
         matches!(self, Self::Compact)
     }
 
+    pub(crate) fn supports_manual_sidebar_collapse(self) -> bool {
+        matches!(self, Self::Standard | Self::Wide)
+    }
+
     pub(crate) fn sidebar_width(self) -> f32 {
         match self {
             Self::Wide => 236.0,
@@ -119,9 +123,29 @@ impl LayoutMode {
     }
 }
 
+/// Returns whether the dashboard should render its desktop sidebar as an icon rail.
+/// Compact is always a rail; only Standard and Wide honor the manual preference.
+pub(crate) fn effective_sidebar_is_rail(layout: LayoutMode, manually_collapsed: bool) -> bool {
+    layout.is_rail() || (layout.supports_manual_sidebar_collapse() && manually_collapsed)
+}
+
+/// Returns the sidebar space reserved by the dashboard for this layout and preference.
+pub(crate) fn effective_sidebar_width(layout: LayoutMode, manually_collapsed: bool) -> f32 {
+    if layout.is_mobile() {
+        0.0
+    } else if effective_sidebar_is_rail(layout, manually_collapsed) {
+        LayoutMode::Compact.sidebar_width()
+    } else {
+        layout.sidebar_width()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width};
+    use super::{
+        IssuesPaneMode, LayoutMode, effective_sidebar_is_rail, effective_sidebar_width,
+        issues_pane_mode, layout_for_width,
+    };
 
     #[test]
     fn issue_panes_keep_desktop_detail_visible() {
@@ -190,5 +214,29 @@ mod tests {
             assert!(pair[0].sidebar_width() <= pair[1].sidebar_width());
             assert!(pair[0].issue_list_width() <= pair[1].issue_list_width());
         }
+    }
+
+    #[test]
+    fn effective_sidebar_policy_respects_automatic_and_manual_rails() {
+        assert!(!effective_sidebar_is_rail(LayoutMode::Mobile, false));
+        assert!(!effective_sidebar_is_rail(LayoutMode::Mobile, true));
+        assert!(effective_sidebar_is_rail(LayoutMode::Compact, false));
+        assert!(effective_sidebar_is_rail(LayoutMode::Compact, true));
+        assert!(!effective_sidebar_is_rail(LayoutMode::Standard, false));
+        assert!(effective_sidebar_is_rail(LayoutMode::Standard, true));
+        assert!(!effective_sidebar_is_rail(LayoutMode::Wide, false));
+        assert!(effective_sidebar_is_rail(LayoutMode::Wide, true));
+    }
+
+    #[test]
+    fn effective_sidebar_width_releases_desktop_space_without_mobile_sidebar() {
+        assert_eq!(effective_sidebar_width(LayoutMode::Mobile, false), 0.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Mobile, true), 0.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Compact, false), 64.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Compact, true), 64.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Standard, false), 200.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Standard, true), 64.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Wide, false), 236.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Wide, true), 64.0);
     }
 }

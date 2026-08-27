@@ -36,9 +36,12 @@ pub(super) fn clamped_team_detail_width(
     viewport_width: f32,
     layout: LayoutMode,
     table_mode: TeamTableMode,
+    sidebar_collapsed: bool,
 ) -> f32 {
-    let content_width =
-        (viewport_width - layout.sidebar_width() - 2. * layout.list_padding()).max(0.);
+    let content_width = (viewport_width
+        - crate::responsive::effective_sidebar_width(layout, sidebar_collapsed)
+        - 2. * layout.list_padding())
+    .max(0.);
     let table_min_width = team_table_min_width(table_mode, layout);
     let max_width = ((content_width - TEAM_DETAIL_RESIZE_HANDLE_WIDTH - table_min_width).max(0.))
         .min(content_width / 2.);

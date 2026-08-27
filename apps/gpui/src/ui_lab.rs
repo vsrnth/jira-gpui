@@ -23,7 +23,7 @@ use gpui_component_assets::Assets;
 
 #[cfg(target_os = "macos")]
 use crate::{
-    app_shell::AppShell,
+    app_shell::{AppShell, AppearancePreference},
     dashboard::{Dashboard, SampleSection},
 };
 
@@ -208,20 +208,21 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
 
         let window = cx.open_offscreen_window(request.size.gpui_size(), |window, cx| {
             window.set_window_title("Jira Desk UI lab");
+            let fixture_preference = match request.theme {
+                UiLabTheme::Light => AppearancePreference::Light,
+                UiLabTheme::Dark => AppearancePreference::Dark,
+            };
+            let mut fixture_dashboard = |section| {
+                let mut dashboard = Dashboard::from_sample_data_for_section(section);
+                dashboard.initialize_appearance_preference(fixture_preference);
+                cx.new(|_| dashboard)
+            };
             let dashboard = match request.scenario {
                 UiLabScenario::Onboarding => None,
-                UiLabScenario::Issues => {
-                    Some(cx.new(|_| Dashboard::from_sample_data_for_section(SampleSection::Issues)))
-                }
-                UiLabScenario::Updates => Some(
-                    cx.new(|_| Dashboard::from_sample_data_for_section(SampleSection::Updates)),
-                ),
-                UiLabScenario::Team => {
-                    Some(cx.new(|_| Dashboard::from_sample_data_for_section(SampleSection::Team)))
-                }
-                UiLabScenario::Settings => Some(
-                    cx.new(|_| Dashboard::from_sample_data_for_section(SampleSection::Settings)),
-                ),
+                UiLabScenario::Issues => Some(fixture_dashboard(SampleSection::Issues)),
+                UiLabScenario::Updates => Some(fixture_dashboard(SampleSection::Updates)),
+                UiLabScenario::Team => Some(fixture_dashboard(SampleSection::Team)),
+                UiLabScenario::Settings => Some(fixture_dashboard(SampleSection::Settings)),
             };
             let shell =
                 cx.new(|cx| AppShell::new_for_ui_lab(dashboard, request.theme.mode(), window, cx));

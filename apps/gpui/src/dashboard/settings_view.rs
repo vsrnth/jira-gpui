@@ -1,5 +1,8 @@
 use super::*;
+use crate::app_shell::AppearancePreference;
+use gpui_component::Selectable;
 
+const APPEARANCE_HELP_COPY: &str = "Follow the system appearance or choose a fixed theme.";
 const SCOPE_HELP_COPY: &str = "This is a scope expression. Jira Desk appends assigned-or-watched account membership, incremental updated overlap, and ORDER BY updated DESC. Do not include ORDER BY.";
 const LIVE_WORKSPACE_COPY: &str =
     "Settings become available after a live Jira workspace is connected.";
@@ -10,6 +13,48 @@ const DIAGNOSTIC_EVENTS_COPY: &str = "Diagnostic events are written to diagnosti
 const KEYRING_COPY: &str = "Credentials are kept in the desktop system keyring, reused automatically across Jira Desk/AppImage versions, and never written to SQLite, preferences, or logs.";
 
 impl Dashboard {
+    fn render_appearance_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.appearance_preference;
+        let preference_button = |preference: AppearancePreference| {
+            let label = preference.label();
+            let selected = selected == preference;
+            Button::new(format!("appearance-{}", label.to_lowercase()))
+                .compact()
+                .flex_1()
+                .selected(selected)
+                .toggled(selected)
+                .when(selected, |this| this.primary())
+                .label(label)
+                .tooltip(format!("Use {label} appearance"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_appearance_preference(preference, window, cx);
+                }))
+        };
+
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.10))
+            .child(div().text_base().font_semibold().child("Appearance"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(APPEARANCE_HELP_COPY),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(preference_button(AppearancePreference::System))
+                    .child(preference_button(AppearancePreference::Light))
+                    .child(preference_button(AppearancePreference::Dark)),
+            )
+    }
+
     pub(super) fn render_settings(
         &self,
         layout: LayoutMode,
@@ -45,6 +90,7 @@ impl Dashboard {
                             .max_w(px(820.))
                             .p(px(layout.list_padding()))
                             .gap_3()
+                            .child(self.render_appearance_settings(cx))
                             .child(
                                 v_flex()
                                     .gap_2()
@@ -130,9 +176,20 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAGNOSTIC_EVENTS_COPY, KEYRING_COPY, LIVE_WORKSPACE_COPY, NOTIFICATION_DISPLAY_COPY,
-        NOTIFICATION_HELP_COPY, SCOPE_HELP_COPY,
+        APPEARANCE_HELP_COPY, DIAGNOSTIC_EVENTS_COPY, KEYRING_COPY, LIVE_WORKSPACE_COPY,
+        NOTIFICATION_DISPLAY_COPY, NOTIFICATION_HELP_COPY, SCOPE_HELP_COPY,
     };
+    use crate::dashboard::Dashboard;
+
+    #[test]
+    fn appearance_is_available_in_preview_settings() {
+        let dashboard = Dashboard::from_sample_data();
+        assert!(dashboard.workspace.is_none());
+        assert_eq!(
+            APPEARANCE_HELP_COPY,
+            "Follow the system appearance or choose a fixed theme."
+        );
+    }
 
     #[test]
     fn protected_settings_copy_is_exact() {

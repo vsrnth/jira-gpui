@@ -2,13 +2,13 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
-    relative,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, px, relative,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Root, Sizable as _, StyledExt as _, Theme,
-    ThemeMode, TitleBar,
+    ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
+    TitleBar,
     button::Button,
     button::ButtonVariants as _,
     checkbox::Checkbox,
@@ -16,6 +16,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
     spinner::Spinner,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -23,11 +24,32 @@ use crate::config::{LiveSession, StartupSelection, live_session_from_manual_conf
 use crate::credential_store::{
     CredentialStoreError, SavedCredentials, load_saved_credentials, save_credentials,
 };
-use crate::dashboard::Dashboard;
+use crate::dashboard::{
+    Dashboard, DashboardEvent, DashboardHeaderSnapshot, HeaderStatusPlacement,
+    status_placement_for_layout,
+};
 use crate::diagnostics::DiagnosticsSink;
-use crate::responsive::layout_for_width;
+use crate::responsive::{LayoutMode, effective_sidebar_width, layout_for_width};
 
 const NOTIFICATION_SIDE_MARGIN: f32 = 16.0;
+#[cfg(target_os = "macos")]
+const TITLE_BAR_LEADING_PADDING: f32 = 80.0;
+#[cfg(not(target_os = "macos"))]
+const TITLE_BAR_LEADING_PADDING: f32 = 12.0;
+
+fn titlebar_content_leading_offset(
+    layout: LayoutMode,
+    sidebar_collapsed: bool,
+    titlebar_leading_padding: f32,
+) -> f32 {
+    if layout.is_mobile() {
+        0.0
+    } else {
+        (effective_sidebar_width(layout, sidebar_collapsed) + layout.list_padding()
+            - titlebar_leading_padding)
+            .max(0.0)
+    }
+}
 
 fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) -> f32 {
     let available_width = (viewport_width - NOTIFICATION_SIDE_MARGIN * 2.0).max(0.0);
@@ -35,38 +57,22 @@ fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) ->
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AppearancePreference {
+pub(crate) enum AppearancePreference {
     System,
     Light,
     Dark,
 }
 
 impl AppearancePreference {
-    fn next(self) -> Self {
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::System => Self::Light,
-            Self::Light => Self::Dark,
-            Self::Dark => Self::System,
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::System => "Theme: System",
-            Self::Light => "Theme: Light",
-            Self::Dark => "Theme: Dark",
-        }
-    }
-
-    fn next_action(self) -> &'static str {
-        match self {
-            Self::System => "Use light mode",
-            Self::Light => "Use dark mode",
-            Self::Dark => "Follow system appearance",
-        }
-    }
-
-    fn manual_theme_mode(self) -> Option<ThemeMode> {
+    pub(crate) fn manual_theme_mode(self) -> Option<ThemeMode> {
         match self {
             Self::System => None,
             Self::Light => Some(ThemeMode::Light),
@@ -130,6 +136,8 @@ pub struct AppShell {
     api_token_subscription: Option<Subscription>,
     appearance_preference: AppearancePreference,
     appearance_subscription: Option<Subscription>,
+    dashboard_observation_subscription: Option<Subscription>,
+    dashboard_subscription: Option<Subscription>,
     connection_enabled: bool,
 }
 
@@ -173,6 +181,8 @@ impl AppShell {
             api_token_subscription: None,
             appearance_preference: AppearancePreference::System,
             appearance_subscription: None,
+            dashboard_observation_subscription: None,
+            dashboard_subscription: None,
             connection_enabled: true,
         };
         shell.install_submit_shortcuts(window, cx);
@@ -183,6 +193,9 @@ impl AppShell {
                     cx.notify();
                 }
             }));
+        if let Some(dashboard) = shell.dashboard.clone() {
+            shell.install_dashboard_subscription(&dashboard, window, cx);
+        }
         if preview {
             shell.connection_status = Some(CHECKING_KEYRING_STATUS.to_owned());
             shell.start_saved_login_check(cx);
@@ -193,8 +206,9 @@ impl AppShell {
     /// Constructs the production shell for an inert, fixture-backed UI-lab capture.
     ///
     /// This deliberately skips system-appearance synchronization, diagnostics setup, saved-login
-    /// checks, and all live startup work. The same connection form, title bar, theme control, and
-    /// responsive layout are still rendered; the connect action is disabled as a safety boundary.
+    /// checks, and all live startup work. The same connection form, title bar, appearance state,
+    /// and responsive layout are still rendered; the connect action is disabled as a safety
+    /// boundary.
     #[cfg(feature = "ui-lab")]
     pub(crate) fn new_for_ui_lab(
         dashboard: Option<Entity<Dashboard>>,
@@ -226,11 +240,16 @@ impl AppShell {
             api_token_subscription: None,
             appearance_preference,
             appearance_subscription: None,
+            dashboard_observation_subscription: None,
+            dashboard_subscription: None,
             connection_enabled: false,
         };
         // Keep the real Input controls fully constructed. The installed production submit path
         // is additionally guarded by `connection_enabled`, so it cannot initiate a request here.
         shell.install_submit_shortcuts(window, cx);
+        if let Some(dashboard) = shell.dashboard.clone() {
+            shell.install_dashboard_subscription(&dashboard, window, cx);
+        }
         shell
     }
 
@@ -248,6 +267,41 @@ impl AppShell {
                 .masked(true)
                 .placeholder(SCOPED_TOKEN_PLACEHOLDER)
         })
+    }
+
+    fn install_dashboard_subscription(
+        &mut self,
+        dashboard: &Entity<Dashboard>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Dashboard owns the title-bar snapshot, so observe all entity notifications rather than
+        // relying on its narrower appearance event stream to invalidate this parent.
+        self.dashboard_observation_subscription.take();
+        self.dashboard_observation_subscription = Some(cx.observe(dashboard, |_, _, cx| {
+            cx.notify();
+        }));
+        // Appearance remains a separate event subscription because it also updates shell state.
+        self.dashboard_subscription.take();
+        self.dashboard_subscription = Some(cx.subscribe_in(
+            dashboard,
+            window,
+            |this, _, event: &DashboardEvent, _, cx| {
+                let DashboardEvent::AppearanceChanged(preference) = event;
+                this.appearance_preference = *preference;
+                cx.notify();
+            },
+        ));
+    }
+
+    fn set_dashboard(
+        &mut self,
+        dashboard: Entity<Dashboard>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dashboard = Some(dashboard.clone());
+        self.install_dashboard_subscription(&dashboard, window, cx);
     }
 
     fn install_submit_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -289,14 +343,14 @@ impl AppShell {
                     });
                     let result =
                         live_session_from_manual_configuration(base_url, email, api_token).await;
-                    let _ = this.update(cx, |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
                         this.connecting = false;
                         this.connection_status = None;
                         match result {
                             Ok(session) => {
                                 this.connection_error = None;
-                                this.dashboard =
-                                    Some(Self::dashboard_from_live(session, diagnostics, cx));
+                                let dashboard = Self::dashboard_from_live(session, diagnostics, cx);
+                                this.set_dashboard(dashboard, window, cx);
                             }
                             Err(error) => {
                                 // StartupError's Display implementation is intentionally
@@ -354,12 +408,13 @@ impl AppShell {
             let result = live_session_from_manual_configuration(base_url, email, api_token).await;
             match result {
                 Ok(session) => {
-                    let _ = this.update(cx, |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
                         this.connecting = false;
                         this.connection_status = None;
                         this.connection_error = None;
                         this.connection_warning = None;
-                        this.dashboard = Some(Self::dashboard_from_live(session, diagnostics, cx));
+                        let dashboard = Self::dashboard_from_live(session, diagnostics, cx);
+                        this.set_dashboard(dashboard, window, cx);
                         cx.notify();
                     });
 
@@ -597,6 +652,82 @@ impl AppShell {
                     ),
             )
     }
+
+    fn render_dashboard_title_bar(
+        &self,
+        dashboard: Entity<Dashboard>,
+        snapshot: DashboardHeaderSnapshot,
+        layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let status_in_titlebar =
+            status_placement_for_layout(layout) == HeaderStatusPlacement::TitleBar;
+        let refresh_dashboard = dashboard.clone();
+        let sync_message = snapshot.sync_message.clone();
+
+        TitleBar::new().child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_3()
+                .pl(px(titlebar_content_leading_offset(
+                    layout,
+                    snapshot.sidebar_collapsed,
+                    TITLE_BAR_LEADING_PADDING,
+                )))
+                .pr_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_sm()
+                        .font_semibold()
+                        .child(snapshot.section_label),
+                )
+                .when(status_in_titlebar, |this| {
+                    this.child(
+                        div()
+                            .id("titlebar-sync-status")
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .aria_label(sync_message.clone())
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(sync_message.clone()).build(window, cx)
+                            })
+                            .child(snapshot.sync_message.clone()),
+                    )
+                })
+                .when(snapshot.refresh_visible, |this| {
+                    this.child(
+                        // Keep only Refresh out of TitleBar drag handling; the rest stays draggable.
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new("titlebar-refresh")
+                                    .compact()
+                                    .primary()
+                                    .flex_shrink_0()
+                                    .label(if snapshot.refreshing {
+                                        "Refreshing…"
+                                    } else {
+                                        "Refresh"
+                                    })
+                                    .loading(snapshot.refreshing)
+                                    .on_click(move |_, window, cx| {
+                                        refresh_dashboard.update(cx, |dashboard, cx| {
+                                            dashboard.begin_refresh_from_shell(window, cx);
+                                        });
+                                    }),
+                            ),
+                    )
+                }),
+        )
+    }
 }
 
 impl Render for AppShell {
@@ -642,67 +773,19 @@ impl Render for AppShell {
                 .into_any_element()
         };
 
-        let appearance_preference = self.appearance_preference;
-        let next_appearance = appearance_preference.next();
-        let theme_toggle = Button::new("theme-toggle")
-            .secondary()
-            .outline()
-            .compact()
-            .xsmall()
-            .icon(IconName::Palette)
-            .label(appearance_preference.label())
-            .tooltip(appearance_preference.next_action())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.appearance_preference = next_appearance;
-                if let Some(mode) = next_appearance.manual_theme_mode() {
-                    Theme::change(mode, Some(window), cx);
-                } else {
-                    Theme::sync_system_appearance(Some(window), cx);
-                }
-                cx.notify();
-            }));
+        let layout = layout_for_width(f32::from(window.viewport_size().width));
+        let title_bar = if let Some(dashboard) = &self.dashboard {
+            let snapshot = dashboard.read(cx).header_snapshot();
+            self.render_dashboard_title_bar(dashboard.clone(), snapshot, layout, cx)
+                .into_any_element()
+        } else {
+            TitleBar::new().into_any_element()
+        };
 
         v_flex()
             .size_full()
             .min_w_0()
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .pr_2()
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .size_6()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(cx.theme().radius)
-                                        .bg(cx.theme().primary)
-                                        .text_color(cx.theme().primary_foreground)
-                                        .text_xs()
-                                        .font_bold()
-                                        .child("JD"),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .child("Jira Desk"),
-                                ),
-                        )
-                        .child(theme_toggle),
-                ),
-            )
+            .child(title_bar)
             .child(content)
             .when_some(notification_layer, |this, layer| this.child(layer))
             .into_any_element()
@@ -717,9 +800,11 @@ mod tests {
         SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS,
         WRITE_SAFETY_COPY, is_submit_event, notification_width_for_viewport,
         save_credentials_warning, saved_login_warning, should_check_saved_credentials,
+        titlebar_content_leading_offset,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
+    use crate::responsive::LayoutMode;
     use gpui::WindowAppearance;
     use gpui_component::ThemeMode;
     use gpui_component::input::InputEvent;
@@ -776,25 +861,9 @@ mod tests {
 
     #[test]
     fn appearance_preference_labels_identify_the_current_theme() {
-        assert_eq!(AppearancePreference::System.label(), "Theme: System");
-        assert_eq!(AppearancePreference::Light.label(), "Theme: Light");
-        assert_eq!(AppearancePreference::Dark.label(), "Theme: Dark");
-    }
-
-    #[test]
-    fn appearance_preference_cycles_back_to_system() {
-        assert_eq!(
-            AppearancePreference::System.next(),
-            AppearancePreference::Light
-        );
-        assert_eq!(
-            AppearancePreference::Light.next(),
-            AppearancePreference::Dark
-        );
-        assert_eq!(
-            AppearancePreference::Dark.next(),
-            AppearancePreference::System
-        );
+        assert_eq!(AppearancePreference::System.label(), "System");
+        assert_eq!(AppearancePreference::Light.label(), "Light");
+        assert_eq!(AppearancePreference::Dark.label(), "Dark");
     }
 
     #[test]
@@ -807,16 +876,6 @@ mod tests {
         assert_eq!(
             AppearancePreference::Dark.manual_theme_mode(),
             Some(ThemeMode::Dark)
-        );
-    }
-
-    #[test]
-    fn appearance_preference_tooltips_describe_the_next_transition() {
-        assert_eq!(AppearancePreference::System.next_action(), "Use light mode");
-        assert_eq!(AppearancePreference::Light.next_action(), "Use dark mode");
-        assert_eq!(
-            AppearancePreference::Dark.next_action(),
-            "Follow system appearance"
         );
     }
 
@@ -849,6 +908,42 @@ mod tests {
             shift: true,
         }));
         assert!(!is_submit_event(&InputEvent::Change));
+    }
+
+    #[test]
+    fn titlebar_content_alignment_accounts_for_platform_leading_padding() {
+        assert_eq!(
+            titlebar_content_leading_offset(LayoutMode::Wide, false, 80.0),
+            176.0
+        );
+        assert_eq!(
+            titlebar_content_leading_offset(LayoutMode::Standard, false, 12.0),
+            208.0
+        );
+    }
+
+    #[test]
+    fn titlebar_content_alignment_moves_with_collapsed_sidebar() {
+        assert_eq!(
+            titlebar_content_leading_offset(LayoutMode::Wide, true, 80.0),
+            4.0
+        );
+        assert_eq!(
+            titlebar_content_leading_offset(LayoutMode::Standard, true, 12.0),
+            72.0
+        );
+    }
+
+    #[test]
+    fn titlebar_content_alignment_clamps_at_rail_widths() {
+        assert_eq!(
+            titlebar_content_leading_offset(LayoutMode::Compact, false, 80.0),
+            0.0
+        );
+        assert_eq!(
+            titlebar_content_leading_offset(LayoutMode::Mobile, false, 12.0),
+            0.0
+        );
     }
 
     #[test]

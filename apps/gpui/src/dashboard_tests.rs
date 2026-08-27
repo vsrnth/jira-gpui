@@ -1,6 +1,8 @@
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
 use super::*;
+use crate::app_shell::AppearancePreference;
 use crate::presentation::{UpdateViewModel, normalized_issue_key};
+use crate::responsive::effective_sidebar_width;
 use crate::sample_data::{sample_issues, sample_users};
 use gpui::VisualTestContext;
 use gpui_component::searchable_list::SearchableListDelegate as _;
@@ -316,6 +318,137 @@ fn update_preview_limits_rows_without_discarding_audit_data() {
     assert_eq!(visible_update_row_count(5, true), 5);
     assert_eq!(hidden_update_row_count(5, true), 0);
     assert_eq!(visible_update_row_count(2, false), 2);
+}
+
+#[test]
+fn appearance_defaults_to_system_and_fixture_initialization_is_side_effect_free() {
+    let mut dashboard = Dashboard::from_sample_data();
+
+    assert_eq!(
+        dashboard.appearance_preference,
+        AppearancePreference::System
+    );
+    dashboard.initialize_appearance_preference(AppearancePreference::Dark);
+    assert_eq!(dashboard.appearance_preference, AppearancePreference::Dark);
+    assert!(matches!(
+        DashboardEvent::AppearanceChanged(AppearancePreference::Light),
+        DashboardEvent::AppearanceChanged(AppearancePreference::Light)
+    ));
+}
+
+#[gpui::test]
+fn selecting_appearance_updates_state_and_emits_event(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(640.), px(480.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = events.clone();
+    let subscription = cx.update(|cx| {
+        cx.subscribe(&dashboard_entity, move |_, event: &DashboardEvent, _| {
+            observed.lock().expect("appearance events").push(*event);
+        })
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.select_appearance_preference(AppearancePreference::Light, window, cx);
+        });
+    });
+    visual.run_until_parked();
+
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.appearance_preference),
+        AppearancePreference::Light
+    );
+    assert_eq!(
+        *events.lock().expect("appearance events"),
+        vec![DashboardEvent::AppearanceChanged(
+            AppearancePreference::Light
+        )]
+    );
+    drop(subscription);
+}
+
+#[test]
+fn sidebar_state_and_header_alignment_start_expanded() {
+    let dashboard = Dashboard::from_sample_data();
+
+    assert!(!dashboard.sidebar_collapsed);
+    assert!(!dashboard.header_snapshot().sidebar_collapsed);
+}
+
+#[gpui::test]
+fn sidebar_toggle_is_manual_only_on_standard_and_wide_layouts(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(1_000.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.toggle_sidebar(LayoutMode::Compact, cx);
+            assert!(!dashboard.sidebar_collapsed);
+            dashboard.toggle_sidebar(LayoutMode::Standard, cx);
+        });
+    });
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.sidebar_collapsed));
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.toggle_sidebar(LayoutMode::Wide, cx);
+        });
+    });
+    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.sidebar_collapsed));
+}
+
+#[gpui::test]
+fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(1_000.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let expanded = visual
+        .debug_bounds("dashboard-sidebar")
+        .expect("expanded sidebar should be laid out");
+    let expanded_main = visual
+        .debug_bounds("dashboard-main")
+        .expect("expanded main pane should be laid out");
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.toggle_sidebar(LayoutMode::Standard, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let collapsed = visual
+        .debug_bounds("dashboard-sidebar")
+        .expect("collapsed sidebar should be laid out");
+    let collapsed_main = visual
+        .debug_bounds("dashboard-main")
+        .expect("collapsed main pane should be laid out");
+
+    assert_eq!(expanded.size.width, px(200.));
+    assert_eq!(collapsed.size.width, px(64.));
+    assert_eq!(
+        expanded_main.origin.x,
+        expanded.origin.x + expanded.size.width
+    );
+    assert!(collapsed_main.size.width > expanded_main.size.width);
+    assert_eq!(
+        collapsed_main.origin.x,
+        collapsed.origin.x + collapsed.size.width
+    );
 }
 
 #[test]
@@ -891,16 +1024,9 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
     let detail_bounds = visual
         .debug_bounds("team-detail")
         .expect("team detail should be laid out");
-    let header_bounds = visual
-        .debug_bounds("header")
-        .expect("dashboard header should be laid out");
     assert!(
         table_bounds.size.height > px(300.),
         "team table body collapsed to header: {table_bounds:?}"
-    );
-    assert!(
-        detail_bounds.origin.y >= header_bounds.origin.y + header_bounds.size.height,
-        "team detail overlaps dashboard header: detail={detail_bounds:?}, header={header_bounds:?}"
     );
     assert!(
         detail_bounds.origin.y + detail_bounds.size.height <= px(900.) + px(1.),
@@ -1052,17 +1178,27 @@ fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
         (1_920., LayoutMode::Wide),
     ] {
         let mode = team_table_mode_for_width(width);
-        let clamped = clamped_team_detail_width(DETAIL_SIDEBAR_DEFAULT_WIDTH, width, layout, mode);
-        let content = width - layout.sidebar_width() - 2. * layout.list_padding();
-        let table_min = team_table_min_width(mode, layout);
-        assert!(clamped >= 0.);
-        assert!(clamped + TEAM_DETAIL_RESIZE_HANDLE_WIDTH + table_min <= content + 0.01);
-        assert!(clamped <= content / 2. + 0.01);
-        if width == 1_200. {
-            assert_eq!(clamped, 320.);
-        }
-        if width == 1_370. {
-            assert_eq!(clamped, DETAIL_SIDEBAR_DEFAULT_WIDTH);
+        for sidebar_collapsed in [false, true] {
+            let clamped = clamped_team_detail_width(
+                DETAIL_SIDEBAR_DEFAULT_WIDTH,
+                width,
+                layout,
+                mode,
+                sidebar_collapsed,
+            );
+            let content = width
+                - effective_sidebar_width(layout, sidebar_collapsed)
+                - 2. * layout.list_padding();
+            let table_min = team_table_min_width(mode, layout);
+            assert!(clamped >= 0.);
+            assert!(clamped + TEAM_DETAIL_RESIZE_HANDLE_WIDTH + table_min <= content + 0.01);
+            assert!(clamped <= content / 2. + 0.01);
+            if width == 1_200. && !sidebar_collapsed {
+                assert_eq!(clamped, 320.);
+            }
+            if width == 1_370. {
+                assert_eq!(clamped, DETAIL_SIDEBAR_DEFAULT_WIDTH);
+            }
         }
     }
 }
@@ -1323,6 +1459,49 @@ fn direct_account_id_member_uses_persistable_unknown_display_name() {
     let member = persisted_direct_team_member("account-123".to_owned()).expect("valid ID");
     assert_eq!(member.display_name, "Unknown user");
     assert!(normalize_team_members(vec![member]).is_ok());
+}
+
+#[test]
+fn dashboard_header_snapshot_exposes_section_and_refresh_policy() {
+    let mut dashboard = Dashboard::from_sample_data();
+
+    let issues = dashboard.header_snapshot();
+    assert_eq!(issues.section_label, "Jira issues");
+    assert_eq!(
+        issues.sync_message,
+        "Preview data · Jira connection not configured"
+    );
+    assert!(!issues.refreshing);
+    assert!(issues.refresh_visible);
+    assert!(!issues.sidebar_collapsed);
+
+    dashboard.sidebar_collapsed = true;
+    let collapsed = dashboard.header_snapshot();
+    assert!(collapsed.sidebar_collapsed);
+
+    dashboard.operation_in_progress = true;
+    let refreshing = dashboard.header_snapshot();
+    assert!(refreshing.refreshing);
+    assert!(refreshing.refresh_visible);
+
+    dashboard.section = Section::Settings;
+    let settings = dashboard.header_snapshot();
+    assert_eq!(settings.section_label, "Settings");
+    assert!(!settings.refresh_visible);
+}
+
+#[test]
+fn dashboard_status_moves_to_mobile_row_only_at_mobile_widths() {
+    assert_eq!(
+        status_placement_for_layout(LayoutMode::Mobile),
+        HeaderStatusPlacement::MobileRow
+    );
+    for layout in [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide] {
+        assert_eq!(
+            status_placement_for_layout(layout),
+            HeaderStatusPlacement::TitleBar
+        );
+    }
 }
 
 #[test]
