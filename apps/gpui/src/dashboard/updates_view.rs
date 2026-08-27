@@ -15,9 +15,9 @@ impl Dashboard {
             .min_w_0()
             .child(
                 v_flex()
-                    .h(px(if mobile { 104. } else { 86. }))
+                    .h(px(if mobile { 104. } else { 78. }))
                     .px(px(if mobile { 12. } else { 20. }))
-                    .py(px(10.))
+                    .py(px(8.))
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(cx.theme().border)
@@ -94,7 +94,8 @@ impl Dashboard {
                     .overflow_y_scrollbar()
                     .min_h_0()
                     .w_full()
-                    .justify_center()
+                    .justify_start()
+                    .items_start()
                     .child(
                         v_flex()
                             .w_full()
@@ -213,7 +214,8 @@ impl Dashboard {
                                             .when(mobile, |this| this.w_full())
                                             .line_clamp(2)
                                             .text_sm()
-                                            .font_semibold()
+                                            .when(group.unread, |this| this.font_semibold())
+                                            .when(!group.unread, |this| this.font_normal())
                                             .child(group.issue_summary.clone()),
                                     ),
                             )
@@ -243,10 +245,9 @@ impl Dashboard {
             .items_start()
             .gap_2()
             .when(mobile, |this| this.flex_col())
-            .rounded(cx.theme().radius)
-            .border_1()
+            .py_1()
+            .border_b_1()
             .border_color(cx.theme().border)
-            .when(group.unread, |this| this.border_color(cx.theme().primary))
             .child(open_area)
             .child(
                 v_flex()

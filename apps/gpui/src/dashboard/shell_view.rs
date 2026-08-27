@@ -13,9 +13,9 @@ impl Dashboard {
             .text_color(cx.theme().sidebar_foreground)
             .child(
                 h_flex()
-                    .h(px(72.))
-                    .px_4()
-                    .gap_3()
+                    .h(px(60.))
+                    .px_3()
+                    .gap_2()
                     .when(rail, |this| this.justify_center().px_2().gap_0())
                     .border_b_1()
                     .border_color(cx.theme().sidebar_border)
@@ -36,8 +36,9 @@ impl Dashboard {
                             div()
                                 .min_w_0()
                                 .truncate()
+                                .text_sm()
                                 .font_semibold()
-                                .child("Jira Desk"),
+                                .child(self.workspace_name.clone()),
                         )
                         .child(
                             div()
@@ -45,7 +46,7 @@ impl Dashboard {
                                 .truncate()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Synced workspace · confirmed comments and issue edits"),
+                                .child(self.workspace_members.clone()),
                         )
                     })),
             )
@@ -63,7 +64,7 @@ impl Dashboard {
                                 .text_xs()
                                 .font_semibold()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("WORKSPACE"),
+                                .child("Workspace"),
                         )
                     })
                     .child(self.nav_item(
@@ -97,44 +98,7 @@ impl Dashboard {
                         Section::Settings,
                         rail,
                         cx,
-                    ))
-                    .when(!rail, |this| {
-                        this.child(
-                            div()
-                                .mt_5()
-                                .px_3()
-                                .pt_2()
-                                .pb_1()
-                                .text_xs()
-                                .font_semibold()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("JIRA ACCOUNT VIEW"),
-                        )
-                    })
-                    .when(!rail, |this| {
-                        this.child(
-                            v_flex()
-                                .mx_1()
-                                .mt_1()
-                                .p_3()
-                                .gap_1()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(cx.theme().sidebar_border)
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_semibold()
-                                        .child(self.workspace_name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(self.workspace_members.clone()),
-                                ),
-                        )
-                    }),
+                    )),
             )
             .when(!rail, |this| {
                 this.child(

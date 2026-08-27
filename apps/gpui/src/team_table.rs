@@ -23,6 +23,9 @@ use crate::presentation::{
 
 const DENSE_COLUMN_COUNT: usize = 5;
 const WIDE_COLUMN_COUNT: usize = 7;
+const DENSE_COLUMN_WIDTHS: [f32; DENSE_COLUMN_COUNT] = [72.0, 184.0, 105.0, 85.0, 150.0];
+const WIDE_COLUMN_WIDTHS: [f32; WIDE_COLUMN_COUNT] =
+    [100.0, 280.0, 150.0, 125.0, 260.0, 190.0, 85.0];
 
 /// Display-ready values for one row in the team ticket table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -358,16 +361,14 @@ impl TableDelegate for TeamTicketTableDelegate {
         // Keep the compact visual width while exposing the complete value (including the exact
         // localized Updated timestamp in Activity cells) to assistive technology and keyboard
         // users. The table's generic cell renderer truncates the visible text by design.
+        let value_for_tooltip = value.to_owned();
         let mut cell = div()
             .id(format!("team-ticket-cell-{row_ix}-{col_ix}"))
             .size_full()
             .truncate()
             .aria_label(value.to_owned())
+            .tooltip(move |window, cx| Tooltip::new(value_for_tooltip.clone()).build(window, cx))
             .child(value.to_owned());
-        if matches!(column, SortColumn::Activity) {
-            let activity = value.to_owned();
-            cell = cell.tooltip(move |window, cx| Tooltip::new(activity.clone()).build(window, cx));
-        }
         cell = match column {
             SortColumn::Key => cell.text_color(cx.theme().blue).text_sm(),
             SortColumn::Status => cell.text_color(cx.theme().green).text_sm(),
@@ -542,9 +543,9 @@ fn age_color(seconds: i64, cx: &Context<TableState<TeamTicketTableDelegate>>) ->
 
 fn column_widths(dense_columns: bool) -> &'static [f32] {
     if dense_columns {
-        &[64.0, 140.0, 90.0, 75.0, 145.0]
+        &DENSE_COLUMN_WIDTHS
     } else {
-        &[100.0, 280.0, 150.0, 125.0, 260.0, 190.0, 85.0]
+        &WIDE_COLUMN_WIDTHS
     }
 }
 
@@ -554,6 +555,12 @@ mod tests {
     use crate::sample_data::{sample_issues, sample_updates, sample_users};
     use jira_domain::{ChangeValue, EventId, IssueKey, UpdateKind};
     use time::macros::datetime;
+
+    #[test]
+    fn dense_column_widths_match_the_bounded_table_contract() {
+        assert_eq!(DENSE_COLUMN_WIDTHS, [72.0, 184.0, 105.0, 85.0, 150.0]);
+        assert_eq!(DENSE_COLUMN_WIDTHS.iter().sum::<f32>(), 596.0);
+    }
 
     #[test]
     fn filters_category_case_insensitively() {
@@ -749,8 +756,8 @@ mod tests {
 
     #[test]
     fn dense_columns_fit_compact_dashboard_content() {
-        assert_eq!(column_widths(true), &[64.0, 140.0, 90.0, 75.0, 145.0]);
-        assert_eq!(column_widths(true).iter().sum::<f32>(), 514.0);
+        assert_eq!(column_widths(true), &[72.0, 184.0, 105.0, 85.0, 150.0]);
+        assert_eq!(column_widths(true).iter().sum::<f32>(), 596.0);
         assert!(column_widths(false).iter().sum::<f32>() > 900.0);
     }
 

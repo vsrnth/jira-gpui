@@ -2,7 +2,7 @@ use super::*;
 
 const DETAIL_SIDEBAR_MIN_WIDTH: f32 = 320.;
 pub(super) const TEAM_DETAIL_RESIZE_HANDLE_WIDTH: f32 = 8.;
-const TEAM_DENSE_TABLE_WIDTH: f32 = 514.;
+pub(super) const TEAM_DENSE_TABLE_WIDTH: f32 = 596.;
 const TEAM_WIDE_TABLE_WIDTH: f32 = 1_190.;
 const TEAM_WIDE_TABLE_MIN_VIEWPORT: f32 = 1_920.;
 

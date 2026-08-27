@@ -1047,7 +1047,9 @@ fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
         (960., LayoutMode::Standard),
         (1_199., LayoutMode::Standard),
         (1_200., LayoutMode::Wide),
-        (1_880., LayoutMode::Wide),
+        (1_370., LayoutMode::Wide),
+        (1_919., LayoutMode::Wide),
+        (1_920., LayoutMode::Wide),
     ] {
         let mode = team_table_mode_for_width(width);
         let clamped = clamped_team_detail_width(DETAIL_SIDEBAR_DEFAULT_WIDTH, width, layout, mode);
@@ -1056,6 +1058,12 @@ fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
         assert!(clamped >= 0.);
         assert!(clamped + TEAM_DETAIL_RESIZE_HANDLE_WIDTH + table_min <= content + 0.01);
         assert!(clamped <= content / 2. + 0.01);
+        if width == 1_200. {
+            assert_eq!(clamped, 320.);
+        }
+        if width == 1_370. {
+            assert_eq!(clamped, DETAIL_SIDEBAR_DEFAULT_WIDTH);
+        }
     }
 }
 

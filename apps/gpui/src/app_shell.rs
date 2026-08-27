@@ -83,6 +83,8 @@ const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
 const SCOPED_TOKEN_PLACEHOLDER: &str = "Paste your scoped Jira API token";
 const SCOPED_TOKEN_SCOPES: &str =
     "For full functionality, select exactly: read:jira-user, read:jira-work, write:jira-work.";
+const KEYRING_STORAGE_COPY: &str = "Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs.";
+const WRITE_SAFETY_COPY: &str = "Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions.";
 
 const ONBOARDING_MAX_WIDTH: f32 = 600.0;
 const ONBOARDING_CARD_PADDING: f32 = 16.0;
@@ -455,17 +457,13 @@ impl AppShell {
                     .min_w_0()
                     .w_full()
                     .max_w(px(ONBOARDING_MAX_WIDTH))
-                    .gap_3()
+                    .gap_2()
                     .p(px(layout.onboarding_padding()))
                     .child(
                         v_flex()
                             .min_w_0()
-                            .gap_3()
-                            .p(px(ONBOARDING_CARD_PADDING))
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary.opacity(0.22))
+                            .gap_1()
+                            .px(px(ONBOARDING_CARD_PADDING))
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -519,7 +517,7 @@ impl AppShell {
                                     .items_center()
                                     .justify_between()
                                     .gap_2()
-                                    .child(div().text_xs().font_semibold().text_color(cx.theme().primary).child("WORKSPACE CREDENTIALS"))
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().primary).child("Workspace credentials"))
                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Required")),
                             )
                             .child(Self::labeled_input(
@@ -537,12 +535,7 @@ impl AppShell {
                             .child(
                                 v_flex()
                                     .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .child(SCOPED_TOKEN_LABEL),
-                                    )
+                                    .child(div().text_sm().font_semibold().child(SCOPED_TOKEN_LABEL))
                                     .child(
                                         Input::new(&self.api_token)
                                             .w_full()
@@ -555,80 +548,51 @@ impl AppShell {
                                             .text_color(cx.theme().muted_foreground)
                                             .child("Create this token in Atlassian account security settings."),
                                     )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().foreground)
-                                            .child(SCOPED_TOKEN_SCOPES),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs."),
-                                    ),
+                                    .child(div().text_xs().text_color(cx.theme().foreground).child(SCOPED_TOKEN_SCOPES))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(KEYRING_STORAGE_COPY)),
                             )
-                    )
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap_3()
-                            .p(px(ONBOARDING_CARD_PADDING))
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary.opacity(0.12))
                             .child(
-                                Checkbox::new("remember-jira-login")
-                                    .checked(self.remember_credentials)
-                                    .on_click(cx.listener(|this, checked, _, cx| {
-                                        this.remember_credentials = *checked;
-                                        cx.notify();
-                                    }))
-                                    .aria_label(REMEMBER_CREDENTIALS_LABEL)
-                                    .text_sm()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .w_full()
-                                            .line_height(relative(1.2))
-                                            .child(REMEMBER_CREDENTIALS_LABEL),
-                                    ),
-                            )
-                            .when_some(self.connection_status.as_ref(), |this, status| {
-                                this.child(h_flex()
-                                    .min_w_0()
-                                    .items_center()
+                                v_flex()
                                     .gap_2()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .px_3()
-                                    .py_2()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .when(self.connecting, |this| this.child(Spinner::new().xsmall()))
-                                    .child(div().min_w_0().child(status.clone())))
-                            })
-                            .child(
-                                Button::new("connect-jira")
-                                    .label(if self.connecting {
-                                        "Connecting…"
-                                    } else {
-                                        "Connect"
+                                    .pt_1()
+                                    .child(
+                                        Checkbox::new("remember-jira-login")
+                                            .checked(self.remember_credentials)
+                                            .on_click(cx.listener(|this, checked, _, cx| {
+                                                this.remember_credentials = *checked;
+                                                cx.notify();
+                                            }))
+                                            .aria_label(REMEMBER_CREDENTIALS_LABEL)
+                                            .text_sm()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .w_full()
+                                                    .line_height(relative(1.2))
+                                                    .child(REMEMBER_CREDENTIALS_LABEL),
+                                            ),
+                                    )
+                                    .when_some(self.connection_status.as_ref(), |this, status| {
+                                        this.child(h_flex()
+                                            .min_w_0()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .when(self.connecting, |this| this.child(Spinner::new().xsmall()))
+                                            .child(div().min_w_0().child(status.clone())))
                                     })
-                                    .primary()
-                                    .disabled(self.connecting || !self.connection_enabled)
-                                    .w_full()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.connect(window, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions."),
+                                    .child(
+                                        Button::new("connect-jira")
+                                            .label(if self.connecting { "Connecting…" } else { "Connect" })
+                                            .primary()
+                                            .disabled(self.connecting || !self.connection_enabled)
+                                            .w_full()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.connect(window, cx);
+                                            })),
+                                    )
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(WRITE_SAFETY_COPY)),
                             ),
                     ),
             )
@@ -748,11 +712,11 @@ impl Render for AppShell {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppearancePreference, CHECKING_KEYRING_STATUS, REMEMBER_CREDENTIALS_DEFAULT,
-        REMEMBER_CREDENTIALS_LABEL, SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER,
-        SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS, is_submit_event,
-        notification_width_for_viewport, save_credentials_warning, saved_login_warning,
-        should_check_saved_credentials,
+        AppearancePreference, CHECKING_KEYRING_STATUS, KEYRING_STORAGE_COPY,
+        REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL, SCOPED_TOKEN_LABEL,
+        SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS,
+        WRITE_SAFETY_COPY, is_submit_event, notification_width_for_viewport,
+        save_credentials_warning, saved_login_warning, should_check_saved_credentials,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
@@ -788,6 +752,14 @@ mod tests {
         assert!(SCOPED_TOKEN_SCOPES.contains("read:jira-user"));
         assert!(SCOPED_TOKEN_SCOPES.contains("read:jira-work"));
         assert!(SCOPED_TOKEN_SCOPES.contains("write:jira-work"));
+        assert_eq!(
+            KEYRING_STORAGE_COPY,
+            "Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs."
+        );
+        assert_eq!(
+            WRITE_SAFETY_COPY,
+            "Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions."
+        );
         assert!(CHECKING_KEYRING_STATUS.contains("Checking system keyring"));
         assert!(VERIFYING_SCOPED_TOKEN_STATUS.contains("verifying scoped token"));
     }
