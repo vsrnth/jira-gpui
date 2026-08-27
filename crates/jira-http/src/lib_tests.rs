@@ -978,205 +978,102 @@ fn attachment_read_checks_cancellation_before_network_dispatch() {
     assert_eq!(error.kind(), ErrorKind::Cancelled);
 }
 
-#[test]
-fn attachment_thumbnail_accepts_a_valid_png_with_octet_stream_mime() {
+fn request_attachment_thumbnail(
+    mime: &str,
+    body: &[u8],
+) -> Result<AttachmentContent, ApplicationError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82";
+    let mime = mime.to_owned();
+    let body = body.to_owned();
 
-    runtime.block_on(async {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .unwrap();
-            let address = listener.local_addr().unwrap();
-            let responder = async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    png.len()
-                );
-                let mut response = response.into_bytes();
-                response.extend_from_slice(png);
-                let mut written = 0;
-                while written < response.len() {
-                    stream.writable().await.unwrap();
-                    match stream.try_write(&response[written..]) {
-                        Ok(count) => written += count,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(error) => panic!("responder write failed: {error}"),
-                    }
-                }
-            };
-            let responder = tokio::spawn(responder);
-
-            let credentials = ApiTokenCredentials::new("person@example.com", "secret-token")
-                .unwrap();
-            let client = Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap();
-            let content = JiraHttpClient::attachment_image_request(
-                client,
-                Url::parse(&format!(
-                    "http://{address}/rest/api/3/attachment/thumbnail/42"
-                ))
-                .unwrap(),
-                credentials,
-                AttachmentReadOptions {
-                    attachment_id: "42".to_owned(),
-                    cancellation: CancellationToken::new(),
-                    max_bytes: 1024,
-                    width: 640,
-                    height: 480,
-                    thumbnail: true,
-                },
-            )
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
-            responder.await.unwrap();
-
-            assert_eq!(content.mime_type, "application/octet-stream");
-            assert_eq!(content.bytes, png);
+        let address = listener.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let mut response = response.into_bytes();
+            response.extend_from_slice(&body);
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &response)
+                .await
+                .unwrap();
         });
+
+        let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let content = JiraHttpClient::attachment_image_request(
+            client,
+            Url::parse(&format!(
+                "http://{address}/rest/api/3/attachment/thumbnail/42"
+            ))
+            .unwrap(),
+            credentials,
+            AttachmentReadOptions {
+                attachment_id: "42".to_owned(),
+                cancellation: CancellationToken::new(),
+                max_bytes: 1024,
+                width: 640,
+                height: 480,
+                thumbnail: true,
+            },
+        )
+        .await;
+        responder.await.unwrap();
+        content
+    })
+}
+
+#[test]
+fn attachment_thumbnail_accepts_a_valid_png_with_octet_stream_mime() {
+    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82";
+    let content = request_attachment_thumbnail("application/octet-stream", png).unwrap();
+
+    assert_eq!(content.mime_type, "application/octet-stream");
+    assert_eq!(content.bytes, png);
 }
 
 #[test]
 fn attachment_thumbnail_accepts_a_valid_png_with_an_unknown_mime() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82";
+    let content = request_attachment_thumbnail("application/x-atlassian-image", png).unwrap();
 
-    runtime.block_on(async {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .unwrap();
-            let address = listener.local_addr().unwrap();
-            let responder = async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-atlassian-image\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    png.len()
-                );
-                let mut response = response.into_bytes();
-                response.extend_from_slice(png);
-                let mut written = 0;
-                while written < response.len() {
-                    stream.writable().await.unwrap();
-                    match stream.try_write(&response[written..]) {
-                        Ok(count) => written += count,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(error) => panic!("responder write failed: {error}"),
-                    }
-                }
-            };
-            let responder = tokio::spawn(responder);
-
-            let credentials = ApiTokenCredentials::new("person@example.com", "secret-token")
-                .unwrap();
-            let client = Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap();
-            let content = JiraHttpClient::attachment_image_request(
-                client,
-                Url::parse(&format!(
-                    "http://{address}/rest/api/3/attachment/thumbnail/42"
-                ))
-                .unwrap(),
-                credentials,
-                AttachmentReadOptions {
-                    attachment_id: "42".to_owned(),
-                    cancellation: CancellationToken::new(),
-                    max_bytes: 1024,
-                    width: 640,
-                    height: 480,
-                    thumbnail: true,
-                },
-            )
-            .await
-            .unwrap();
-            responder.await.unwrap();
-
-            assert_eq!(content.mime_type, "image/png");
-            assert_eq!(content.bytes, png);
-        });
+    assert_eq!(content.mime_type, "image/png");
+    assert_eq!(content.bytes, png);
 }
 
 #[test]
 fn attachment_thumbnail_rejects_invalid_bytes_with_an_unknown_mime_safely() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let body = b"not an image";
     let raw_mime = "application/x-atlassian-image";
+    let error = request_attachment_thumbnail(raw_mime, body)
+        .expect_err("invalid image bytes must be rejected");
 
-    runtime.block_on(async {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .unwrap();
-            let address = listener.local_addr().unwrap();
-            let responder = async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {raw_mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let mut response = response.into_bytes();
-                response.extend_from_slice(body);
-                let mut written = 0;
-                while written < response.len() {
-                    stream.writable().await.unwrap();
-                    match stream.try_write(&response[written..]) {
-                        Ok(count) => written += count,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(error) => panic!("responder write failed: {error}"),
-                    }
-                }
-            };
-            let responder = tokio::spawn(responder);
-
-            let credentials = ApiTokenCredentials::new("person@example.com", "secret-token")
-                .unwrap();
-            let client = Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap();
-            let error = JiraHttpClient::attachment_image_request(
-                client,
-                Url::parse(&format!(
-                    "http://{address}/rest/api/3/attachment/thumbnail/42"
-                ))
-                .unwrap(),
-                credentials,
-                AttachmentReadOptions {
-                    attachment_id: "42".to_owned(),
-                    cancellation: CancellationToken::new(),
-                    max_bytes: 1024,
-                    width: 640,
-                    height: 480,
-                    thumbnail: true,
-                },
-            )
-            .await
-            .expect_err("invalid image bytes must be rejected");
-            responder.await.unwrap();
-
-            assert_eq!(error.kind(), ErrorKind::NotFound);
-            assert_eq!(
-                error.message(),
-                "Jira attachment response bytes did not match an image format"
-            );
-            assert!(!error.message().contains(raw_mime));
-            assert!(!error.message().contains("not an image"));
-            let diagnostic = error.attachment_diagnostic().expect("validation diagnostic");
-            assert_eq!(diagnostic.stage(), jira_application::AttachmentReadStage::Validation);
-            assert_eq!(diagnostic.attempt(), AttachmentReadAttempt::Thumbnail);
-        });
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert_eq!(
+        error.message(),
+        "Jira attachment response bytes did not match an image format"
+    );
+    assert!(!error.message().contains(raw_mime));
+    assert!(!error.message().contains("not an image"));
+    let diagnostic = error
+        .attachment_diagnostic()
+        .expect("validation diagnostic");
+    assert_eq!(
+        diagnostic.stage(),
+        jira_application::AttachmentReadStage::Validation
+    );
+    assert_eq!(diagnostic.attempt(), AttachmentReadAttempt::Thumbnail);
 }
 
 #[test]
