@@ -15,8 +15,11 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_component::tooltip::Tooltip;
 use jira_domain::{Issue, IssueId, Timestamp, UpdateEvent, User};
+use time::UtcOffset;
 
-use crate::presentation::{IdentityDirectory, describe_update_with_directory, format_timestamp};
+use crate::presentation::{
+    IdentityDirectory, describe_update_with_directory, format_timestamp_for,
+};
 
 const DENSE_COLUMN_COUNT: usize = 5;
 const WIDE_COLUMN_COUNT: usize = 7;
@@ -96,11 +99,12 @@ impl TeamTicketTableDelegate {
             sort_order: ColumnSort::Ascending,
             dense_columns: false,
         };
-        this.replace_rows(issues, events, users, now);
+        this.replace_rows(issues, events, users, now, None);
         this
     }
 
     /// Builds a delegate whose columns fit the compact and standard dashboard widths.
+    #[allow(dead_code)]
     pub fn new_with_density(
         issues: &[Issue],
         events: &[UpdateEvent],
@@ -114,7 +118,26 @@ impl TeamTicketTableDelegate {
             sort_order: ColumnSort::Ascending,
             dense_columns,
         };
-        this.replace_rows(issues, events, users, now);
+        this.replace_rows(issues, events, users, now, None);
+        this
+    }
+
+    /// Builds rows with an optional fixed timestamp offset for deterministic fixture captures.
+    pub fn new_with_density_and_offset(
+        issues: &[Issue],
+        events: &[UpdateEvent],
+        users: &[User],
+        now: Timestamp,
+        dense_columns: bool,
+        offset: Option<UtcOffset>,
+    ) -> Self {
+        let mut this = Self {
+            rows: Vec::new(),
+            sort_column: SortColumn::LastUpdated,
+            sort_order: ColumnSort::Ascending,
+            dense_columns,
+        };
+        this.replace_rows(issues, events, users, now, offset);
         this
     }
 
@@ -130,6 +153,7 @@ impl TeamTicketTableDelegate {
         events: &[UpdateEvent],
         users: &[User],
         now: Timestamp,
+        offset: Option<UtcOffset>,
     ) {
         let mut identities = IdentityDirectory::from_users(users);
         for issue in issues {
@@ -145,7 +169,7 @@ impl TeamTicketTableDelegate {
                     .as_deref()
                     .is_some_and(|category| category.trim().eq_ignore_ascii_case("in progress"))
             })
-            .map(|issue| build_row(issue, events, &identities, now))
+            .map(|issue| build_row(issue, events, &identities, now, offset))
             .collect();
         self.sort_rows();
     }
@@ -178,12 +202,24 @@ impl TeamTicketTableDelegate {
 /// Extension methods for the GPUI table entity used by dashboard integration.
 pub trait TeamTicketTableStateExt: Sized {
     /// Replace the delegate's rows and refresh its column layout in one operation.
+    #[allow(dead_code)]
     fn replace_team_ticket_rows(
         &mut self,
         issues: &[Issue],
         events: &[UpdateEvent],
         users: &[User],
         now: Timestamp,
+        cx: &mut Context<Self>,
+    );
+
+    /// Replaces rows with an optional fixed timestamp offset for fixture presentation.
+    fn replace_team_ticket_rows_with_offset(
+        &mut self,
+        issues: &[Issue],
+        events: &[UpdateEvent],
+        users: &[User],
+        now: Timestamp,
+        offset: Option<UtcOffset>,
         cx: &mut Context<Self>,
     );
 
@@ -203,8 +239,21 @@ impl TeamTicketTableStateExt for TableState<TeamTicketTableDelegate> {
         now: Timestamp,
         cx: &mut Context<Self>,
     ) {
+        self.replace_team_ticket_rows_with_offset(issues, events, users, now, None, cx);
+    }
+
+    fn replace_team_ticket_rows_with_offset(
+        &mut self,
+        issues: &[Issue],
+        events: &[UpdateEvent],
+        users: &[User],
+        now: Timestamp,
+        offset: Option<UtcOffset>,
+        cx: &mut Context<Self>,
+    ) {
         let selected_issue_id = self.selected_team_ticket_issue_id();
-        self.delegate_mut().replace_rows(issues, events, users, now);
+        self.delegate_mut()
+            .replace_rows(issues, events, users, now, offset);
         self.refresh(cx);
         match selected_issue_id
             .and_then(|issue_id| row_index_for_issue_id(&self.delegate().rows, &issue_id))
@@ -364,6 +413,7 @@ fn build_row(
     events: &[UpdateEvent],
     identities: &IdentityDirectory,
     now: Timestamp,
+    offset: Option<UtcOffset>,
 ) -> TeamTicketRow {
     let latest_event = events
         .iter()
@@ -384,7 +434,7 @@ fn build_row(
         .map(|event| event.occurred_at.max(issue.updated_at))
         .unwrap_or(issue.updated_at);
     let elapsed_seconds = elapsed_seconds(last_updated_at, now);
-    let activity = format_activity(&latest_update, last_updated_at, elapsed_seconds);
+    let activity = format_activity(&latest_update, last_updated_at, elapsed_seconds, offset);
 
     TeamTicketRow {
         issue_id: issue.id.clone(),
@@ -393,7 +443,7 @@ fn build_row(
         assignee: identities.display(issue.assignee.as_ref(), "Unassigned"),
         status: issue.status.name.clone(),
         latest_update,
-        last_updated: format_timestamp(last_updated_at),
+        last_updated: format_timestamp_for(last_updated_at, offset),
         last_updated_at,
         elapsed: format_elapsed(elapsed_seconds),
         elapsed_seconds,
@@ -405,10 +455,11 @@ fn format_activity(
     latest_update: &str,
     last_updated_at: Timestamp,
     elapsed_seconds: i64,
+    offset: Option<UtcOffset>,
 ) -> String {
     format!(
         "{latest_update} · Updated {} · Age {}",
-        format_timestamp(last_updated_at),
+        format_timestamp_for(last_updated_at, offset),
         format_elapsed(elapsed_seconds)
     )
 }
@@ -549,6 +600,25 @@ mod tests {
         assert_eq!(row.latest_update, "Summary: old → new");
         assert_eq!(row.last_updated_at, datetime!(2026-08-18 00:00 UTC));
         assert!(!row.latest_update.contains("account"));
+    }
+
+    #[test]
+    fn injected_fixture_offset_is_used_for_team_timestamps() {
+        let table = TeamTicketTableDelegate::new_with_density_and_offset(
+            &sample_issues(),
+            &sample_updates(),
+            &sample_users(),
+            datetime!(2026-08-19 00:00 UTC),
+            true,
+            Some(UtcOffset::UTC),
+        );
+        assert!(
+            table
+                .rows()
+                .iter()
+                .all(|row| row.last_updated.ends_with("UTC"))
+        );
+        assert!(table.rows().iter().all(|row| row.activity.contains("UTC")));
     }
 
     #[test]

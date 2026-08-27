@@ -6,6 +6,15 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
     format_timestamp_with_offset(value, offset)
 }
 
+/// Formats a timestamp with an injected offset for deterministic fixture views.
+/// `None` preserves the production local-time behavior.
+pub(crate) fn format_timestamp_for(value: OffsetDateTime, offset: Option<UtcOffset>) -> String {
+    offset.map_or_else(
+        || format_timestamp(value),
+        |offset| format_timestamp_with_offset(value, offset),
+    )
+}
+
 /// Resolve the system offset for this instant, rather than using the offset at the current time.
 /// This keeps historical/future timestamps correct across daylight-saving transitions. If the
 /// platform cannot resolve its local timezone, callers use UTC as a safe, explicit fallback.

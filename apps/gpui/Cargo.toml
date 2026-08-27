@@ -6,6 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "jira-ui-capture"
+path = "src/bin/jira-ui-capture.rs"
+required-features = ["ui-lab"]
+
+[features]
+default = []
+# Development-only native UI capture lab. This enables GPUI's direct offscreen
+# Metal renderer without changing the production binary or its package.
+ui-lab = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true

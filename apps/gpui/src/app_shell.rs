@@ -128,6 +128,7 @@ pub struct AppShell {
     api_token_subscription: Option<Subscription>,
     appearance_preference: AppearancePreference,
     appearance_subscription: Option<Subscription>,
+    connection_enabled: bool,
 }
 
 impl AppShell {
@@ -170,6 +171,7 @@ impl AppShell {
             api_token_subscription: None,
             appearance_preference: AppearancePreference::System,
             appearance_subscription: None,
+            connection_enabled: true,
         };
         shell.install_submit_shortcuts(window, cx);
         shell.appearance_subscription =
@@ -183,6 +185,50 @@ impl AppShell {
             shell.connection_status = Some(CHECKING_KEYRING_STATUS.to_owned());
             shell.start_saved_login_check(cx);
         }
+        shell
+    }
+
+    /// Constructs the production shell for an inert, fixture-backed UI-lab capture.
+    ///
+    /// This deliberately skips system-appearance synchronization, diagnostics setup, saved-login
+    /// checks, and all live startup work. The same connection form, title bar, theme control, and
+    /// responsive layout are still rendered; the connect action is disabled as a safety boundary.
+    #[cfg(feature = "ui-lab")]
+    pub(crate) fn new_for_ui_lab(
+        dashboard: Option<Entity<Dashboard>>,
+        theme: ThemeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let base_url =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://your-team.atlassian.net"));
+        let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
+        let api_token = Self::new_api_token(window, cx);
+        let appearance_preference = match theme {
+            ThemeMode::Light => AppearancePreference::Light,
+            ThemeMode::Dark => AppearancePreference::Dark,
+        };
+        let mut shell = Self {
+            dashboard,
+            diagnostics: DiagnosticsSink::disabled(),
+            base_url,
+            email,
+            api_token,
+            remember_credentials: REMEMBER_CREDENTIALS_DEFAULT,
+            connection_error: None,
+            connection_warning: None,
+            connection_status: None,
+            connecting: false,
+            notification_width: cx.theme().notification.width,
+            input_subscriptions: Vec::new(),
+            api_token_subscription: None,
+            appearance_preference,
+            appearance_subscription: None,
+            connection_enabled: false,
+        };
+        // Keep the real Input controls fully constructed. The installed production submit path
+        // is additionally guarded by `connection_enabled`, so it cannot initiate a request here.
+        shell.install_submit_shortcuts(window, cx);
         shell
     }
 
@@ -273,7 +319,7 @@ impl AppShell {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connecting {
+        if !self.connection_enabled || self.connecting {
             return;
         }
         let base_url = self.base_url.read(cx).unmask_value().to_string();
@@ -572,7 +618,7 @@ impl AppShell {
                                         "Connect"
                                     })
                                     .primary()
-                                    .disabled(self.connecting)
+                                    .disabled(self.connecting || !self.connection_enabled)
                                     .w_full()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.connect(window, cx);

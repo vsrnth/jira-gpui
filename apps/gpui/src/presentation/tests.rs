@@ -1,5 +1,5 @@
 use super::*;
-use crate::sample_data::{sample_issues, sample_users};
+use crate::sample_data::{sample_issues, sample_updates, sample_users};
 use jira_domain::{
     AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,
 };
@@ -596,6 +596,34 @@ fn formats_timestamp_with_explicit_offset_and_date_rollover() {
     assert_eq!(
         format_timestamp_with_offset(value, offset),
         "Aug 18, 2026 · 01:45 +02:00"
+    );
+}
+
+#[test]
+fn injected_fixture_offset_is_used_for_issue_and_update_strings() {
+    let offset = UtcOffset::UTC;
+    let issues = sample_issues();
+    let issue_views = issue_views_for_filter_with_offset(
+        &issues,
+        &sample_users(),
+        IssueStatusFilter::All,
+        "",
+        Some(offset),
+    );
+    assert!(issue_views.iter().all(|view| view.created.ends_with("UTC")));
+    assert!(issue_views.iter().all(|view| view.updated.ends_with("UTC")));
+
+    let groups = update_groups_for_events_with_offset(
+        &sample_updates(),
+        &issues,
+        &sample_users(),
+        Some(offset),
+    );
+    assert!(
+        groups
+            .iter()
+            .flat_map(|group| group.events.iter())
+            .all(|event| event.occurred_at.ends_with("UTC"))
     );
 }
 

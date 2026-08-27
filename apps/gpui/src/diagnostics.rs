@@ -71,7 +71,7 @@ impl DiagnosticsSink {
         Self::from_prepared_directory(directory)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "ui-lab"))]
     pub(crate) fn disabled() -> Self {
         Self::from_prepared_directory(None)
     }

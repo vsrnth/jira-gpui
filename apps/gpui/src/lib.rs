@@ -16,10 +16,12 @@ mod local_data;
 mod presentation;
 mod responsive;
 mod rich_text_view;
-#[cfg(test)]
+#[cfg(any(test, feature = "ui-lab"))]
 mod sample_data;
 mod semantic_icons;
 mod team_table;
+#[cfg(feature = "ui-lab")]
+pub mod ui_lab;
 
 pub use app_shell::AppShell;
 pub use config::{StartupSelection, startup_from_environment};

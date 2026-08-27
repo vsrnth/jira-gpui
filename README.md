@@ -128,6 +128,8 @@ cargo clippy --workspace --lib --bins --locked -- -D warnings
 cargo run -p jira-gpui
 ```
 
+For development-only GPUI-native fixture screenshots, see [the UI automation capture lab](docs/ui-automation.md).
+
 For the Linux AppImage and macOS DMG workflows and current validation
 boundaries, see [release and validation](docs/release.md),
 [Linux packaging](packaging/appimage/README.md), and

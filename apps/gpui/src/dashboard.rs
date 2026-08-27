@@ -1,6 +1,7 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use chrono::{Local, SecondsFormat};
+use time::UtcOffset;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -34,7 +35,7 @@ use jira_application::{
 use jira_desktop_notifications::{TEST_NOTIFICATION_BODY, TEST_NOTIFICATION_SUMMARY};
 use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "ui-lab"))]
 use crate::sample_data::{sample_issues, sample_updates, sample_users};
 
 use crate::{
@@ -54,10 +55,10 @@ use crate::{
         IssueStatusSelection, IssueViewModel, OutcomeCopy, ReadSurface, RecoveryDirective,
         SavedLoginOutcomeKind, UPDATE_PREVIEW_LIMIT, UpdateFilter, UpdateGroupViewModel,
         comment_outcome_copy, compact_update_rows, filtered_update_group_indices,
-        generic_summary_label, hidden_update_row_count, issue_views_for_filter,
+        generic_summary_label, hidden_update_row_count, issue_views_for_filter_with_offset,
         lookup_workspace_unavailable_copy, read_error_copy, saved_login_outcome_copy,
-        scope_outcome_copy, team_outcome_copy, update_group_event_ids, update_groups_for_events,
-        visible_update_row_count,
+        scope_outcome_copy, team_outcome_copy, update_group_event_ids,
+        update_groups_for_events_with_offset, visible_update_row_count,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
     rich_text_view::{
@@ -81,6 +82,8 @@ mod shell_view;
 mod team_view;
 mod updates_view;
 
+#[cfg(test)]
+use crate::presentation::issue_views_for_filter;
 #[cfg(test)]
 use team_view::{TEAM_DETAIL_RESIZE_HANDLE_WIDTH, team_table_min_width};
 use team_view::{TeamTableMode, clamped_team_detail_width, team_table_mode_for_width};
@@ -208,6 +211,27 @@ enum Section {
     Updates,
     Team,
     Settings,
+}
+
+#[cfg(feature = "ui-lab")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SampleSection {
+    Issues,
+    Updates,
+    Team,
+    Settings,
+}
+
+#[cfg(feature = "ui-lab")]
+impl From<SampleSection> for Section {
+    fn from(section: SampleSection) -> Self {
+        match section {
+            SampleSection::Issues => Self::Issues,
+            SampleSection::Updates => Self::Updates,
+            SampleSection::Team => Self::Team,
+            SampleSection::Settings => Self::Settings,
+        }
+    }
 }
 
 fn team_issue_counts(issues: &[Issue]) -> (usize, usize) {
@@ -520,6 +544,10 @@ pub struct Dashboard {
     team_feedback_loading: bool,
     team_task: Option<gpui::Task<()>>,
     team_age_task: Option<gpui::Task<()>>,
+    /// Fixture dashboards use a fixed clock; live dashboards resolve the clock at refresh time.
+    team_clock: Option<jira_domain::Timestamp>,
+    /// Fixture dashboards render all timestamps in UTC; live dashboards retain local time.
+    timestamp_offset: Option<UtcOffset>,
     team_automatic_polling_paused: bool,
     site_label: String,
     mode_label: String,
@@ -582,23 +610,84 @@ impl Dashboard {
             )
     }
 
-    #[cfg(test)]
-    pub fn from_sample_data() -> Self {
-        Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled())
+    #[cfg(any(test, feature = "ui-lab"))]
+    pub(crate) fn from_sample_data() -> Self {
+        Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled(), Section::Issues)
     }
 
-    #[cfg(test)]
-    fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink) -> Self {
+    #[cfg(feature = "ui-lab")]
+    pub(crate) fn from_sample_data_for_section(section: SampleSection) -> Self {
+        let mut dashboard = match section {
+            SampleSection::Issues => Self::from_sample_data(),
+            SampleSection::Updates | SampleSection::Team | SampleSection::Settings => {
+                Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled(), section.into())
+            }
+        };
+        dashboard.section = section.into();
+        if matches!(section, SampleSection::Team) {
+            dashboard.team_members = vec![
+                PersistedTeamMember {
+                    identifier: "amina".to_owned(),
+                    account_id: "amina".to_owned(),
+                    display_name: "Amina Yusuf".to_owned(),
+                },
+                PersistedTeamMember {
+                    identifier: "devon".to_owned(),
+                    account_id: "devon".to_owned(),
+                    display_name: "Devon Park".to_owned(),
+                },
+            ];
+            dashboard.team_issues =
+                dashboard
+                    .domain_issues
+                    .iter()
+                    .filter(|issue| {
+                        issue.status.category.as_deref().is_some_and(|category| {
+                            category.trim().eq_ignore_ascii_case("in progress")
+                        }) && issue.assignee.as_ref().is_some_and(|assignee| {
+                            dashboard
+                                .team_members
+                                .iter()
+                                .any(|member| member.account_id == assignee.as_str())
+                        })
+                    })
+                    .cloned()
+                    .collect();
+            dashboard.team_events = sample_updates();
+            dashboard.team_text = dashboard
+                .team_members
+                .iter()
+                .map(|member| member.identifier.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        dashboard
+    }
+
+    #[cfg(any(test, feature = "ui-lab"))]
+    fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink, section: Section) -> Self {
         let domain_issues = sample_issues();
         let users = sample_users();
         let sample_events = sample_updates();
-        let update_groups = update_groups_for_events(&sample_events, &domain_issues, &users);
-        let issues = issue_views_for_filter(&domain_issues, &users, IssueStatusFilter::All, "");
+        let timestamp_offset = Some(UtcOffset::UTC);
+        let update_groups = update_groups_for_events_with_offset(
+            &sample_events,
+            &domain_issues,
+            &users,
+            timestamp_offset,
+        );
+        let issues = issue_views_for_filter_with_offset(
+            &domain_issues,
+            &users,
+            IssueStatusFilter::All,
+            "",
+            timestamp_offset,
+        );
         let selected_issue = issues.first().map(|issue| issue.id.clone());
 
         Self {
             diagnostics: diagnostics.clone(),
-            section: Section::Issues,
+            section,
             domain_issues,
             issues,
             update_groups,
@@ -623,6 +712,8 @@ impl Dashboard {
             team_feedback_loading: false,
             team_task: None,
             team_age_task: None,
+            team_clock: Some(time::macros::datetime!(2026-08-18 00:00 UTC)),
+            timestamp_offset: Some(UtcOffset::UTC),
             team_automatic_polling_paused: false,
             site_label: "sample.atlassian.net".to_owned(),
             mode_label: "Local preview mode".to_owned(),
@@ -718,6 +809,8 @@ impl Dashboard {
             team_feedback_loading: false,
             team_task: None,
             team_age_task: None,
+            team_clock: None,
+            timestamp_offset: None,
             team_automatic_polling_paused: false,
             site_label: session.site_label,
             mode_label:
@@ -1029,11 +1122,12 @@ impl Dashboard {
     }
 
     fn rebuild_issue_views(&mut self, refresh_detail: bool, cx: &mut Context<Self>) {
-        self.issues = issue_views_for_filter(
+        self.issues = issue_views_for_filter_with_offset(
             &self.domain_issues,
             &self.users,
             self.status_filter,
             &self.search_query,
+            self.timestamp_offset,
         );
         let retained_selection =
             selection_after_issue_view_rebuild(self.selected_issue.clone(), &self.issues);
@@ -2064,7 +2158,12 @@ impl Dashboard {
 
     fn apply_cached(&mut self, cached: CachedWorkspace, cx: &mut Context<Self>) {
         let CachedWorkspace { issues, events } = cached;
-        let update_groups = update_groups_for_events(&events, &issues, &self.users);
+        let update_groups = update_groups_for_events_with_offset(
+            &events,
+            &issues,
+            &self.users,
+            self.timestamp_offset,
+        );
         self.apply_live_issues(issues, true, cx);
         self.update_groups = update_groups;
     }
@@ -2082,14 +2181,12 @@ impl Dashboard {
         let issues = self.team_issues.clone();
         let events = self.team_events.clone();
         let users = self.users.clone();
+        let now = self
+            .team_clock
+            .unwrap_or_else(jira_domain::Timestamp::now_utc);
+        let offset = self.timestamp_offset;
         table.update(cx, |table, cx| {
-            table.replace_team_ticket_rows(
-                &issues,
-                &events,
-                &users,
-                jira_domain::Timestamp::now_utc(),
-                cx,
-            );
+            table.replace_team_ticket_rows_with_offset(&issues, &events, &users, now, offset, cx);
         });
     }
 
@@ -2106,12 +2203,14 @@ impl Dashboard {
         }
         let table_mode = team_table_mode_for_width(f32::from(window.viewport_size().width));
         let dense_columns = !matches!(table_mode, TeamTableMode::WideTable);
-        let delegate = TeamTicketTableDelegate::new_with_density(
+        let delegate = TeamTicketTableDelegate::new_with_density_and_offset(
             &self.team_issues,
             &self.team_events,
             &self.users,
-            jira_domain::Timestamp::now_utc(),
+            self.team_clock
+                .unwrap_or_else(jira_domain::Timestamp::now_utc),
             dense_columns,
+            self.timestamp_offset,
         );
         let table = cx.new(|cx| TableState::new(delegate, window, cx));
         self.team_table_subscriptions.push(cx.subscribe_in(
@@ -2147,35 +2246,42 @@ impl Dashboard {
             },
         ));
         self.team_table = Some(table);
-        let table = self.team_table.clone().expect("team table created");
-        self.team_age_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(60))
-                    .await;
-                let result = this.update(cx, |this, cx| {
-                    if this.team_table.is_none() {
-                        return false;
-                    }
-                    let issues = this.team_issues.clone();
-                    let events = this.team_events.clone();
-                    let users = this.users.clone();
-                    table.update(cx, |table, cx| {
-                        table.replace_team_ticket_rows(
-                            &issues,
-                            &events,
-                            &users,
-                            jira_domain::Timestamp::now_utc(),
-                            cx,
-                        );
+        // Fixture dashboards use a fixed clock and do not need a repeating task. Live dashboards
+        // retain the age refresh so their elapsed values continue to track the current time.
+        if self.team_clock.is_none() {
+            let table = self.team_table.clone().expect("team table created");
+            let team_clock = self.team_clock;
+            let timestamp_offset = self.timestamp_offset;
+            self.team_age_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                    let result = this.update(cx, |this, cx| {
+                        if this.team_table.is_none() {
+                            return false;
+                        }
+                        let issues = this.team_issues.clone();
+                        let events = this.team_events.clone();
+                        let users = this.users.clone();
+                        table.update(cx, |table, cx| {
+                            table.replace_team_ticket_rows_with_offset(
+                                &issues,
+                                &events,
+                                &users,
+                                team_clock.unwrap_or_else(jira_domain::Timestamp::now_utc),
+                                timestamp_offset,
+                                cx,
+                            );
+                        });
+                        true
                     });
-                    true
-                });
-                if !matches!(result, Ok(true)) {
-                    break;
+                    if !matches!(result, Ok(true)) {
+                        break;
+                    }
                 }
-            }
-        }));
+            }));
+        }
     }
 
     fn begin_team_refresh(&mut self, cx: &mut Context<Self>) {

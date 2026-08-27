@@ -10,11 +10,14 @@ mod outcomes;
 mod updates;
 
 pub use identity::IdentityDirectory;
+pub(crate) use issues::issue_views_for_filter_with_offset;
 #[allow(unused_imports)]
 pub use issues::{
     AttachmentViewModel, CommentViewModel, IssueDetailViewModel, IssueStatusFilter,
     IssueStatusSelection, IssueViewModel, issue_views_for_filter, normalized_issue_key,
 };
+pub(crate) use updates::update_groups_for_events_with_offset;
+#[allow(unused_imports)]
 pub use updates::{UpdateGroupViewModel, update_groups_for_events};
 
 pub(crate) use outcomes::{
@@ -36,7 +39,8 @@ pub(crate) use updates::{
     update_group_event_ids, visible_update_row_count,
 };
 
-pub(crate) use format::format_timestamp;
+#[allow(unused_imports)]
+pub(crate) use format::{format_timestamp, format_timestamp_for};
 pub(crate) use updates::describe_update_with_directory;
 
 #[cfg(test)]

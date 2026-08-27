@@ -16,10 +16,11 @@ pub struct UpdateViewModel {
 }
 
 impl UpdateViewModel {
-    fn from_domain_with_directory(
+    fn from_domain_with_directory_and_offset(
         event: &UpdateEvent,
         issue: Option<&Issue>,
         identities: &IdentityDirectory,
+        offset: Option<time::UtcOffset>,
     ) -> Self {
         Self {
             event_id: event.id.clone(),
@@ -29,7 +30,7 @@ impl UpdateViewModel {
                 .map(|issue| issue.summary.clone())
                 .unwrap_or_else(|| "Issue no longer in this view".to_owned()),
             change: describe_change(&event.kind, identities),
-            occurred_at: format::format_timestamp(event.occurred_at),
+            occurred_at: format::format_timestamp_for(event.occurred_at, offset),
             unread: event.read_state == UpdateReadState::Unread,
         }
     }
@@ -56,10 +57,21 @@ pub struct UpdateGroupViewModel {
 /// Issue metadata is looked up by ID, while the event's key is retained as the safe fallback when
 /// the issue is no longer present in the current issue view. Account IDs are resolved through one
 /// shared identity directory, matching the existing individual update mapping behavior.
+#[allow(dead_code)]
 pub fn update_groups_for_events(
     events: &[UpdateEvent],
     issues: &[Issue],
     users: &[User],
+) -> Vec<UpdateGroupViewModel> {
+    update_groups_for_events_with_offset(events, issues, users, None)
+}
+
+/// Groups updates while optionally using a fixed presentation offset for fixture rendering.
+pub(crate) fn update_groups_for_events_with_offset(
+    events: &[UpdateEvent],
+    issues: &[Issue],
+    users: &[User],
+    offset: Option<time::UtcOffset>,
 ) -> Vec<UpdateGroupViewModel> {
     let mut identities = IdentityDirectory::from_users(users);
     let issues_by_id: HashMap<jira_domain::IssueId, &Issue> = issues
@@ -75,7 +87,12 @@ pub fn update_groups_for_events(
 
     for event in events {
         let issue = issues_by_id.get(&event.issue_id).copied();
-        let update = UpdateViewModel::from_domain_with_directory(event, issue, &identities);
+        let update = UpdateViewModel::from_domain_with_directory_and_offset(
+            event,
+            issue,
+            &identities,
+            offset,
+        );
         let event_id = event.issue_id.clone();
         if let Some(&group_index) = group_indexes.get(&event_id) {
             let group = &mut groups[group_index];
@@ -87,7 +104,7 @@ pub fn update_groups_for_events(
                 .is_none_or(|latest| event.occurred_at > *latest)
             {
                 latest_times.insert(event_id, event.occurred_at);
-                group.latest_occurred_at = format::format_timestamp(event.occurred_at);
+                group.latest_occurred_at = format::format_timestamp_for(event.occurred_at, offset);
             }
         } else {
             let group_index = groups.len();

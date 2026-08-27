@@ -79,11 +79,24 @@ impl IssueStatusSelection {
     }
 }
 
+#[allow(dead_code)]
 pub fn issue_views_for_filter(
     issues: &[Issue],
     users: &[User],
     filter: IssueStatusFilter,
     search: &str,
+) -> Vec<IssueViewModel> {
+    issue_views_for_filter_with_offset(issues, users, filter, search, None)
+}
+
+/// Builds issue views with an optional presentation offset. Fixture callers inject UTC while
+/// normal callers retain the host-local display contract through `None`.
+pub(crate) fn issue_views_for_filter_with_offset(
+    issues: &[Issue],
+    users: &[User],
+    filter: IssueStatusFilter,
+    search: &str,
+    offset: Option<time::UtcOffset>,
 ) -> Vec<IssueViewModel> {
     let filter = IssueStatusSelection::from_values(filter.values());
     let search = search.trim().to_ascii_lowercase();
@@ -99,7 +112,9 @@ pub fn issue_views_for_filter(
                 || issue.key.to_string().to_ascii_lowercase().contains(&search)
                 || issue.summary.to_ascii_lowercase().contains(&search)
         })
-        .map(|issue| IssueViewModel::from_domain_with_directory(issue, &identities))
+        .map(|issue| {
+            IssueViewModel::from_domain_with_directory_and_offset(issue, &identities, offset)
+        })
         .collect()
 }
 
@@ -138,10 +153,14 @@ impl IssueViewModel {
     pub fn from_domain(issue: &Issue, users: &[User]) -> Self {
         let mut identities = IdentityDirectory::from_users(users);
         identities.include_issue(issue);
-        Self::from_domain_with_directory(issue, &identities)
+        Self::from_domain_with_directory_and_offset(issue, &identities, None)
     }
 
-    fn from_domain_with_directory(issue: &Issue, identities: &IdentityDirectory) -> Self {
+    fn from_domain_with_directory_and_offset(
+        issue: &Issue,
+        identities: &IdentityDirectory,
+        offset: Option<time::UtcOffset>,
+    ) -> Self {
         Self {
             id: issue.id.clone(),
             key: issue.key.to_string(),
@@ -173,8 +192,8 @@ impl IssueViewModel {
                 .clone()
                 .unwrap_or_else(|| "No description supplied.".to_owned()),
             rich_description: issue.rich_description.clone(),
-            created: format::format_timestamp(issue.created_at),
-            updated: format::format_timestamp(issue.updated_at),
+            created: format::format_timestamp_for(issue.created_at, offset),
+            updated: format::format_timestamp_for(issue.updated_at, offset),
             due_date: issue
                 .due_date
                 .map(format::format_date)
@@ -211,6 +230,14 @@ pub struct AttachmentViewModel {
 
 impl IssueDetailViewModel {
     pub fn from_domain(detail: &IssueDetail, users: &[User]) -> Self {
+        Self::from_domain_with_offset(detail, users, None)
+    }
+
+    pub(crate) fn from_domain_with_offset(
+        detail: &IssueDetail,
+        users: &[User],
+        offset: Option<time::UtcOffset>,
+    ) -> Self {
         let mut identities = IdentityDirectory::from_users(users);
         identities.include_issue(&detail.core.issue);
         for comment in &detail.comments {
@@ -223,8 +250,10 @@ impl IssueDetailViewModel {
                 author: identities.display_author(comment.author.as_ref()),
                 body: comment.body.clone(),
                 rich_body: comment.rich_body.clone(),
-                created: format::format_timestamp(comment.created_at),
-                updated: comment.updated_at.map(format::format_timestamp),
+                created: format::format_timestamp_for(comment.created_at, offset),
+                updated: comment
+                    .updated_at
+                    .map(|value| format::format_timestamp_for(value, offset)),
             })
             .collect();
         let attachments = detail
