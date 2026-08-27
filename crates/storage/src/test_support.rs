@@ -1326,193 +1326,108 @@ mod tests {
     use super::*;
     use crate::{InMemoryStore, SqliteStore};
 
-    macro_rules! contract_test {
-        ($name:ident, $store:expr, $scenario:ident) => {
+    macro_rules! contract_tests {
+        ($scenario:ident, $in_memory_name:ident, $sqlite_name:ident) => {
             #[test]
-            fn $name() {
-                $scenario($store);
+            fn $in_memory_name() {
+                $scenario(InMemoryStore::new());
+            }
+
+            #[test]
+            fn $sqlite_name() {
+                $scenario(SqliteStore::in_memory().expect("open store"));
             }
         };
     }
 
-    contract_test!(
+    contract_tests!(
+        issue_cache_ordering_and_pagination,
         in_memory_issue_cache_ordering_and_pagination,
-        InMemoryStore::new(),
-        issue_cache_ordering_and_pagination
+        sqlite_issue_cache_ordering_and_pagination
     );
-    contract_test!(
-        sqlite_issue_cache_ordering_and_pagination,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_ordering_and_pagination
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_query_filters,
         in_memory_issue_cache_query_filters,
-        InMemoryStore::new(),
-        issue_cache_query_filters
+        sqlite_issue_cache_query_filters
     );
-    contract_test!(
-        sqlite_issue_cache_query_filters,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_query_filters
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_membership_replace_and_extend,
         in_memory_issue_cache_membership_replace_and_extend,
-        InMemoryStore::new(),
-        issue_cache_membership_replace_and_extend
+        sqlite_issue_cache_membership_replace_and_extend
     );
-    contract_test!(
-        sqlite_issue_cache_membership_replace_and_extend,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_membership_replace_and_extend
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_site_and_user_set_isolation,
         in_memory_issue_cache_site_and_user_set_isolation,
-        InMemoryStore::new(),
-        issue_cache_site_and_user_set_isolation
+        sqlite_issue_cache_site_and_user_set_isolation
     );
-    contract_test!(
-        sqlite_issue_cache_site_and_user_set_isolation,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_site_and_user_set_isolation
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_sync_state_persistence,
         in_memory_issue_cache_sync_state_persistence,
-        InMemoryStore::new(),
-        issue_cache_sync_state_persistence
+        sqlite_issue_cache_sync_state_persistence
     );
-    contract_test!(
-        sqlite_issue_cache_sync_state_persistence,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_sync_state_persistence
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_invalid_commit_is_atomic,
         in_memory_issue_cache_invalid_commit_is_atomic,
-        InMemoryStore::new(),
-        issue_cache_invalid_commit_is_atomic
+        sqlite_issue_cache_invalid_commit_is_atomic
     );
-    contract_test!(
-        sqlite_issue_cache_invalid_commit_is_atomic,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_invalid_commit_is_atomic
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_records_sync_failures,
         in_memory_issue_cache_records_sync_failures,
-        InMemoryStore::new(),
-        issue_cache_records_sync_failures
+        sqlite_issue_cache_records_sync_failures
     );
-    contract_test!(
-        sqlite_issue_cache_records_sync_failures,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_records_sync_failures
-    );
-    contract_test!(
+    contract_tests!(
+        issue_cache_records_notification_delivery,
         in_memory_issue_cache_records_notification_delivery,
-        InMemoryStore::new(),
-        issue_cache_records_notification_delivery
+        sqlite_issue_cache_records_notification_delivery
     );
-    contract_test!(
-        sqlite_issue_cache_records_notification_delivery,
-        SqliteStore::in_memory().expect("open store"),
-        issue_cache_records_notification_delivery
-    );
-    contract_test!(
+    contract_tests!(
+        update_event_idempotency_and_association_union,
         in_memory_update_event_idempotency_and_association_union,
-        InMemoryStore::new(),
-        update_event_idempotency_and_association_union
+        sqlite_update_event_idempotency_and_association_union
     );
-    contract_test!(
-        sqlite_update_event_idempotency_and_association_union,
-        SqliteStore::in_memory().expect("open store"),
-        update_event_idempotency_and_association_union
-    );
-    contract_test!(
+    contract_tests!(
+        update_event_identity_formats_are_opaque_and_deduplicated,
         in_memory_update_event_identity_formats_are_opaque_and_deduplicated,
-        InMemoryStore::new(),
-        update_event_identity_formats_are_opaque_and_deduplicated
+        sqlite_update_event_identity_formats_are_opaque_and_deduplicated
     );
-    contract_test!(
-        sqlite_update_event_identity_formats_are_opaque_and_deduplicated,
-        SqliteStore::in_memory().expect("open store"),
-        update_event_identity_formats_are_opaque_and_deduplicated
-    );
-    contract_test!(
+    contract_tests!(
+        update_event_conflict_rejects_without_partial_mutation,
         in_memory_update_event_conflict_rejects_without_partial_mutation,
-        InMemoryStore::new(),
-        update_event_conflict_rejects_without_partial_mutation
+        sqlite_update_event_conflict_rejects_without_partial_mutation
     );
-    contract_test!(
-        sqlite_update_event_conflict_rejects_without_partial_mutation,
-        SqliteStore::in_memory().expect("open store"),
-        update_event_conflict_rejects_without_partial_mutation
-    );
-    contract_test!(
+    contract_tests!(
+        update_feed_orders_filters_and_counts,
         in_memory_update_feed_orders_filters_and_counts,
-        InMemoryStore::new(),
-        update_feed_orders_filters_and_counts
+        sqlite_update_feed_orders_filters_and_counts
     );
-    contract_test!(
-        sqlite_update_feed_orders_filters_and_counts,
-        SqliteStore::in_memory().expect("open store"),
-        update_feed_orders_filters_and_counts
-    );
-    contract_test!(
+    contract_tests!(
+        user_sets_are_site_isolated_and_preserve_member_order,
         in_memory_user_sets_are_site_isolated_and_preserve_member_order,
-        InMemoryStore::new(),
-        user_sets_are_site_isolated_and_preserve_member_order
+        sqlite_user_sets_are_site_isolated_and_preserve_member_order
     );
-    contract_test!(
-        sqlite_user_sets_are_site_isolated_and_preserve_member_order,
-        SqliteStore::in_memory().expect("open store"),
-        user_sets_are_site_isolated_and_preserve_member_order
-    );
-    contract_test!(
+    contract_tests!(
+        deleting_user_set_cascades_observable_local_state,
         in_memory_deleting_user_set_cascades_observable_local_state,
-        InMemoryStore::new(),
-        deleting_user_set_cascades_observable_local_state
+        sqlite_deleting_user_set_cascades_observable_local_state
     );
-    contract_test!(
-        sqlite_deleting_user_set_cascades_observable_local_state,
-        SqliteStore::in_memory().expect("open store"),
-        deleting_user_set_cascades_observable_local_state
-    );
-    contract_test!(
+    contract_tests!(
+        issue_edit_cache_locator_kind_and_site_isolation,
         in_memory_issue_edit_cache_locator_kind_and_site_isolation,
-        InMemoryStore::new(),
-        issue_edit_cache_locator_kind_and_site_isolation
+        sqlite_issue_edit_cache_locator_kind_and_site_isolation
     );
-    contract_test!(
-        sqlite_issue_edit_cache_locator_kind_and_site_isolation,
-        SqliteStore::in_memory().expect("open store"),
-        issue_edit_cache_locator_kind_and_site_isolation
-    );
-    contract_test!(
+    contract_tests!(
+        issue_edit_cache_replacement_and_timestamp_round_trip,
         in_memory_issue_edit_cache_replacement_and_timestamp_round_trip,
-        InMemoryStore::new(),
-        issue_edit_cache_replacement_and_timestamp_round_trip
+        sqlite_issue_edit_cache_replacement_and_timestamp_round_trip
     );
-    contract_test!(
-        sqlite_issue_edit_cache_replacement_and_timestamp_round_trip,
-        SqliteStore::in_memory().expect("open store"),
-        issue_edit_cache_replacement_and_timestamp_round_trip
-    );
-    contract_test!(
+    contract_tests!(
+        issue_edit_cache_transition_invalidation,
         in_memory_issue_edit_cache_transition_invalidation,
-        InMemoryStore::new(),
-        issue_edit_cache_transition_invalidation
+        sqlite_issue_edit_cache_transition_invalidation
     );
-    contract_test!(
-        sqlite_issue_edit_cache_transition_invalidation,
-        SqliteStore::in_memory().expect("open store"),
-        issue_edit_cache_transition_invalidation
-    );
-    contract_test!(
+    contract_tests!(
+        issue_edit_cache_enforces_configured_bounds,
         in_memory_issue_edit_cache_enforces_configured_bounds,
-        InMemoryStore::new(),
-        issue_edit_cache_enforces_configured_bounds
-    );
-    contract_test!(
-        sqlite_issue_edit_cache_enforces_configured_bounds,
-        SqliteStore::in_memory().expect("open store"),
-        issue_edit_cache_enforces_configured_bounds
+        sqlite_issue_edit_cache_enforces_configured_bounds
     );
 }
