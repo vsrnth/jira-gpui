@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "kind": "jira-ui-lab-matrix",
+  "cases": [
+    {
+      "filename": "onboarding-light-960x700.png",
+      "scenario": "onboarding",
+      "theme": "light",
+      "logical_width": 960,
+      "logical_height": 700,
+      "width": 1920,
+      "height": 1400
+    },
+    {
+      "filename": "issues-dark-1280x900.png",
+      "scenario": "issues",
+      "theme": "dark",
+      "logical_width": 1280,
+      "logical_height": 900,
+      "width": 2560,
+      "height": 1766
+    },
+    {
+      "filename": "updates-light-1095x700.png",
+      "scenario": "updates",
+      "theme": "light",
+      "logical_width": 1095,
+      "logical_height": 700,
+      "width": 2190,
+      "height": 1400
+    },
+    {
+      "filename": "team-dark-1370x900.png",
+      "scenario": "team",
+      "theme": "dark",
+      "logical_width": 1370,
+      "logical_height": 900,
+      "width": 2740,
+      "height": 1766
+    },
+    {
+      "filename": "settings-light-960x700.png",
+      "scenario": "settings",
+      "theme": "light",
+      "logical_width": 960,
+      "logical_height": 700,
+      "width": 1920,
+      "height": 1400
+    }
+  ]
+}
