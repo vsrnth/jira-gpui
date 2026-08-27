@@ -686,76 +686,100 @@ mod tests {
             ("cancel", vec!["image_fetch_result", "image_state"]),
         ];
         for (label, expected_events) in cases {
-            let directory = TempDirectory::new(label);
-            let fake = FakeImageService::default();
-            let mut candidate = image(label);
-            if label == "unsupported" {
-                candidate.mime_type = "application/pdf".to_owned();
-            }
-            if label == "failure" {
-                fake.push_response(Err(jira_application::ApplicationError::new(
-                    jira_application::ErrorKind::Offline,
-                    "secret raw service message",
-                )));
-            } else if label == "success" {
-                fake.push_response(Ok(png_image(label, 16)));
-            } else if label == "rejection" {
-                let mut response = png_image(label, 16);
-                response.mime_type = "text/html".to_owned();
-                fake.push_response(Ok(response));
-            }
-            let cancellation = CancellationToken::new();
-            if label == "cancel" {
-                cancellation.cancel();
-            }
-            let _ = run_loader(
-                &fake,
-                vec![(candidate, 9, ImageSource::FallbackCandidate)],
-                cancellation,
-                DiagnosticsSink::for_directory(&directory.0),
-            );
-            let lines = directory.lines();
-            assert_eq!(event_names(&lines), expected_events);
-            assert!(lines.iter().all(|line| {
-                !line.contains("secret")
-                    && !line.contains("raw service")
-                    && !line.contains("attachment-")
-            }));
-            for line in &lines {
-                assert_context(line, 0, 9, "fallback_candidate");
-            }
-            match label {
-                "unsupported" => {
-                    assert!(lines[1].contains(r#""preflight":"unsupported_cached_mime"#));
-                    assert!(lines[2].contains(r#""error":"invalid_input"#));
-                    assert!(lines[3].contains(r#""reason":"unsupported"#));
-                    assert_eq!(fake.call_count(), 0);
-                }
-                "failure" => {
-                    assert!(lines[1].contains(r#""error":"offline"#));
-                    assert!(lines[2].contains(r#""reason":"failed"#));
-                    assert_eq!(fake.call_count(), 1);
-                }
-                "success" => {
-                    assert!(lines[1].contains(r#""preflight":"accepted"#));
-                    assert!(lines[2].contains(r#""outcome":"succeeded"#));
-                    assert!(lines[3].contains(r#""reason":"ready"#));
-                    assert_eq!(fake.call_count(), 1);
-                }
-                "rejection" => {
-                    assert!(lines[1].contains(r#""preflight":"response_mime_rejected"#));
-                    assert!(lines[2].contains(r#""error":"invalid_input"#));
-                    assert!(lines[3].contains(r#""reason":"failed"#));
-                    assert_eq!(fake.call_count(), 1);
-                }
-                "cancel" => {
-                    assert!(lines[0].contains(r#""error":"cancelled"#));
-                    assert!(lines[1].contains(r#""reason":"cancelled"#));
-                    assert_eq!(fake.call_count(), 0);
-                }
-                _ => unreachable!(),
-            }
+            let (fake, _directory, lines) = run_diagnostic_case(label);
+            assert_diagnostic_case(label, &expected_events, &fake, &lines);
         }
+    }
+
+    fn run_diagnostic_case(label: &str) -> (FakeImageService, TempDirectory, Vec<String>) {
+        let directory = TempDirectory::new(label);
+        let fake = FakeImageService::default();
+        let mut candidate = image(label);
+        if label == "unsupported" {
+            candidate.mime_type = "application/pdf".to_owned();
+        }
+        if label == "failure" {
+            fake.push_response(Err(jira_application::ApplicationError::new(
+                jira_application::ErrorKind::Offline,
+                "secret raw service message",
+            )));
+        } else if label == "success" {
+            fake.push_response(Ok(png_image(label, 16)));
+        } else if label == "rejection" {
+            let mut response = png_image(label, 16);
+            response.mime_type = "text/html".to_owned();
+            fake.push_response(Ok(response));
+        }
+        let cancellation = CancellationToken::new();
+        if label == "cancel" {
+            cancellation.cancel();
+        }
+        let _ = run_loader(
+            &fake,
+            vec![(candidate, 9, ImageSource::FallbackCandidate)],
+            cancellation,
+            DiagnosticsSink::for_directory(&directory.0),
+        );
+        let lines = directory.lines();
+        (fake, directory, lines)
+    }
+
+    fn assert_diagnostic_case(
+        label: &str,
+        expected_events: &[&str],
+        fake: &FakeImageService,
+        lines: &[String],
+    ) {
+        assert_eq!(event_names(lines), expected_events);
+        assert!(lines.iter().all(|line| {
+            !line.contains("secret")
+                && !line.contains("raw service")
+                && !line.contains("attachment-")
+        }));
+        for line in lines {
+            assert_context(line, 0, 9, "fallback_candidate");
+        }
+        match label {
+            "unsupported" => assert_unsupported_diagnostic_case(fake, lines),
+            "failure" => assert_failure_diagnostic_case(fake, lines),
+            "success" => assert_success_diagnostic_case(fake, lines),
+            "rejection" => assert_rejection_diagnostic_case(fake, lines),
+            "cancel" => assert_cancel_diagnostic_case(fake, lines),
+            _ => unreachable!(),
+        }
+    }
+
+    fn assert_unsupported_diagnostic_case(fake: &FakeImageService, lines: &[String]) {
+        assert!(lines[1].contains(r#""preflight":"unsupported_cached_mime"#));
+        assert!(lines[2].contains(r#""error":"invalid_input"#));
+        assert!(lines[3].contains(r#""reason":"unsupported"#));
+        assert_eq!(fake.call_count(), 0);
+    }
+
+    fn assert_failure_diagnostic_case(fake: &FakeImageService, lines: &[String]) {
+        assert!(lines[1].contains(r#""error":"offline"#));
+        assert!(lines[2].contains(r#""reason":"failed"#));
+        assert_eq!(fake.call_count(), 1);
+    }
+
+    fn assert_success_diagnostic_case(fake: &FakeImageService, lines: &[String]) {
+        assert!(lines[1].contains(r#""preflight":"accepted"#));
+        assert!(lines[2].contains(r#""outcome":"succeeded"#));
+        assert!(lines[3].contains(r#""reason":"ready"#));
+        assert_eq!(fake.call_count(), 1);
+    }
+
+    fn assert_rejection_diagnostic_case(fake: &FakeImageService, lines: &[String]) {
+        assert!(lines[1].contains(r#""preflight":"response_mime_rejected"#));
+        assert!(lines[2].contains(r#""error":"invalid_input"#));
+        assert!(lines[3].contains(r#""reason":"failed"#));
+        assert_eq!(fake.call_count(), 1);
+    }
+
+    fn assert_cancel_diagnostic_case(fake: &FakeImageService, lines: &[String]) {
+        assert!(lines[0].contains(r#""error":"cancelled"#));
+        assert!(lines[1].contains(r#""reason":"cancelled"#));
+        assert_eq!(fake.call_count(), 0);
     }
 
     #[test]

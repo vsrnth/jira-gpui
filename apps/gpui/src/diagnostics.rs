@@ -478,6 +478,18 @@ mod tests {
     fn attachment_diagnostic_is_fixed_schema_enum_only_and_bounded() {
         let root = temporary_root("attachment-diagnostic");
         let sink = DiagnosticsSink::for_directory(&root);
+        record_attachment_diagnostic_cases(&sink);
+
+        let lines = read_lines(&root.join(DIAGNOSTICS_FILENAME));
+        assert_eq!(lines.len(), 4);
+        assert_status_attachment_line(&lines[0]);
+        assert_mime_attachment_line(&lines[1]);
+        assert_body_attachment_line(&lines[2]);
+        assert_transport_attachment_line(&lines[3]);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn record_attachment_diagnostic_cases(sink: &DiagnosticsSink) {
         sink.attachment_read_diagnostic(
             DiagnosticFlow::RemoteLookup,
             u64::MAX,
@@ -522,44 +534,45 @@ mod tests {
                 jira_application::AttachmentTransportClass::TimedOut,
             ),
         );
+    }
 
-        let lines = read_lines(&root.join(DIAGNOSTICS_FILENAME));
-        assert_eq!(lines.len(), 4);
-        let status_line = &lines[0];
-        assert!(is_json_line(status_line));
-        assert!(status_line.len() <= MAX_LINE_BYTES);
-        assert!(status_line.contains(r#""event":"attachment_read_diagnostic""#));
-        assert!(status_line.contains(r#""attempt":"original_fallback""#));
-        assert!(status_line.contains(r#""stage":"status""#));
-        assert!(status_line.contains(r#""status_code":599"#));
-        assert!(status_line.contains(r#""mime_class":null"#));
-        assert!(status_line.contains(r#""body_class":null"#));
-        assert!(status_line.contains(r#""transport_class":null"#));
-        assert!(!status_line.contains("https://jira.example"));
-        assert!(!status_line.contains("attachment-123"));
-        assert!(!status_line.contains("secret.png"));
-        assert!(!status_line.contains("Content-Type"));
-        assert!(!status_line.contains("image/octet-stream"));
-        assert!(!status_line.contains("raw response body"));
+    fn assert_status_attachment_line(line: &str) {
+        assert!(is_json_line(line));
+        assert!(line.len() <= MAX_LINE_BYTES);
+        assert!(line.contains(r#""event":"attachment_read_diagnostic""#));
+        assert!(line.contains(r#""attempt":"original_fallback""#));
+        assert!(line.contains(r#""stage":"status""#));
+        assert!(line.contains("\"status_code\":599"));
+        assert!(line.contains("\"mime_class\":null"));
+        assert!(line.contains("\"body_class\":null"));
+        assert!(line.contains("\"transport_class\":null"));
+        assert!(!line.contains("https://jira.example"));
+        assert!(!line.contains("attachment-123"));
+        assert!(!line.contains("secret.png"));
+        assert!(!line.contains("Content-Type"));
+        assert!(!line.contains("image/octet-stream"));
+        assert!(!line.contains("raw response body"));
+    }
 
-        let mime_line = &lines[1];
-        assert!(is_json_line(mime_line));
-        assert!(mime_line.contains(r#""stage":"content_type""#));
-        assert!(mime_line.contains(r#""status_code":null"#));
-        assert!(mime_line.contains(r#""mime_class":"octet_stream""#));
-        assert!(mime_line.contains(r#""body_class":null"#));
-        assert!(mime_line.contains(r#""transport_class":null"#));
+    fn assert_mime_attachment_line(line: &str) {
+        assert!(is_json_line(line));
+        assert!(line.contains("\"stage\":\"content_type\""));
+        assert!(line.contains("\"status_code\":null"));
+        assert!(line.contains("\"mime_class\":\"octet_stream\""));
+        assert!(line.contains("\"body_class\":null"));
+        assert!(line.contains("\"transport_class\":null"));
+    }
 
-        let body_line = &lines[2];
-        assert!(is_json_line(body_line));
-        assert!(body_line.contains(r#""stage":"body""#));
-        assert!(body_line.contains(r#""body_class":"too_large""#));
+    fn assert_body_attachment_line(line: &str) {
+        assert!(is_json_line(line));
+        assert!(line.contains("\"stage\":\"body\""));
+        assert!(line.contains("\"body_class\":\"too_large\""));
+    }
 
-        let transport_line = &lines[3];
-        assert!(is_json_line(transport_line));
-        assert!(transport_line.contains(r#""stage":"transport""#));
-        assert!(transport_line.contains(r#""transport_class":"timed_out""#));
-        fs::remove_dir_all(root).expect("cleanup");
+    fn assert_transport_attachment_line(line: &str) {
+        assert!(is_json_line(line));
+        assert!(line.contains("\"stage\":\"transport\""));
+        assert!(line.contains("\"transport_class\":\"timed_out\""));
     }
 
     fn is_json_line(line: &str) -> bool {
