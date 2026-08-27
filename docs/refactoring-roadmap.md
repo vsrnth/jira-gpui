@@ -6,7 +6,7 @@ This living roadmap tracks behavior-preserving, independently reviewable refacto
 
 - **Completed** — merged and recorded here.
 - **Ready** — audited and bounded for implementation.
-Items 1–38 are Completed; no Ready items remain.
+Items 1–39 are Completed; no Ready items remain.
 
 ## Ranked work
 
@@ -50,6 +50,7 @@ Items 1–38 are Completed; no Ready items remain.
 | 36 · **Completed** | Application notification tests: `crates/application/src/notifications.rs` test code | Mechanically remove current test-lint `unwrap` violations. | Test-lint hygiene only; no broad pedantic cleanup and no production behavior change. | Targeted application all-target Clippy for `crates/application/src/notifications.rs` test code. | `624f9fd` |
 | 37 · **Completed** | GPUI Dashboard rendering: `apps/gpui/src/dashboard.rs` and private `dashboard/*_view.rs` modules | Mechanically decompose Dashboard rendering by shell, issues, detail, team, updates, and settings surfaces while keeping Dashboard as the single GPUI entity/state owner. | Rendering/local pure helpers only; preserve copy/layout/style/callback/accessibility behavior; do not move async orchestration, request epochs, input/subscription lifecycle, or exactly-once Jira writes. | Focused GPUI lib/bin tests, warnings-denied lib/bin Clippy, workspace all-target check, formatting, diff check, and independent review on a supported native host. | `170e5a5` |
 | 38 · **Completed** | GPUI outcome-policy tests: `apps/gpui/src/dashboard/comment_flow.rs`, `apps/gpui/src/dashboard/issue_edit_flow.rs`, `apps/gpui/src/dashboard_tests.rs`, and `apps/gpui/src/dashboard.rs` (`cfg(test)` import adjustment) | Remove redundant flow/Dashboard policy matrices while retaining canonical exhaustive presentation policy tables and representative kind/phase forwarding plus unique state-machine coverage. | Test-only reduction; preserve exact copy, exactly-once writes, stale completion handling, busy directives, and `UnknownOutcome` reconciliation; do not combine comment and issue-edit flows. | Canonical matrix audit, focused flow/Dashboard/presentation tests, full GPUI lib tests, warnings-denied GPUI lib Clippy, isolated staged-patch validation, diff check, and independent review. | `972c8f3` |
+| 39 · **Completed** | Storage conformance test registration: `crates/storage/src/test_support.rs` | Replace duplicated per-backend registration pairs with one macro invocation per shared scenario while retaining independent `InMemoryStore` and `SqliteStore` tests. | Test registration only; preserve all 18 scenario bodies, 36 exact fully-qualified conformance names, constructors, assertions, backend independence, storage behavior, and 46-test inventory; no new dependency or identifier-concatenation machinery. | Exact test-list inventory audit, full storage tests, warnings-denied storage lib Clippy, workspace all-target check, formatting, diff check, and independent review. | `d042dd8` |
 
 Platform-sensitive GPUI validation uses a supported native host and the relevant Linux Wayland or macOS smoke; unrelated all-target Clippy blockers remain context only. Item 36 is a narrow Completed test-lint cleanup and does not broaden that context.
 
