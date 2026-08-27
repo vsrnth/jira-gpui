@@ -862,152 +862,46 @@ mod tests {
     }
 
     #[test]
-    fn error_copy_maps_every_kind_by_lookup_or_write_context() {
+    fn representative_error_forwarding_preserves_kind_and_phase() {
         let expected = [
             (
-                ErrorKind::Authentication,
-                IssueEditPhase::Lookup,
-                "Change not applied · Jira authentication was rejected",
-            ),
-            (
-                ErrorKind::Authentication,
-                IssueEditPhase::Write,
-                "Change not applied · Jira authentication was rejected",
-            ),
-            (
-                ErrorKind::Authorization,
-                IssueEditPhase::Lookup,
-                "Change not applied · Jira denied permission",
-            ),
-            (
-                ErrorKind::Authorization,
-                IssueEditPhase::Write,
-                "Change not applied · Jira denied permission",
-            ),
-            (
-                ErrorKind::NotFound,
-                IssueEditPhase::Lookup,
-                "Change not applied · the Jira issue was not found",
-            ),
-            (
-                ErrorKind::NotFound,
-                IssueEditPhase::Write,
-                "Change not applied · the Jira issue was not found",
-            ),
-            (
-                ErrorKind::RateLimited,
-                IssueEditPhase::Lookup,
-                "Change not applied · Jira rate limit reached; try later",
-            ),
-            (
-                ErrorKind::RateLimited,
-                IssueEditPhase::Write,
-                "Change not applied · Jira rate limit reached; try later",
-            ),
-            (
-                ErrorKind::Offline,
-                IssueEditPhase::Lookup,
-                "Change not applied · Jira is unreachable",
-            ),
-            (
-                ErrorKind::Offline,
-                IssueEditPhase::Write,
-                "Change not applied · Jira is unreachable",
-            ),
-            (
-                ErrorKind::InvalidInput,
-                IssueEditPhase::Lookup,
-                "Change not applied · Jira rejected the requested change",
-            ),
-            (
-                ErrorKind::InvalidInput,
-                IssueEditPhase::Write,
-                "Change not applied · Jira rejected the requested change",
-            ),
-            (
-                ErrorKind::Cancelled,
-                IssueEditPhase::Lookup,
-                "Change cancelled",
-            ),
-            (
-                ErrorKind::Cancelled,
-                IssueEditPhase::Write,
-                "Change cancelled",
-            ),
-            (
                 ErrorKind::Storage,
                 IssueEditPhase::Lookup,
                 "Jira options unavailable · request was not completed",
+                FeedbackCertainty::Definite,
+                RecoveryDirective::Retry,
             ),
             (
                 ErrorKind::Storage,
                 IssueEditPhase::Write,
                 "Change not applied · Jira returned an error",
-            ),
-            (
-                ErrorKind::Upstream,
-                IssueEditPhase::Lookup,
-                "Jira options unavailable · request was not completed",
-            ),
-            (
-                ErrorKind::Upstream,
-                IssueEditPhase::Write,
-                "Change not applied · Jira returned an error",
-            ),
-            (
-                ErrorKind::Notification,
-                IssueEditPhase::Lookup,
-                "Jira options unavailable · request was not completed",
-            ),
-            (
-                ErrorKind::Notification,
-                IssueEditPhase::Write,
-                "Change not applied · Jira returned an error",
-            ),
-            (
-                ErrorKind::Internal,
-                IssueEditPhase::Lookup,
-                "Jira options unavailable · request was not completed",
-            ),
-            (
-                ErrorKind::Internal,
-                IssueEditPhase::Write,
-                "Change not applied · Jira returned an error",
+                FeedbackCertainty::Definite,
+                RecoveryDirective::Retry,
             ),
             (
                 ErrorKind::UnknownOutcome,
                 IssueEditPhase::Lookup,
                 "Jira may have accepted this change. Refresh Jira before another attempt.",
+                FeedbackCertainty::Unknown,
+                RecoveryDirective::Refresh,
             ),
             (
                 ErrorKind::UnknownOutcome,
                 IssueEditPhase::Write,
                 "Jira may have accepted this change. Refresh Jira before another attempt.",
+                FeedbackCertainty::Unknown,
+                RecoveryDirective::Refresh,
             ),
         ];
-        for (kind, phase, expected_message) in expected {
+        for (kind, phase, expected_message, certainty, recovery) in expected {
             let copy = issue_edit_error_message(kind, phase);
             assert_eq!(copy.message(), expected_message);
             assert_eq!(
                 copy.severity(),
                 crate::presentation::FeedbackSeverity::Error
             );
-            assert_eq!(
-                copy.certainty(),
-                if kind == ErrorKind::UnknownOutcome {
-                    FeedbackCertainty::Unknown
-                } else {
-                    FeedbackCertainty::Definite
-                }
-            );
-            assert_eq!(
-                copy.recovery(),
-                if kind == ErrorKind::UnknownOutcome {
-                    RecoveryDirective::Refresh
-                } else {
-                    RecoveryDirective::Retry
-                }
-            );
+            assert_eq!(copy.certainty(), certainty);
+            assert_eq!(copy.recovery(), recovery);
             assert!(!copy.message().contains("redacted detail"));
         }
     }

@@ -86,15 +86,15 @@ use team_view::{TEAM_DETAIL_RESIZE_HANDLE_WIDTH, team_table_min_width};
 use team_view::{TeamTableMode, clamped_team_detail_width, team_table_mode_for_width};
 
 #[cfg(test)]
-use crate::presentation::{FeedbackCertainty, IssueEditPhase};
+use crate::presentation::FeedbackCertainty;
 use comment_flow::{CommentCompletion, CommentFlow, CommentInvalidation, CommentTarget};
 
+#[cfg(test)]
+use issue_edit_flow::issue_edit_target_is_current;
 use issue_edit_flow::{
     AssigneeSubmission, BusyDirective, IssueEditCompletion, IssueEditFlow, IssueEditOperation,
     IssueEditState, IssueEditSubmission, TransitionSubmission, status_control_is_editable,
 };
-#[cfg(test)]
-use issue_edit_flow::{issue_edit_error_message, issue_edit_target_is_current};
 
 use detail_payload::{
     DetailReadRequest, detail_image_issue_id, fetch_detail_images, prepare_detail_payload,

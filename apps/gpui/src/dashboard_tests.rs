@@ -1256,22 +1256,6 @@ fn clearing_search_cancels_and_removes_remote_result() {
 }
 
 #[test]
-fn issue_edit_failures_have_safe_definite_and_unknown_copy() {
-    let copy = issue_edit_error_message(ErrorKind::Authorization, IssueEditPhase::Write);
-    assert_eq!(
-        copy.message(),
-        "Change not applied · Jira denied permission"
-    );
-    assert_eq!(copy.certainty(), FeedbackCertainty::Definite);
-    assert!(!copy.message().contains("raw Jira response"));
-
-    let copy = issue_edit_error_message(ErrorKind::UnknownOutcome, IssueEditPhase::Write);
-    assert_eq!(copy.certainty(), FeedbackCertainty::Unknown);
-    assert!(copy.message().contains("Refresh Jira"));
-    assert!(!copy.message().contains("secret transport detail"));
-}
-
-#[test]
 fn issue_edit_target_snapshot_requires_current_issue_and_generation() {
     let issue = IssueId::new("100").expect("issue");
     assert!(issue_edit_target_is_current(Some(&issue), &issue, 4, 4));

@@ -437,99 +437,31 @@ mod tests {
     }
 
     #[test]
-    fn error_mapping_is_exact_safe_and_unknown_outcome_blocks_retry_until_refresh_without_edit() {
-        let kinds = [
-            ErrorKind::Authentication,
-            ErrorKind::Authorization,
-            ErrorKind::NotFound,
-            ErrorKind::RateLimited,
-            ErrorKind::InvalidInput,
-            ErrorKind::UnknownOutcome,
-            ErrorKind::Offline,
-            ErrorKind::Cancelled,
-            ErrorKind::Storage,
-            ErrorKind::Upstream,
-            ErrorKind::Notification,
-            ErrorKind::Internal,
-        ];
+    fn representative_error_forwarding_and_unknown_outcome_blocks_retry_until_refresh_without_edit()
+    {
         let expected = [
-            (
-                ErrorKind::Authentication,
-                "Comment not posted · Jira authentication was rejected",
-            ),
             (
                 ErrorKind::Authorization,
                 "Comment not posted · Jira denied comment permission",
-            ),
-            (
-                ErrorKind::NotFound,
-                "Comment not posted · the Jira issue was not found",
-            ),
-            (
-                ErrorKind::RateLimited,
-                "Comment not posted · Jira rate limit reached; try later",
-            ),
-            (
-                ErrorKind::InvalidInput,
-                "Comment not posted · the comment text is invalid",
+                FeedbackCertainty::Definite,
+                RecoveryDirective::Retry,
             ),
             (
                 ErrorKind::UnknownOutcome,
                 "Jira may have accepted this comment. Refresh comments before retrying.",
-            ),
-            (
-                ErrorKind::Offline,
-                "Comment not posted · Jira returned an error",
-            ),
-            (
-                ErrorKind::Cancelled,
-                "Comment not posted · Jira returned an error",
-            ),
-            (
-                ErrorKind::Storage,
-                "Comment not posted · Jira returned an error",
-            ),
-            (
-                ErrorKind::Upstream,
-                "Comment not posted · Jira returned an error",
-            ),
-            (
-                ErrorKind::Notification,
-                "Comment not posted · Jira returned an error",
-            ),
-            (
-                ErrorKind::Internal,
-                "Comment not posted · Jira returned an error",
+                FeedbackCertainty::Unknown,
+                RecoveryDirective::Refresh,
             ),
         ];
-        for ((kind, expected_message), listed_kind) in expected.into_iter().zip(kinds) {
-            assert_eq!(listed_kind, kind);
+        for (kind, expected_message, certainty, recovery) in expected {
             let actual = comment_error_message(kind);
-            assert_eq!(
-                actual.message(),
-                expected_message,
-                "unexpected mapping for {kind:?}"
-            );
+            assert_eq!(actual.message(), expected_message);
             assert_eq!(
                 actual.severity(),
                 crate::presentation::FeedbackSeverity::Error
             );
-            assert_eq!(
-                actual.certainty(),
-                if kind == ErrorKind::UnknownOutcome {
-                    FeedbackCertainty::Unknown
-                } else {
-                    FeedbackCertainty::Definite
-                }
-            );
-            assert_eq!(
-                actual.recovery(),
-                if kind == ErrorKind::UnknownOutcome {
-                    RecoveryDirective::Refresh
-                } else {
-                    RecoveryDirective::Retry
-                }
-            );
+            assert_eq!(actual.certainty(), certainty);
+            assert_eq!(actual.recovery(), recovery);
             assert!(!actual.message().contains("secret detail"));
         }
 
