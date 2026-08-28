@@ -6,11 +6,69 @@ const APPEARANCE_HELP_COPY: &str = "Follow the system appearance or choose a fix
 const SCOPE_HELP_COPY: &str = "This is a scope expression. Jira Desk appends assigned-or-watched account membership, incremental updated overlap, and ORDER BY updated DESC. Do not include ORDER BY.";
 const LIVE_WORKSPACE_COPY: &str =
     "Settings become available after a live Jira workspace is connected.";
-const NOTIFICATION_HELP_COPY: &str = "Send a local test through the same Freedesktop service configuration used by Jira updates. This never calls Jira or changes the local update feed.";
-const NOTIFICATION_DISPLAY_COPY: &str =
-    "Accepted by the desktop service does not prove GNOME displayed a banner.";
-const DIAGNOSTIC_EVENTS_COPY: &str = "Diagnostic events are written to diagnostics.jsonl.";
-const KEYRING_COPY: &str = "Credentials are kept in the desktop system keyring, reused automatically across Jira Desk/AppImage versions, and never written to SQLite, preferences, or logs.";
+const LINUX_NOTIFICATION_HELP_COPY: &str = "Send a local test through the Freedesktop notification service used by Jira Desk. This never calls Jira or changes the local update feed.";
+const LINUX_NOTIFICATION_DISPLAY_COPY: &str = "Accepted by the desktop service means the request was received; your desktop may still suppress or group the banner.";
+const DIAGNOSTIC_EVENTS_COPY: &str = "Jira Desk attempts to write diagnostic events to diagnostics.jsonl; individual writes may fail.";
+const LINUX_KEYRING_COPY: &str = "Saved credentials are stored in the Linux desktop keyring and reused automatically across Jira Desk/AppImage versions. Secrets are never written to SQLite, preferences, or logs.";
+const MACOS_NOTIFICATION_HELP_COPY: &str = "Desktop notification testing is not available on macOS yet. Check Local updates for synced activity.";
+const MACOS_KEYRING_COPY: &str = "Saved credentials are stored in the macOS Keychain and reused automatically across Jira Desk versions. Secrets are never written to SQLite, preferences, or logs.";
+const NOTIFICATION_TEST_RESULT_ID: &str = "notification-test-result";
+const NOTIFICATION_TEST_RESULT_ROLE: gpui::accesskit::Role = gpui::accesskit::Role::Status;
+const SAVED_LOGIN_DELETE_RESULT_ID: &str = "saved-login-delete-result";
+const SAVED_LOGIN_DELETE_RESULT_ROLE: gpui::accesskit::Role = gpui::accesskit::Role::Status;
+
+fn saved_login_delete_feedback_for_state(state: SavedLoginDeleteState) -> Option<OutcomeCopy> {
+    match state {
+        SavedLoginDeleteState::Completed(outcome) => Some(saved_login_delete_feedback(outcome)),
+        SavedLoginDeleteState::Idle | SavedLoginDeleteState::Deleting => None,
+    }
+}
+
+// Each supported production target constructs one variant; tests exercise both policies.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPlatform {
+    Linux,
+    Macos,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlatformSettingsCopy {
+    notification_help: &'static str,
+    notification_display: Option<&'static str>,
+    notification_diagnostics: Option<&'static str>,
+    notification_test_available: bool,
+    keyring: &'static str,
+}
+
+fn settings_platform_copy(platform: SettingsPlatform) -> PlatformSettingsCopy {
+    match platform {
+        SettingsPlatform::Linux => PlatformSettingsCopy {
+            notification_help: LINUX_NOTIFICATION_HELP_COPY,
+            notification_display: Some(LINUX_NOTIFICATION_DISPLAY_COPY),
+            notification_diagnostics: Some(DIAGNOSTIC_EVENTS_COPY),
+            notification_test_available: true,
+            keyring: LINUX_KEYRING_COPY,
+        },
+        SettingsPlatform::Macos => PlatformSettingsCopy {
+            notification_help: MACOS_NOTIFICATION_HELP_COPY,
+            notification_display: None,
+            notification_diagnostics: None,
+            notification_test_available: false,
+            keyring: MACOS_KEYRING_COPY,
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_settings_platform() -> SettingsPlatform {
+    SettingsPlatform::Linux
+}
+
+#[cfg(target_os = "macos")]
+fn current_settings_platform() -> SettingsPlatform {
+    SettingsPlatform::Macos
+}
 
 impl Dashboard {
     fn render_appearance_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -62,6 +120,7 @@ impl Dashboard {
     ) -> impl IntoElement {
         let input = self.settings_input.clone();
         let team_input = self.team_input.clone();
+        let platform_copy = settings_platform_copy(current_settings_platform());
         let text = self.settings_scope_text.clone();
         let chars = text.chars().count();
         let bytes = text.len();
@@ -140,15 +199,19 @@ impl Dashboard {
                                     .border_color(cx.theme().border)
                                     .bg(cx.theme().secondary.opacity(0.10))
                                     .child(div().text_base().font_semibold().child("Desktop notifications"))
-                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(NOTIFICATION_HELP_COPY))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop-entry: dev.jiradesk.JiraDesk · Summary: {TEST_NOTIFICATION_SUMMARY} · Body: {TEST_NOTIFICATION_BODY}")))
-                                    .child(Button::new("test-desktop-notification").label(if test_running { "Sending test notification…" } else { "Send test notification" }).disabled(!live || test_running).on_click(cx.listener(|this, _, _, cx| this.begin_test_desktop_notification(cx))))
-                                    .when_some(match &self.desktop_notification_test_state { DesktopNotificationTestState::Completed(report) => Some(report.clone()), _ => None }, |this, report| {
+                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(platform_copy.notification_help))
+                                    .when(platform_copy.notification_test_available, |this| {
+                                        this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop entry: dev.jiradesk.JiraDesk · Summary: {TEST_NOTIFICATION_SUMMARY} · Body: {TEST_NOTIFICATION_BODY}")))
+                                    })
+                                    .when(platform_copy.notification_test_available, |this| {
+                                        this.child(Button::new("test-desktop-notification").label(if test_running { "Sending test notification…" } else { "Send test notification" }).disabled(!live || test_running).on_click(cx.listener(|this, _, _, cx| this.begin_test_desktop_notification(cx))))
+                                    })
+                                    .when_some(if platform_copy.notification_test_available { match &self.desktop_notification_test_state { DesktopNotificationTestState::Completed(report) => Some(report.clone()), _ => None } } else { None }, |this, report| {
                                         let result = match report.outcome {
                                             DesktopNotificationTestOutcome::Accepted { notification_id } => format!("Accepted by desktop service · notification ID {notification_id}"),
                                             DesktopNotificationTestOutcome::Failed(error) => format!("Failed · error category {}", desktop_notification_error_category(error)),
                                         };
-                                        this.child(v_flex().gap_1().child(div().text_sm().child(format!("Last test · {} · {result}", report.timestamp))).child(div().text_xs().text_color(cx.theme().muted_foreground).child(NOTIFICATION_DISPLAY_COPY)).child(div().text_xs().text_color(cx.theme().muted_foreground).child(DIAGNOSTIC_EVENTS_COPY)))
+                                        this.child(v_flex().id(NOTIFICATION_TEST_RESULT_ID).gap_1().role(NOTIFICATION_TEST_RESULT_ROLE).child(div().text_sm().child(format!("Last test · {} · {result}", report.timestamp))).when_some(platform_copy.notification_display, |this, copy| this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(copy))).when_some(platform_copy.notification_diagnostics, |this, copy| this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(copy))))
                                     }),
                             )
                             .child(
@@ -160,11 +223,10 @@ impl Dashboard {
                                     .border_color(cx.theme().border)
                                     .bg(cx.theme().secondary.opacity(0.10))
                                     .child(div().text_base().font_semibold().child("Saved Jira login"))
-                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(KEYRING_COPY))
+                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(platform_copy.keyring))
                                     .child(Button::new("forget-saved-jira-login").label(if saved_login_deleting { "Forgetting saved Jira login…" } else { "Forget saved Jira login" }).when(layout.is_mobile(), |this| this.w_full()).disabled(saved_login_deleting).on_click(cx.listener(|this, _, _, cx| this.begin_forget_saved_login(cx))))
-                                    .when_some(match self.saved_login_delete_state { SavedLoginDeleteState::Completed(outcome) => Some(outcome), SavedLoginDeleteState::Idle | SavedLoginDeleteState::Deleting => None }, |this, outcome| {
-                                        let copy = saved_login_delete_feedback(outcome);
-                                        this.child(div().text_sm().text_color(match copy.severity() { FeedbackSeverity::Error => cx.theme().danger, FeedbackSeverity::Info => cx.theme().muted_foreground }).child(copy.message()))
+                                    .when_some(saved_login_delete_feedback_for_state(self.saved_login_delete_state), |this, copy| {
+                                        this.child(v_flex().id(SAVED_LOGIN_DELETE_RESULT_ID).role(SAVED_LOGIN_DELETE_RESULT_ROLE).child(div().text_sm().text_color(match copy.severity() { FeedbackSeverity::Error => cx.theme().danger, FeedbackSeverity::Info => cx.theme().muted_foreground }).child(copy.message())))
                                     }),
                             ),
                     ),
@@ -176,8 +238,13 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPEARANCE_HELP_COPY, DIAGNOSTIC_EVENTS_COPY, KEYRING_COPY, LIVE_WORKSPACE_COPY,
-        NOTIFICATION_DISPLAY_COPY, NOTIFICATION_HELP_COPY, SCOPE_HELP_COPY,
+        APPEARANCE_HELP_COPY, DIAGNOSTIC_EVENTS_COPY, LINUX_KEYRING_COPY,
+        LINUX_NOTIFICATION_DISPLAY_COPY, LINUX_NOTIFICATION_HELP_COPY, LIVE_WORKSPACE_COPY,
+        MACOS_KEYRING_COPY, MACOS_NOTIFICATION_HELP_COPY, NOTIFICATION_TEST_RESULT_ID,
+        NOTIFICATION_TEST_RESULT_ROLE, SAVED_LOGIN_DELETE_RESULT_ID,
+        SAVED_LOGIN_DELETE_RESULT_ROLE, SCOPE_HELP_COPY, SavedLoginDeleteOutcome,
+        SavedLoginDeleteState, SettingsPlatform, saved_login_delete_feedback_for_state,
+        settings_platform_copy,
     };
     use crate::dashboard::Dashboard;
 
@@ -202,20 +269,86 @@ mod tests {
             "Settings become available after a live Jira workspace is connected."
         );
         assert_eq!(
-            NOTIFICATION_HELP_COPY,
-            "Send a local test through the same Freedesktop service configuration used by Jira updates. This never calls Jira or changes the local update feed."
+            LINUX_NOTIFICATION_HELP_COPY,
+            "Send a local test through the Freedesktop notification service used by Jira Desk. This never calls Jira or changes the local update feed."
         );
         assert_eq!(
-            NOTIFICATION_DISPLAY_COPY,
-            "Accepted by the desktop service does not prove GNOME displayed a banner."
+            LINUX_NOTIFICATION_DISPLAY_COPY,
+            "Accepted by the desktop service means the request was received; your desktop may still suppress or group the banner."
         );
         assert_eq!(
             DIAGNOSTIC_EVENTS_COPY,
-            "Diagnostic events are written to diagnostics.jsonl."
+            "Jira Desk attempts to write diagnostic events to diagnostics.jsonl; individual writes may fail."
         );
         assert_eq!(
-            KEYRING_COPY,
-            "Credentials are kept in the desktop system keyring, reused automatically across Jira Desk/AppImage versions, and never written to SQLite, preferences, or logs."
+            LINUX_KEYRING_COPY,
+            "Saved credentials are stored in the Linux desktop keyring and reused automatically across Jira Desk/AppImage versions. Secrets are never written to SQLite, preferences, or logs."
         );
+        assert_eq!(
+            MACOS_NOTIFICATION_HELP_COPY,
+            "Desktop notification testing is not available on macOS yet. Check Local updates for synced activity."
+        );
+        assert_eq!(
+            MACOS_KEYRING_COPY,
+            "Saved credentials are stored in the macOS Keychain and reused automatically across Jira Desk versions. Secrets are never written to SQLite, preferences, or logs."
+        );
+    }
+
+    #[test]
+    fn saved_login_feedback_announces_only_completion_in_stable_status_region() {
+        assert_eq!(SAVED_LOGIN_DELETE_RESULT_ID, "saved-login-delete-result");
+        assert_eq!(
+            SAVED_LOGIN_DELETE_RESULT_ROLE,
+            gpui::accesskit::Role::Status
+        );
+        assert!(saved_login_delete_feedback_for_state(SavedLoginDeleteState::Idle).is_none());
+        assert!(saved_login_delete_feedback_for_state(SavedLoginDeleteState::Deleting).is_none());
+        assert_eq!(
+            saved_login_delete_feedback_for_state(SavedLoginDeleteState::Completed(
+                SavedLoginDeleteOutcome::Deleted,
+            ))
+            .map(|copy| copy.message()),
+            Some("Saved Jira login forgotten. This session remains connected.")
+        );
+    }
+
+    #[test]
+    fn platform_policy_keeps_linux_diagnostic_details_and_action() {
+        let copy = settings_platform_copy(SettingsPlatform::Linux);
+
+        assert_eq!(copy.notification_help, LINUX_NOTIFICATION_HELP_COPY);
+        assert_eq!(
+            copy.notification_display,
+            Some(LINUX_NOTIFICATION_DISPLAY_COPY)
+        );
+        assert_eq!(copy.notification_diagnostics, Some(DIAGNOSTIC_EVENTS_COPY));
+        assert!(copy.notification_test_available);
+        assert!(copy.keyring.contains("Linux desktop keyring"));
+        assert!(copy.keyring.contains("AppImage"));
+        assert!(!copy.keyring.contains("token"));
+    }
+
+    #[test]
+    fn platform_policy_keeps_macos_copy_honest_and_free_of_linux_details() {
+        let copy = settings_platform_copy(SettingsPlatform::Macos);
+
+        assert_eq!(copy.notification_help, MACOS_NOTIFICATION_HELP_COPY);
+        assert_eq!(copy.notification_display, None);
+        assert_eq!(copy.notification_diagnostics, None);
+        assert!(!copy.notification_test_available);
+        assert!(copy.notification_help.contains("Local updates"));
+        assert!(copy.keyring.contains("macOS Keychain"));
+        assert!(!copy.notification_help.contains("Freedesktop"));
+        assert!(!copy.notification_help.contains("GNOME"));
+        assert!(!copy.notification_help.contains("desktop-entry"));
+        assert!(!copy.keyring.contains("desktop-entry"));
+        assert!(!copy.keyring.contains("diagnostic"));
+        assert!(!copy.keyring.contains("token"));
+    }
+
+    #[test]
+    fn notification_completion_uses_a_stable_status_region() {
+        assert_eq!(NOTIFICATION_TEST_RESULT_ID, "notification-test-result");
+        assert_eq!(NOTIFICATION_TEST_RESULT_ROLE, gpui::accesskit::Role::Status);
     }
 }
