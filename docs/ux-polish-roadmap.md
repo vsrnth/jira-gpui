@@ -52,11 +52,12 @@ interaction quality—not a mandate to copy visual treatments.
 - `1c6760a` — complete responsive shell and mobile navigation polish.
 - `16e980d` — complete Issues/detail loading, error, and responsive hierarchy polish.
 - `ff534fd` — complete Updates heading, filter, state, and responsive hierarchy polish.
+- `377d7e3` — complete Team Tracker selection, sorting, semantic color, and responsive geometry polish.
 
-## Ordered remaining plan
+## Ordered plan
 
 Each slice is independently reviewed and validated using the gate below, then
-committed separately. **Updates is complete; Team Tracker is in progress.**
+committed separately. **All currently ordered slices are complete.**
 
 1. **Completed — Issues/detail:** Make exact-key Jira loading and failure visible
    on mobile; align page hierarchy and selected, empty, loading, and error
@@ -64,9 +65,16 @@ committed separately. **Updates is complete; Team Tracker is in progress.**
 2. **Completed — Updates:** Establish consistent heading, filter, and card
    hierarchy; keep state distinctions readable and responsive without
    decorative motion.
-3. **In progress — Team Tracker:** Keep table selection/detail identity consistent
+3. **Completed — Team Tracker:** Keep table selection/detail identity consistent
    through sort, filter, and rebuild; align sort and selection semantics, use
    semantic colors, and bound detail geometry.
+
+## Follow-up
+
+- Baseline publication remains pending explicit user approval under
+  `docs/ui-automation.md`; no baseline acceptance is implied here.
+- Lower-priority future work may distinguish a typed Team refresh error from a
+  zero-results empty state.
 
 ## Per-slice validation gate
 
