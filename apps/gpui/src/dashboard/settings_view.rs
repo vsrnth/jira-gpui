@@ -1,6 +1,8 @@
 use super::*;
 use crate::app_shell::AppearancePreference;
 use gpui_component::Selectable;
+use gpui_component::group_box::GroupBoxVariant;
+use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
 
 const APPEARANCE_HELP_COPY: &str = "Follow the system appearance or choose a fixed theme.";
 const SCOPE_HELP_COPY: &str = "This is a scope expression. Jira Desk appends assigned-or-watched account membership, incremental updated overlap, and ORDER BY updated DESC. Do not include ORDER BY.";
@@ -76,7 +78,9 @@ impl Dashboard {
         let preference_button = |preference: AppearancePreference| {
             let label = preference.label();
             let selected = selected == preference;
-            Button::new(format!("appearance-{}", label.to_lowercase()))
+            let id = format!("appearance-{}", label.to_lowercase());
+            Button::new(id.clone())
+                .debug_selector(move || id)
                 .compact()
                 .flex_1()
                 .selected(selected)
@@ -91,12 +95,6 @@ impl Dashboard {
 
         v_flex()
             .gap_2()
-            .p_3()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary.opacity(0.10))
-            .child(div().text_base().font_semibold().child("Appearance"))
             .child(
                 div()
                     .text_sm()
@@ -113,149 +111,442 @@ impl Dashboard {
             )
     }
 
-    pub(super) fn render_settings(
+    fn render_issue_scope_setting(
         &self,
-        layout: LayoutMode,
+        _layout: LayoutMode,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let input = self.settings_input.clone();
-        let team_input = self.team_input.clone();
-        let platform_copy = settings_platform_copy(current_settings_platform());
         let text = self.settings_scope_text.clone();
         let chars = text.chars().count();
         let bytes = text.len();
-        let validation = normalize_issue_jql_scope(Some(text.clone())).err();
+        let validation = normalize_issue_jql_scope(Some(text)).err();
+        let live = self.workspace.is_some();
+
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Choose the Jira scope used for your assigned or watched account view."),
+            )
+            .when_some(input, |this, input| {
+                this.child(
+                    Textarea::new(&input)
+                        .w_full()
+                        .h(px(120.))
+                        .aria_label("JQL scope")
+                        .disabled(!live || self.operation_in_progress),
+                )
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(if validation.is_some() {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(format!(
+                        "{chars} characters · {bytes} bytes · maximum {MAX_JQL_SCOPE_LENGTH} bytes"
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SCOPE_HELP_COPY),
+            )
+            .when(!live, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(LIVE_WORKSPACE_COPY),
+                )
+            })
+            .when_some(self.settings_warning.clone(), |this, warning| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(warning),
+                )
+            })
+            .when_some(
+                validation.map(|_| {
+                    format!(
+                        "Scope is invalid: it must be non-empty, within {MAX_JQL_SCOPE_LENGTH} bytes, and contain no ORDER BY"
+                    )
+                }),
+                |this, message| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(message),
+                    )
+                },
+            )
+            .when_some(self.settings_feedback.clone(), |this, feedback| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(feedback),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("save-settings")
+                            .primary()
+                            .label("Save and refresh")
+                            .disabled(
+                                !live || self.operation_in_progress || validation.is_some(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_save_settings(cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("reset-settings")
+                            .ghost()
+                            .label("Use default scope")
+                            .disabled(!live || self.operation_in_progress)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.reset_settings_editor(window, cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_team_tracker_setting(
+        &self,
+        layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let input = self.team_input.clone();
+        let live = self.workspace.is_some();
+        let task_running = self.team_task.is_some();
+
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("One Jira account ID or Atlassian email per line. This shows in-progress tickets assigned to those accounts; Jira permissions still apply."),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Email resolution requires exactly one active Jira user because the User search domain does not retain email. Uses existing read:jira-user/read:jira-work scopes; no new scope is needed."),
+            )
+            .when_some(input, |this, input| {
+                this.child(
+                    Textarea::new(&input)
+                        .w_full()
+                        .h(px(if layout.is_mobile() { 110. } else { 120. }))
+                        .aria_label("Team tracker members")
+                        .disabled(!live || task_running || self.operation_in_progress),
+                )
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{} configured · maximum {}",
+                        self.team_members.len(),
+                        MAX_TEAM_MEMBERS
+                    )),
+            )
+            .when(!matches!(self.team_feedback, TeamFeedback::Idle), |this| {
+                let is_error = self.team_feedback.is_error();
+                let message = self
+                    .team_feedback
+                    .display_message()
+                    .expect("non-idle team feedback has a message");
+                let error_label = self.team_feedback.error_accessible_label();
+                let accessibility_label = error_label.unwrap_or_else(|| message.clone());
+                this.child(
+                    v_flex()
+                        .id("team-settings-feedback")
+                        .text_sm()
+                        .text_color(if is_error {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .role(if is_error {
+                            gpui::accesskit::Role::Alert
+                        } else {
+                            gpui::accesskit::Role::Status
+                        })
+                        .aria_label(accessibility_label)
+                        .child(message),
+                )
+            })
+            .child(
+                h_flex()
+                    .when(layout.is_mobile(), |this| this.flex_col())
+                    .gap_2()
+                    .child(
+                        Button::new("save-team")
+                            .primary()
+                            .label(if task_running {
+                                "Saving team…"
+                            } else {
+                                "Save team"
+                            })
+                            .disabled(!live || task_running || self.operation_in_progress)
+                            .on_click(cx.listener(|this, _, _, cx| this.begin_save_team(cx))),
+                    )
+                    .child(
+                        Button::new("refresh-team")
+                            .ghost()
+                            .label("Refresh team")
+                            .disabled(
+                                !live
+                                    || task_running
+                                    || self.operation_in_progress
+                                    || self.team_automatic_polling_paused,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.begin_team_refresh(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_notification_setting(
+        &self,
+        _layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let platform_copy = settings_platform_copy(current_settings_platform());
         let live = self.workspace.is_some();
         let test_running = matches!(
             self.desktop_notification_test_state,
             DesktopNotificationTestState::Sending
         );
-        let saved_login_deleting = matches!(
+
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(platform_copy.notification_help),
+            )
+            .when(platform_copy.notification_test_available, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop entry: dev.jiradesk.JiraDesk · Summary: {TEST_NOTIFICATION_SUMMARY} · Body: {TEST_NOTIFICATION_BODY}"
+                        )),
+                )
+            })
+            .when(platform_copy.notification_test_available, |this| {
+                this.child(
+                    Button::new("test-desktop-notification")
+                        .label(if test_running {
+                            "Sending test notification…"
+                        } else {
+                            "Send test notification"
+                        })
+                        .disabled(!live || test_running)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.begin_test_desktop_notification(cx)
+                        })),
+                )
+            })
+            .when_some(
+                if platform_copy.notification_test_available {
+                    match &self.desktop_notification_test_state {
+                        DesktopNotificationTestState::Completed(report) => Some(report.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                },
+                |this, report| {
+                    let result = match report.outcome {
+                        DesktopNotificationTestOutcome::Accepted { notification_id } => {
+                            format!(
+                                "Accepted by desktop service · notification ID {notification_id}"
+                            )
+                        }
+                        DesktopNotificationTestOutcome::Failed(error) => format!(
+                            "Failed · error category {}",
+                            desktop_notification_error_category(error)
+                        ),
+                    };
+                    this.child(
+                        v_flex()
+                            .id(NOTIFICATION_TEST_RESULT_ID)
+                            .gap_1()
+                            .role(NOTIFICATION_TEST_RESULT_ROLE)
+                            .child(div().text_sm().child(format!(
+                                "Last test · {} · {result}",
+                                report.timestamp
+                            )))
+                            .when_some(platform_copy.notification_display, |this, copy| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(copy),
+                                )
+                            })
+                            .when_some(platform_copy.notification_diagnostics, |this, copy| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(copy),
+                                )
+                            }),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+
+    fn render_saved_login_setting(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
+        let platform_copy = settings_platform_copy(current_settings_platform());
+        let deleting = matches!(
             self.saved_login_delete_state,
             SavedLoginDeleteState::Deleting
         );
+
         v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(platform_copy.keyring),
+            )
+            .child(
+                Button::new("forget-saved-jira-login")
+                    .label(if deleting {
+                        "Forgetting saved Jira login…"
+                    } else {
+                        "Forget saved Jira login"
+                    })
+                    .when(layout.is_mobile(), |this| this.w_full())
+                    .disabled(deleting)
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_forget_saved_login(cx))),
+            )
+            .when_some(
+                saved_login_delete_feedback_for_state(self.saved_login_delete_state),
+                |this, copy| {
+                    this.child(
+                        v_flex()
+                            .id(SAVED_LOGIN_DELETE_RESULT_ID)
+                            .role(SAVED_LOGIN_DELETE_RESULT_ROLE)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(match copy.severity() {
+                                        FeedbackSeverity::Error => cx.theme().danger,
+                                        FeedbackSeverity::Info => cx.theme().muted_foreground,
+                                    })
+                                    .child(copy.message()),
+                            ),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_settings(
+        &self,
+        layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let dashboard = cx.entity().downgrade();
+        let appearance_dashboard = dashboard.clone();
+        let issue_dashboard = dashboard.clone();
+        let team_dashboard = dashboard.clone();
+        let notification_dashboard = dashboard.clone();
+        let login_dashboard = dashboard;
+        let appearance = SettingItem::render(move |_, _, cx| {
+            appearance_dashboard
+                .update(cx, |this, cx| {
+                    this.render_appearance_settings(cx).into_any_element()
+                })
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .keywords(["appearance", "theme"]);
+        let issue_scope = SettingItem::render(move |_, _, cx| {
+            issue_dashboard
+                .update(cx, |this, cx| this.render_issue_scope_setting(layout, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .keywords(["jira", "scope", "jql"]);
+        let team = SettingItem::render(move |_, _, cx| {
+            team_dashboard
+                .update(cx, |this, cx| this.render_team_tracker_setting(layout, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .keywords(["team", "tracker", "members"]);
+        let notifications = SettingItem::render(move |_, _, cx| {
+            notification_dashboard
+                .update(cx, |this, cx| this.render_notification_setting(layout, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .keywords(["desktop", "notifications"]);
+        let saved_login = SettingItem::render(move |_, _, cx| {
+            login_dashboard
+                .update(cx, |this, cx| this.render_saved_login_setting(layout, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .keywords(["login", "credentials", "keychain", "keyring"]);
+
+        let settings = Settings::new("jira-desk-settings")
+            .with_group_variant(GroupBoxVariant::Outline)
+            .sidebar_width(px(200.))
+            .pages(vec![
+                SettingPage::new("General")
+                    .icon(IconName::Settings2)
+                    .default_open(true)
+                    .resettable(false)
+                    .group(SettingGroup::new().title("Appearance").item(appearance)),
+                SettingPage::new("Jira")
+                    .icon(IconName::LayoutDashboard)
+                    .resettable(false)
+                    .group(SettingGroup::new().title("Issue scope").item(issue_scope)),
+                SettingPage::new("Team tracker")
+                    .icon(IconName::CircleUser)
+                    .resettable(false)
+                    .group(SettingGroup::new().title("Team tracker").item(team)),
+                SettingPage::new("Desktop")
+                    .icon(IconName::Bell)
+                    .resettable(false)
+                    .groups(vec![
+                        SettingGroup::new()
+                            .title("Desktop notifications")
+                            .item(notifications),
+                        SettingGroup::new()
+                            .title("Saved Jira login")
+                            .item(saved_login),
+                    ]),
+            ]);
+
+        div()
+            .id("settings-root")
+            .debug_selector(|| "settings-root".to_owned())
             .size_full()
             .min_w_0()
-            .child(
-                h_flex()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .overflow_y_scrollbar()
-                    .justify_center()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(820.))
-                            .p(px(layout.list_padding()))
-                            .gap_3()
-                            .child(self.render_appearance_settings(cx))
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary.opacity(0.10))
-                                    .child(div().text_base().font_semibold().child("Issue scope"))
-                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Choose the Jira scope used for your assigned or watched account view."))
-                                    .when_some(input, |this, input| this.child(Textarea::new(&input).w_full().h(px(if layout.is_mobile() { 128. } else { 120. })).aria_label("JQL scope").disabled(!live || self.operation_in_progress)))
-                                    .child(div().text_xs().text_color(if validation.is_some() { cx.theme().danger } else { cx.theme().muted_foreground }).child(format!("{chars} characters · {bytes} bytes · maximum {MAX_JQL_SCOPE_LENGTH} bytes")))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(SCOPE_HELP_COPY))
-                                    .when(!live, |this| this.child(div().text_sm().text_color(cx.theme().warning).child(LIVE_WORKSPACE_COPY)))
-                                    .when_some(self.settings_warning.clone(), |this, warning| this.child(div().text_sm().text_color(cx.theme().warning).child(warning)))
-                                    .when_some(validation.map(|_| format!("Scope is invalid: it must be non-empty, within {MAX_JQL_SCOPE_LENGTH} bytes, and contain no ORDER BY")), |this, message| this.child(div().text_sm().text_color(cx.theme().danger).child(message)))
-                                    .when_some(self.settings_feedback.clone(), |this, feedback| this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(feedback)))
-                                    .child(
-                                        h_flex()
-                                            .when(layout.is_mobile(), |this| this.flex_col())
-                                            .gap_2()
-                                            .child(Button::new("save-settings").primary().label("Save and refresh").disabled(!live || self.operation_in_progress || validation.is_some()).on_click(cx.listener(|this, _, _, cx| this.begin_save_settings(cx))))
-                                            .child(Button::new("reset-settings").ghost().label("Use default scope").disabled(!live || self.operation_in_progress).on_click(cx.listener(|this, _, window, cx| this.reset_settings_editor(window, cx)))),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary.opacity(0.10))
-                                    .child(div().text_base().font_semibold().child("Team tracker"))
-                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child("One Jira account ID or Atlassian email per line. This shows in-progress tickets assigned to those accounts; Jira permissions still apply."))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Email resolution requires exactly one active Jira user because the User search domain does not retain email. Uses existing read:jira-user/read:jira-work scopes; no new scope is needed."))
-                                    .when_some(team_input, |this, input| this.child(Textarea::new(&input).w_full().h(px(if layout.is_mobile() { 110. } else { 120. })).aria_label("Team tracker members").disabled(!live || self.team_task.is_some() || self.operation_in_progress)))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{} configured · maximum {}", self.team_members.len(), MAX_TEAM_MEMBERS)))
-                                    .when(!matches!(self.team_feedback, TeamFeedback::Idle), |this| {
-                                        let is_error = self.team_feedback.is_error();
-                                        let message = self.team_feedback.display_message()
-                                            .expect("non-idle team feedback has a message");
-                                        let error_label = self.team_feedback.error_accessible_label();
-                                        let accessibility_label =
-                                            error_label.unwrap_or_else(|| message.clone());
-                                        this.child(
-                                            v_flex()
-                                                .id("team-settings-feedback")
-                                                .text_sm()
-                                                .text_color(if is_error {
-                                                    cx.theme().danger
-                                                } else {
-                                                    cx.theme().muted_foreground
-                                                })
-                                                .role(if is_error {
-                                                    gpui::accesskit::Role::Alert
-                                                } else {
-                                                    gpui::accesskit::Role::Status
-                                                })
-                                                .aria_label(accessibility_label)
-                                                .child(message),
-                                        )
-                                    })
-                                    .child(h_flex().gap_2().when(layout.is_mobile(), |this| this.flex_col()).child(Button::new("save-team").primary().label(if self.team_task.is_some() { "Saving team…" } else { "Save team" }).disabled(!live || self.team_task.is_some() || self.operation_in_progress).on_click(cx.listener(|this, _, _, cx| this.begin_save_team(cx)))).child(Button::new("refresh-team").ghost().label("Refresh team").disabled(!live || self.team_task.is_some() || self.operation_in_progress || self.team_automatic_polling_paused).on_click(cx.listener(|this, _, _, cx| this.begin_team_refresh(cx))))),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary.opacity(0.10))
-                                    .child(div().text_base().font_semibold().child("Desktop notifications"))
-                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(platform_copy.notification_help))
-                                    .when(platform_copy.notification_test_available, |this| {
-                                        this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop entry: dev.jiradesk.JiraDesk · Summary: {TEST_NOTIFICATION_SUMMARY} · Body: {TEST_NOTIFICATION_BODY}")))
-                                    })
-                                    .when(platform_copy.notification_test_available, |this| {
-                                        this.child(Button::new("test-desktop-notification").label(if test_running { "Sending test notification…" } else { "Send test notification" }).disabled(!live || test_running).on_click(cx.listener(|this, _, _, cx| this.begin_test_desktop_notification(cx))))
-                                    })
-                                    .when_some(if platform_copy.notification_test_available { match &self.desktop_notification_test_state { DesktopNotificationTestState::Completed(report) => Some(report.clone()), _ => None } } else { None }, |this, report| {
-                                        let result = match report.outcome {
-                                            DesktopNotificationTestOutcome::Accepted { notification_id } => format!("Accepted by desktop service · notification ID {notification_id}"),
-                                            DesktopNotificationTestOutcome::Failed(error) => format!("Failed · error category {}", desktop_notification_error_category(error)),
-                                        };
-                                        this.child(v_flex().id(NOTIFICATION_TEST_RESULT_ID).gap_1().role(NOTIFICATION_TEST_RESULT_ROLE).child(div().text_sm().child(format!("Last test · {} · {result}", report.timestamp))).when_some(platform_copy.notification_display, |this, copy| this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(copy))).when_some(platform_copy.notification_diagnostics, |this, copy| this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(copy))))
-                                    }),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_2()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary.opacity(0.10))
-                                    .child(div().text_base().font_semibold().child("Saved Jira login"))
-                                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(platform_copy.keyring))
-                                    .child(Button::new("forget-saved-jira-login").label(if saved_login_deleting { "Forgetting saved Jira login…" } else { "Forget saved Jira login" }).when(layout.is_mobile(), |this| this.w_full()).disabled(saved_login_deleting).on_click(cx.listener(|this, _, _, cx| this.begin_forget_saved_login(cx))))
-                                    .when_some(saved_login_delete_feedback_for_state(self.saved_login_delete_state), |this, copy| {
-                                        this.child(v_flex().id(SAVED_LOGIN_DELETE_RESULT_ID).role(SAVED_LOGIN_DELETE_RESULT_ROLE).child(div().text_sm().text_color(match copy.severity() { FeedbackSeverity::Error => cx.theme().danger, FeedbackSeverity::Info => cx.theme().muted_foreground }).child(copy.message())))
-                                    }),
-                            ),
-                    ),
-            )
-        )
+            .child(settings)
     }
 }
 

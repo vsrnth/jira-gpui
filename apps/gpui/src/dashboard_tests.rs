@@ -1051,7 +1051,6 @@ fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpu
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
-    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let option_bounds = visual
         .debug_bounds("status-transition-31")
@@ -1298,6 +1297,48 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
         mobile_table_bounds.size.height > px(300.),
         "mobile team table body collapsed: {mobile_table_bounds:?}"
     );
+}
+
+#[gpui::test]
+fn native_settings_root_and_general_controls_are_bounded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Settings;
+    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let main_bounds = visual
+        .debug_bounds("dashboard-main")
+        .expect("dashboard main should be laid out");
+    let settings_bounds = visual
+        .debug_bounds("settings-root")
+        .expect("native settings root should be laid out");
+    assert!(
+        settings_bounds.size.width > px(0.) && settings_bounds.size.height > px(0.),
+        "native settings root collapsed: {settings_bounds:?}"
+    );
+    assert!(
+        settings_bounds.origin.x >= main_bounds.origin.x
+            && settings_bounds.origin.y >= main_bounds.origin.y
+            && settings_bounds.origin.x + settings_bounds.size.width
+                <= main_bounds.origin.x + main_bounds.size.width + px(1.)
+            && settings_bounds.origin.y + settings_bounds.size.height
+                <= main_bounds.origin.y + main_bounds.size.height + px(1.),
+        "native settings root escapes dashboard main: settings={settings_bounds:?}, main={main_bounds:?}"
+    );
+
+    for control in ["appearance-system", "appearance-light", "appearance-dark"] {
+        let bounds = visual
+            .debug_bounds(control)
+            .unwrap_or_else(|| panic!("default General page should expose {control}"));
+        assert!(
+            bounds.size.width > px(0.) && bounds.size.height > px(0.),
+            "General control {control} collapsed: {bounds:?}"
+        );
+    }
 }
 
 #[gpui::test]
