@@ -214,26 +214,8 @@ enum Section {
     Settings,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HeaderStatusPlacement {
-    TitleBar,
-    MobileRow,
-}
-
-pub(crate) fn status_placement_for_layout(layout: LayoutMode) -> HeaderStatusPlacement {
-    if layout.is_mobile() {
-        HeaderStatusPlacement::MobileRow
-    } else {
-        HeaderStatusPlacement::TitleBar
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DashboardHeaderSnapshot {
-    pub(crate) sync_message: String,
-    pub(crate) refreshing: bool,
-    pub(crate) refresh_visible: bool,
-    pub(crate) sidebar_collapsed: bool,
+fn refresh_visible_for_section(section: Section) -> bool {
+    section != Section::Settings
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -649,24 +631,11 @@ impl Dashboard {
         cx.notify();
     }
 
-    pub(crate) fn header_snapshot(&self) -> DashboardHeaderSnapshot {
-        DashboardHeaderSnapshot {
-            sync_message: self.sync_message.clone(),
-            refreshing: self.operation_in_progress,
-            refresh_visible: self.section != Section::Settings,
-            sidebar_collapsed: self.sidebar_collapsed,
-        }
-    }
-
     pub(crate) fn toggle_sidebar(&mut self, layout: LayoutMode, cx: &mut Context<Self>) {
         if layout.supports_manual_sidebar_collapse() {
             self.sidebar_collapsed = !self.sidebar_collapsed;
             cx.notify();
         }
-    }
-
-    pub(crate) fn begin_refresh_from_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_refresh(window, cx);
     }
 
     fn selected_detail_ticket_is_current(

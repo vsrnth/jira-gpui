@@ -373,11 +373,14 @@ fn selecting_appearance_updates_state_and_emits_event(cx: &mut gpui::TestAppCont
 }
 
 #[test]
-fn sidebar_state_and_header_alignment_start_expanded() {
+fn sidebar_state_starts_expanded_and_refresh_stays_hidden_on_settings() {
     let dashboard = Dashboard::from_sample_data();
 
     assert!(!dashboard.sidebar_collapsed);
-    assert!(!dashboard.header_snapshot().sidebar_collapsed);
+    assert!(refresh_visible_for_section(Section::Issues));
+    assert!(refresh_visible_for_section(Section::Updates));
+    assert!(refresh_visible_for_section(Section::Team));
+    assert!(!refresh_visible_for_section(Section::Settings));
 }
 
 #[gpui::test]
@@ -1459,47 +1462,6 @@ fn direct_account_id_member_uses_persistable_unknown_display_name() {
     let member = persisted_direct_team_member("account-123".to_owned()).expect("valid ID");
     assert_eq!(member.display_name, "Unknown user");
     assert!(normalize_team_members(vec![member]).is_ok());
-}
-
-#[test]
-fn dashboard_header_snapshot_exposes_refresh_policy() {
-    let mut dashboard = Dashboard::from_sample_data();
-
-    let issues = dashboard.header_snapshot();
-    assert_eq!(
-        issues.sync_message,
-        "Preview data · Jira connection not configured"
-    );
-    assert!(!issues.refreshing);
-    assert!(issues.refresh_visible);
-    assert!(!issues.sidebar_collapsed);
-
-    dashboard.sidebar_collapsed = true;
-    let collapsed = dashboard.header_snapshot();
-    assert!(collapsed.sidebar_collapsed);
-
-    dashboard.operation_in_progress = true;
-    let refreshing = dashboard.header_snapshot();
-    assert!(refreshing.refreshing);
-    assert!(refreshing.refresh_visible);
-
-    dashboard.section = Section::Settings;
-    let settings = dashboard.header_snapshot();
-    assert!(!settings.refresh_visible);
-}
-
-#[test]
-fn dashboard_status_moves_to_mobile_row_only_at_mobile_widths() {
-    assert_eq!(
-        status_placement_for_layout(LayoutMode::Mobile),
-        HeaderStatusPlacement::MobileRow
-    );
-    for layout in [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide] {
-        assert_eq!(
-            status_placement_for_layout(layout),
-            HeaderStatusPlacement::TitleBar
-        );
-    }
 }
 
 #[test]

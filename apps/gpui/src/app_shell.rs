@@ -2,9 +2,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, px, relative,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
@@ -16,7 +16,6 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
     spinner::Spinner,
-    tooltip::Tooltip,
     v_flex,
 };
 
@@ -24,32 +23,11 @@ use crate::config::{LiveSession, StartupSelection, live_session_from_manual_conf
 use crate::credential_store::{
     CredentialStoreError, SavedCredentials, load_saved_credentials, save_credentials,
 };
-use crate::dashboard::{
-    Dashboard, DashboardEvent, DashboardHeaderSnapshot, HeaderStatusPlacement,
-    status_placement_for_layout,
-};
+use crate::dashboard::{Dashboard, DashboardEvent};
 use crate::diagnostics::DiagnosticsSink;
-use crate::responsive::{LayoutMode, effective_sidebar_width, layout_for_width};
+use crate::responsive::layout_for_width;
 
 const NOTIFICATION_SIDE_MARGIN: f32 = 16.0;
-#[cfg(target_os = "macos")]
-const TITLE_BAR_LEADING_PADDING: f32 = 80.0;
-#[cfg(not(target_os = "macos"))]
-const TITLE_BAR_LEADING_PADDING: f32 = 12.0;
-
-fn titlebar_content_leading_offset(
-    layout: LayoutMode,
-    sidebar_collapsed: bool,
-    titlebar_leading_padding: f32,
-) -> f32 {
-    if layout.is_mobile() {
-        0.0
-    } else {
-        (effective_sidebar_width(layout, sidebar_collapsed) + layout.list_padding()
-            - titlebar_leading_padding)
-            .max(0.0)
-    }
-}
 
 fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) -> f32 {
     let available_width = (viewport_width - NOTIFICATION_SIDE_MARGIN * 2.0).max(0.0);
@@ -136,7 +114,6 @@ pub struct AppShell {
     api_token_subscription: Option<Subscription>,
     appearance_preference: AppearancePreference,
     appearance_subscription: Option<Subscription>,
-    dashboard_observation_subscription: Option<Subscription>,
     dashboard_subscription: Option<Subscription>,
     connection_enabled: bool,
 }
@@ -181,7 +158,6 @@ impl AppShell {
             api_token_subscription: None,
             appearance_preference: AppearancePreference::System,
             appearance_subscription: None,
-            dashboard_observation_subscription: None,
             dashboard_subscription: None,
             connection_enabled: true,
         };
@@ -240,7 +216,6 @@ impl AppShell {
             api_token_subscription: None,
             appearance_preference,
             appearance_subscription: None,
-            dashboard_observation_subscription: None,
             dashboard_subscription: None,
             connection_enabled: false,
         };
@@ -275,13 +250,7 @@ impl AppShell {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        // Dashboard owns the title-bar snapshot, so observe all entity notifications rather than
-        // relying on its narrower appearance event stream to invalidate this parent.
-        self.dashboard_observation_subscription.take();
-        self.dashboard_observation_subscription = Some(cx.observe(dashboard, |_, _, cx| {
-            cx.notify();
-        }));
-        // Appearance remains a separate event subscription because it also updates shell state.
+        // Appearance is a separate event subscription because it also updates shell state.
         self.dashboard_subscription.take();
         self.dashboard_subscription = Some(cx.subscribe_in(
             dashboard,
@@ -652,75 +621,6 @@ impl AppShell {
                     ),
             )
     }
-
-    fn render_dashboard_title_bar(
-        &self,
-        dashboard: Entity<Dashboard>,
-        snapshot: DashboardHeaderSnapshot,
-        layout: LayoutMode,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let status_in_titlebar =
-            status_placement_for_layout(layout) == HeaderStatusPlacement::TitleBar;
-        let refresh_dashboard = dashboard.clone();
-        let sync_message = snapshot.sync_message.clone();
-
-        TitleBar::new().child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_center()
-                .gap_3()
-                .pl(px(titlebar_content_leading_offset(
-                    layout,
-                    snapshot.sidebar_collapsed,
-                    TITLE_BAR_LEADING_PADDING,
-                )))
-                .pr_2()
-                // Preserve the flexible drag region formerly occupied by the section heading.
-                .child(div().min_w_0().flex_1())
-                .when(status_in_titlebar, |this| {
-                    this.child(
-                        div()
-                            .id("titlebar-sync-status")
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .aria_label(sync_message.clone())
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(sync_message.clone()).build(window, cx)
-                            })
-                            .child(snapshot.sync_message.clone()),
-                    )
-                })
-                .when(snapshot.refresh_visible, |this| {
-                    this.child(
-                        // Keep only Refresh out of TitleBar drag handling; the rest stays draggable.
-                        div()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(
-                                Button::new("titlebar-refresh")
-                                    .compact()
-                                    .primary()
-                                    .flex_shrink_0()
-                                    .label(if snapshot.refreshing {
-                                        "Refreshing…"
-                                    } else {
-                                        "Refresh"
-                                    })
-                                    .loading(snapshot.refreshing)
-                                    .on_click(move |_, window, cx| {
-                                        refresh_dashboard.update(cx, |dashboard, cx| {
-                                            dashboard.begin_refresh_from_shell(window, cx);
-                                        });
-                                    }),
-                            ),
-                    )
-                }),
-        )
-    }
 }
 
 impl Render for AppShell {
@@ -766,19 +666,10 @@ impl Render for AppShell {
                 .into_any_element()
         };
 
-        let layout = layout_for_width(f32::from(window.viewport_size().width));
-        let title_bar = if let Some(dashboard) = &self.dashboard {
-            let snapshot = dashboard.read(cx).header_snapshot();
-            self.render_dashboard_title_bar(dashboard.clone(), snapshot, layout, cx)
-                .into_any_element()
-        } else {
-            TitleBar::new().into_any_element()
-        };
-
         v_flex()
             .size_full()
             .min_w_0()
-            .child(title_bar)
+            .child(TitleBar::new())
             .child(content)
             .when_some(notification_layer, |this, layer| this.child(layer))
             .into_any_element()
@@ -793,11 +684,9 @@ mod tests {
         SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS,
         WRITE_SAFETY_COPY, is_submit_event, notification_width_for_viewport,
         save_credentials_warning, saved_login_warning, should_check_saved_credentials,
-        titlebar_content_leading_offset,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
-    use crate::responsive::LayoutMode;
     use gpui::WindowAppearance;
     use gpui_component::ThemeMode;
     use gpui_component::input::InputEvent;
@@ -901,42 +790,6 @@ mod tests {
             shift: true,
         }));
         assert!(!is_submit_event(&InputEvent::Change));
-    }
-
-    #[test]
-    fn titlebar_content_alignment_accounts_for_platform_leading_padding() {
-        assert_eq!(
-            titlebar_content_leading_offset(LayoutMode::Wide, false, 80.0),
-            176.0
-        );
-        assert_eq!(
-            titlebar_content_leading_offset(LayoutMode::Standard, false, 12.0),
-            208.0
-        );
-    }
-
-    #[test]
-    fn titlebar_content_alignment_moves_with_collapsed_sidebar() {
-        assert_eq!(
-            titlebar_content_leading_offset(LayoutMode::Wide, true, 80.0),
-            4.0
-        );
-        assert_eq!(
-            titlebar_content_leading_offset(LayoutMode::Standard, true, 12.0),
-            72.0
-        );
-    }
-
-    #[test]
-    fn titlebar_content_alignment_clamps_at_rail_widths() {
-        assert_eq!(
-            titlebar_content_leading_offset(LayoutMode::Compact, false, 80.0),
-            0.0
-        );
-        assert_eq!(
-            titlebar_content_leading_offset(LayoutMode::Mobile, false, 12.0),
-            0.0
-        );
     }
 
     #[test]

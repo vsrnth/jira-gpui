@@ -1,6 +1,6 @@
 use super::*;
 use crate::responsive::{effective_sidebar_is_rail, effective_sidebar_width};
-use gpui_component::{Selectable, tooltip::Tooltip};
+use gpui_component::{Selectable, Sizable as _, tooltip::Tooltip};
 
 impl Dashboard {
     fn render_sidebar(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
@@ -130,6 +130,28 @@ impl Dashboard {
                         .border_color(cx.theme().sidebar_border)
                         .child(
                             div()
+                                .id("sidebar-sync-status")
+                                .debug_selector(|| "sidebar-sync-status".to_owned())
+                                .w_full()
+                                .min_w_0()
+                                .aria_label(self.sync_message.clone())
+                                .max_h(px(72.))
+                                .overflow_y_scrollbar()
+                                .whitespace_normal()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(self.sync_message.clone()),
+                        )
+                        .when(self.refresh_visible(), |this| {
+                            this.child(self.render_refresh_action(
+                                "sidebar-refresh",
+                                false,
+                                true,
+                                cx,
+                            ))
+                        })
+                        .child(
+                            div()
                                 .text_sm()
                                 .font_semibold()
                                 .child(self.site_label.clone()),
@@ -140,6 +162,16 @@ impl Dashboard {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(self.mode_label.clone()),
                         ),
+                )
+            })
+            .when(rail && self.refresh_visible(), |this| {
+                this.child(
+                    v_flex()
+                        .p_2()
+                        .items_center()
+                        .border_t_1()
+                        .border_color(cx.theme().sidebar_border)
+                        .child(self.render_refresh_action("sidebar-refresh", true, false, cx)),
                 )
             })
     }
@@ -291,6 +323,86 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn refresh_visible(&self) -> bool {
+        refresh_visible_for_section(self.section)
+    }
+
+    fn render_refresh_action(
+        &self,
+        id: &'static str,
+        icon_only: bool,
+        sidebar_action: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = if self.operation_in_progress {
+            "Refreshing…"
+        } else {
+            "Refresh"
+        };
+        let tooltip = format!(
+            "{} Jira · {}",
+            if self.operation_in_progress {
+                "Refreshing"
+            } else {
+                "Refresh"
+            },
+            self.sync_message
+        );
+
+        if icon_only {
+            div()
+                .id(id)
+                .accessibility_id(id)
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(tooltip.clone())
+                .tab_index(0)
+                .size(px(32.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(cx.theme().radius)
+                .text_color(cx.theme().sidebar_foreground)
+                .cursor_pointer()
+                .hover(|style| {
+                    style
+                        .bg(cx.theme().sidebar_accent)
+                        .text_color(cx.theme().sidebar_accent_foreground)
+                })
+                .focus(|style| style.border_1().border_color(cx.theme().primary))
+                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.begin_refresh(window, cx);
+                }))
+                .on_key_down(cx.listener(|this, event, window, cx| {
+                    if is_activation_key(event) {
+                        window.prevent_default();
+                        this.begin_refresh(window, cx);
+                    }
+                }))
+                .child(if self.operation_in_progress {
+                    Spinner::new().xsmall().into_any_element()
+                } else {
+                    Icon::new(IconName::Redo2).size(px(16.)).into_any_element()
+                })
+                .into_any_element()
+        } else {
+            Button::new(id)
+                .compact()
+                .when(sidebar_action, |this| {
+                    this.ghost().w_full().justify_start().icon(IconName::Redo2)
+                })
+                .when(!sidebar_action, |this| this.primary().flex_shrink_0())
+                .label(label)
+                .loading(self.operation_in_progress)
+                .tooltip(tooltip)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.begin_refresh(window, cx);
+                }))
+                .into_any_element()
+        }
+    }
+
     fn render_mobile_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("mobile-sync-status")
@@ -303,16 +415,25 @@ impl Dashboard {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                div()
-                    .id("mobile-sync-status-text")
-                    .aria_label(self.sync_message.clone())
-                    .min_w_0()
-                    .max_h(px(56.))
-                    .overflow_y_scrollbar()
-                    .whitespace_normal()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.sync_message.clone()),
+                h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("mobile-sync-status-text")
+                            .aria_label(self.sync_message.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .max_h(px(56.))
+                            .overflow_y_scrollbar()
+                            .whitespace_normal()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.sync_message.clone()),
+                    )
+                    .when(self.refresh_visible(), |this| {
+                        this.child(self.render_refresh_action("mobile-refresh", false, false, cx))
+                    }),
             )
     }
 
@@ -454,10 +575,7 @@ impl Render for Dashboard {
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(self.render_mobile_nav(cx))
-                .when(
-                    status_placement_for_layout(layout) == HeaderStatusPlacement::MobileRow,
-                    |this| this.child(self.render_mobile_status(cx)),
-                )
+                .child(self.render_mobile_status(cx))
                 .child(main)
         } else {
             h_flex()
