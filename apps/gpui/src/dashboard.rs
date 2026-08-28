@@ -214,17 +214,6 @@ enum Section {
     Settings,
 }
 
-impl Section {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Issues => "Jira issues",
-            Self::Updates => "Local updates",
-            Self::Team => "Team tracker",
-            Self::Settings => "Settings",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HeaderStatusPlacement {
     TitleBar,
@@ -241,7 +230,6 @@ pub(crate) fn status_placement_for_layout(layout: LayoutMode) -> HeaderStatusPla
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DashboardHeaderSnapshot {
-    pub(crate) section_label: &'static str,
     pub(crate) sync_message: String,
     pub(crate) refreshing: bool,
     pub(crate) refresh_visible: bool,
@@ -663,7 +651,6 @@ impl Dashboard {
 
     pub(crate) fn header_snapshot(&self) -> DashboardHeaderSnapshot {
         DashboardHeaderSnapshot {
-            section_label: self.section.label(),
             sync_message: self.sync_message.clone(),
             refreshing: self.operation_in_progress,
             refresh_visible: self.section != Section::Settings,

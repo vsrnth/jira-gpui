@@ -1462,11 +1462,10 @@ fn direct_account_id_member_uses_persistable_unknown_display_name() {
 }
 
 #[test]
-fn dashboard_header_snapshot_exposes_section_and_refresh_policy() {
+fn dashboard_header_snapshot_exposes_refresh_policy() {
     let mut dashboard = Dashboard::from_sample_data();
 
     let issues = dashboard.header_snapshot();
-    assert_eq!(issues.section_label, "Jira issues");
     assert_eq!(
         issues.sync_message,
         "Preview data · Jira connection not configured"
@@ -1486,7 +1485,6 @@ fn dashboard_header_snapshot_exposes_section_and_refresh_policy() {
 
     dashboard.section = Section::Settings;
     let settings = dashboard.header_snapshot();
-    assert_eq!(settings.section_label, "Settings");
     assert!(!settings.refresh_visible);
 }
 

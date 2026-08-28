@@ -677,15 +677,8 @@ impl AppShell {
                     TITLE_BAR_LEADING_PADDING,
                 )))
                 .pr_2()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_sm()
-                        .font_semibold()
-                        .child(snapshot.section_label),
-                )
+                // Preserve the flexible drag region formerly occupied by the section heading.
+                .child(div().min_w_0().flex_1())
                 .when(status_in_titlebar, |this| {
                     this.child(
                         div()
