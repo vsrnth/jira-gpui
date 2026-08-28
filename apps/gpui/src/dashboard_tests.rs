@@ -456,7 +456,7 @@ fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::Te
         .expect("collapsed main pane should be laid out");
 
     assert_eq!(expanded.size.width, px(200.));
-    assert_eq!(collapsed.size.width, px(64.));
+    assert_eq!(collapsed.size.width, px(48.));
     assert_eq!(
         expanded_main.origin.x,
         expanded.origin.x + expanded.size.width
@@ -485,7 +485,8 @@ fn sidebar_navigation_replaces_branding_and_keeps_toggle_reachable(cx: &mut gpui
     let navigation = visual
         .debug_bounds("sidebar-navigation")
         .expect("sidebar navigation should be laid out");
-    assert_eq!(navigation.origin.y, sidebar.origin.y);
+    assert!(navigation.origin.y >= sidebar.origin.y);
+    assert!(navigation.origin.y < sidebar.origin.y + px(48.));
     assert!(
         visual.debug_bounds("sidebar-branding").is_none(),
         "the removed branding block must not reserve a layout region"

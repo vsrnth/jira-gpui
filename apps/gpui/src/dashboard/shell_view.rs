@@ -1,8 +1,13 @@
 use super::*;
-use crate::responsive::{
-    mobile_nav_item_width, sidebar_is_rail_for_viewport, sidebar_width_for_viewport,
+use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
+use gpui_component::{
+    Sizable as _,
+    sidebar::{
+        Sidebar, SidebarCollapsible, SidebarFooter, SidebarMenu, SidebarMenuItem,
+        SidebarToggleButton,
+    },
+    tooltip::Tooltip,
 };
-use gpui_component::{Sizable as _, tooltip::Tooltip};
 
 struct MobileNavItem {
     id: &'static str,
@@ -17,265 +22,157 @@ impl Dashboard {
     fn render_sidebar(
         &self,
         layout: LayoutMode,
-        viewport_width: f32,
+        _viewport_width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let rail = sidebar_is_rail_for_viewport(layout, self.sidebar_collapsed, viewport_width);
-        v_flex()
-            .id("dashboard-sidebar")
-            .debug_selector(|| "dashboard-sidebar".to_owned())
-            .h_full()
-            .w(px(sidebar_width_for_viewport(
-                layout,
-                self.sidebar_collapsed,
-                viewport_width,
-            )))
-            .flex_shrink_0()
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .bg(cx.theme().sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .child(
-                v_flex()
-                    .id("sidebar-navigation")
-                    .debug_selector(|| "sidebar-navigation".to_owned())
-                    .flex_1()
-                    .p_3()
-                    .min_h_0()
-                    .when(rail, |this| this.p_2().items_center())
-                    .gap_1()
-                    .when(
-                        layout.supports_manual_sidebar_collapse()
-                            && (!rail || self.sidebar_collapsed),
-                        |this| {
-                            this.child(self.render_sidebar_toggle(
-                                layout,
-                                self.sidebar_collapsed,
-                                cx,
-                            ))
-                        },
-                    )
-                    .child(self.nav_item(
-                        "Issues",
-                        Some(self.issues.len()),
-                        self.section == Section::Issues,
-                        Section::Issues,
-                        rail,
-                        cx,
-                    ))
-                    .child(self.nav_item(
-                        "Local updates",
-                        Some(self.unread_count()),
-                        self.section == Section::Updates,
-                        Section::Updates,
-                        rail,
-                        cx,
-                    ))
-                    .child(self.nav_item(
-                        "Team tracker",
-                        Some(team_issue_counts(&self.team_issues).1),
-                        self.section == Section::Team,
-                        Section::Team,
-                        rail,
-                        cx,
-                    ))
-                    .child(self.nav_item(
-                        "Settings",
-                        None,
-                        self.section == Section::Settings,
-                        Section::Settings,
-                        rail,
-                        cx,
-                    )),
-            )
-            .when(!rail, |this| {
-                this.child(
-                    v_flex()
-                        .p_4()
+        let collapsed = effective_sidebar_is_rail(layout, self.sidebar_collapsed);
+        let menu = SidebarMenu::new()
+            .child(self.sidebar_menu_item(
+                "Issues",
+                self.issues.len(),
+                self.section == Section::Issues,
+                Section::Issues,
+                cx,
+            ))
+            .child(self.sidebar_menu_item(
+                "Local updates",
+                self.unread_count(),
+                self.section == Section::Updates,
+                Section::Updates,
+                cx,
+            ))
+            .child(self.sidebar_menu_item(
+                "Team tracker",
+                team_issue_counts(&self.team_issues).1,
+                self.section == Section::Team,
+                Section::Team,
+                cx,
+            ))
+            .child(self.sidebar_menu_item(
+                "Settings",
+                0,
+                self.section == Section::Settings,
+                Section::Settings,
+                cx,
+            ));
+
+        let header = layout.supports_manual_sidebar_collapse().then(|| {
+            h_flex()
+                .id("sidebar-navigation")
+                .debug_selector(|| "sidebar-navigation".to_owned())
+                .w_full()
+                .justify_end()
+                .child(
+                    div()
+                        .id("sidebar-toggle")
+                        .debug_selector(|| "sidebar-toggle".to_owned())
+                        .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.toggle_sidebar(layout, cx);
+                            }),
+                        )),
+                )
+        });
+
+        let footer = if collapsed {
+            v_flex()
+                .id("sidebar-footer-content")
+                .w_full()
+                .items_center()
+                .border_t_1()
+                .border_color(cx.theme().sidebar_border)
+                .when(self.refresh_visible(), |this| {
+                    this.child(self.render_refresh_action("sidebar-refresh", true, false, cx))
+                })
+                .into_any_element()
+        } else {
+            v_flex()
+                .id("sidebar-footer-content")
+                .w_full()
+                .min_w_0()
+                .min_h_0()
+                .gap_1()
+                .max_h(px(176.))
+                .border_t_1()
+                .border_color(cx.theme().sidebar_border)
+                .child(
+                    div()
+                        .id("sidebar-sync-status")
+                        .debug_selector(|| "sidebar-sync-status".to_owned())
+                        .role(gpui::accesskit::Role::Status)
+                        .w_full()
+                        .min_w_0()
+                        .aria_label(self.sync_message.clone())
+                        .max_h(px(72.))
                         .min_h_0()
                         .flex_shrink_0()
-                        .gap_1()
-                        .max_h(px(176.))
-                        .border_t_1()
-                        .border_color(cx.theme().sidebar_border)
-                        .child(
-                            div()
-                                .id("sidebar-sync-status")
-                                .debug_selector(|| "sidebar-sync-status".to_owned())
-                                .role(gpui::accesskit::Role::Status)
-                                .w_full()
-                                .min_w_0()
-                                .aria_label(self.sync_message.clone())
-                                .max_h(px(72.))
-                                .min_h_0()
-                                .flex_shrink_0()
-                                .overflow_y_scrollbar()
-                                .whitespace_normal()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(self.sync_message.clone()),
-                        )
-                        .when(self.refresh_visible(), |this| {
-                            this.child(self.render_refresh_action(
-                                "sidebar-refresh",
-                                false,
-                                true,
-                                cx,
-                            ))
-                        })
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_semibold()
-                                .child(self.site_label.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(self.mode_label.clone()),
-                        ),
+                        .overflow_y_scrollbar()
+                        .whitespace_normal()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(self.sync_message.clone()),
                 )
-            })
-            .when(rail && self.refresh_visible(), |this| {
-                this.child(
-                    v_flex()
-                        .p_2()
-                        .items_center()
-                        .border_t_1()
-                        .border_color(cx.theme().sidebar_border)
-                        .child(self.render_refresh_action("sidebar-refresh", true, false, cx)),
+                .when(self.refresh_visible(), |this| {
+                    this.child(self.render_refresh_action("sidebar-refresh", false, true, cx))
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .truncate()
+                        .child(self.site_label.clone()),
                 )
-            })
-    }
-
-    fn render_sidebar_toggle(
-        &self,
-        layout: LayoutMode,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let (icon, label) = if collapsed {
-            (IconName::PanelLeftOpen, "Expand sidebar")
-        } else {
-            (IconName::PanelLeftClose, "Collapse sidebar")
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate()
+                        .child(self.mode_label.clone()),
+                )
+                .into_any_element()
         };
 
         div()
-            .id("sidebar-toggle")
-            .debug_selector(|| "sidebar-toggle".to_owned())
-            .role(gpui::accesskit::Role::Button)
-            .aria_label(label)
-            .tab_index(0)
-            .size(px(32.))
+            .id("dashboard-sidebar-shell")
+            .debug_selector(|| "dashboard-sidebar".to_owned())
+            .h_full()
+            .w(px(if collapsed { 48. } else { 200. }))
             .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .rounded(cx.theme().radius)
-            .text_color(cx.theme().sidebar_foreground)
-            .cursor_pointer()
-            .hover(|style| {
-                style
-                    .bg(cx.theme().sidebar_accent)
-                    .text_color(cx.theme().sidebar_accent_foreground)
-            })
-            .focus(|style| style.border_1().border_color(cx.theme().primary))
-            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_sidebar(layout, cx);
-            }))
-            .on_key_down(cx.listener(move |this, event, window, cx| {
-                if is_activation_key(event) {
-                    window.prevent_default();
-                    this.toggle_sidebar(layout, cx);
-                }
-            }))
-            .child(Icon::new(icon).size(px(16.)))
+            .overflow_hidden()
+            .child(
+                Sidebar::new("dashboard-sidebar-component")
+                    .collapsible(SidebarCollapsible::Icon)
+                    .collapsed(collapsed)
+                    .w(px(200.))
+                    .when_some(header, |this, header| this.header(header))
+                    .child(menu)
+                    .footer(SidebarFooter::new().child(footer)),
+            )
     }
 
-    fn nav_item(
+    fn sidebar_menu_item(
         &self,
         label: &'static str,
-        count: Option<usize>,
+        count: usize,
         selected: bool,
         section: Section,
-        rail: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> SidebarMenuItem {
         let icon = match section {
             Section::Issues => IconName::LayoutDashboard,
             Section::Updates => IconName::Bell,
             Section::Team => IconName::CircleUser,
             Section::Settings => IconName::Settings2,
         };
-        let count = count.unwrap_or_default();
-        let icon_color = if selected {
-            cx.theme().sidebar_accent_foreground
-        } else {
-            cx.theme().sidebar_foreground
-        };
-        let tooltip = if count > 0 {
-            format!("{label} · {count}")
-        } else {
-            label.to_owned()
-        };
-        div()
-            .id(label)
-            .role(gpui::accesskit::Role::Button)
-            .aria_label(tooltip.clone())
-            .aria_selected(selected)
-            .tab_index(0)
-            .w_full()
-            .h(px(36.))
-            .px_3()
-            .rounded(cx.theme().radius)
-            .accessibility_id(label)
-            .cursor_pointer()
-            .when(selected, |this| {
-                this.bg(cx.theme().sidebar_accent)
-                    .text_color(cx.theme().sidebar_accent_foreground)
-            })
-            .when(!selected, |this| {
-                this.hover(|style| style.bg(cx.theme().sidebar_accent))
-            })
-            .when(rail, |this| {
-                this.w(px(48.))
-                    .overflow_hidden()
-                    .px_1()
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        SidebarMenuItem::new(label)
+            .icon(icon)
+            .active(selected)
+            .when(count > 0, |this| {
+                this.suffix(move |_, _| div().text_xs().child(count.to_string()))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.activate_section(section, cx);
             }))
-            .on_key_down(cx.listener(move |this, event, window, cx| {
-                if is_activation_key(event) {
-                    window.prevent_default();
-                    this.activate_section(section, cx);
-                }
-            }))
-            .focus(|style| style.border_1().border_color(cx.theme().primary))
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_x_hidden()
-                    .justify_center()
-                    .gap_2()
-                    .child(Icon::new(icon).text_color(icon_color))
-                    .when(!rail, |this| {
-                        this.child(div().flex_1().min_w_0().truncate().child(label))
-                    })
-                    .when(!rail && count > 0, |this| {
-                        this.child(
-                            div()
-                                .flex_shrink_0()
-                                .ml_auto()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(count.to_string()),
-                        )
-                    }),
-            )
     }
 
     fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) -> bool {

@@ -28,9 +28,9 @@ const COMPACT_BREAKPOINT: f32 = 720.0;
 const STANDARD_BREAKPOINT: f32 = 960.0;
 const WIDE_BREAKPOINT: f32 = 1_200.0;
 
-const SIDEBAR_RAIL_WIDTH: f32 = 64.0;
+// Keep this aligned with gpui-component's native icon-collapsed Sidebar width.
+const SIDEBAR_RAIL_WIDTH: f32 = 48.0;
 const STANDARD_SIDEBAR_WIDTH: f32 = 200.0;
-const FULL_SIDEBAR_MIN_WIDTH: f32 = STANDARD_SIDEBAR_WIDTH;
 // 200px is wide enough for the full native labels and avoids a second
 // workspace contraction at the Wide breakpoint.
 const WIDE_SIDEBAR_WIDTH: f32 = STANDARD_SIDEBAR_WIDTH;
@@ -166,59 +166,18 @@ pub(crate) fn effective_sidebar_width(layout: LayoutMode, manually_collapsed: bo
     }
 }
 
-/// Returns the shell's sidebar allocation for a viewport.
+/// Returns the shell's sidebar allocation.
 ///
-/// Expanding the sidebar exactly at a breakpoint causes a one-pixel resize to
-/// remove over a hundred pixels from the workspace. The policy therefore
-/// interpolates the sidebar from the rail width over the extra space needed by
-/// the wider shell. The workspace is continuous and non-decreasing at every
-/// breakpoint, while the sidebar still reaches its intended native width.
+/// Desktop rendering delegates collapse behavior to gpui-component's native
+/// icon mode: expanded sidebars are 200px and collapsed sidebars are 48px.
+/// The viewport argument remains for callers that share layout calculations
+/// with the mobile shell.
 pub(crate) fn sidebar_width_for_viewport(
     layout: LayoutMode,
     manually_collapsed: bool,
-    viewport_width: f32,
+    _viewport_width: f32,
 ) -> f32 {
-    if layout.is_mobile() || manually_collapsed {
-        return effective_sidebar_width(layout, manually_collapsed);
-    }
-
-    match layout {
-        LayoutMode::Mobile => 0.0,
-        LayoutMode::Compact => SIDEBAR_RAIL_WIDTH,
-        LayoutMode::Standard => {
-            let expansion = STANDARD_SIDEBAR_WIDTH - SIDEBAR_RAIL_WIDTH;
-            SIDEBAR_RAIL_WIDTH + (viewport_width - STANDARD_BREAKPOINT).clamp(0.0, expansion)
-        }
-        LayoutMode::Wide => WIDE_SIDEBAR_WIDTH,
-    }
-}
-
-/// Whether the shell should use its icon rail treatment at this width.
-///
-/// Standard and Wide expand progressively, so their content must remain in
-/// the compact rail until the corresponding full sidebar width is available.
-pub(crate) fn sidebar_is_rail_for_viewport(
-    layout: LayoutMode,
-    manually_collapsed: bool,
-    viewport_width: f32,
-) -> bool {
-    effective_sidebar_is_rail(layout, manually_collapsed)
-        || sidebar_width_for_viewport(layout, manually_collapsed, viewport_width)
-            < match layout {
-                LayoutMode::Mobile | LayoutMode::Compact => layout.sidebar_width(),
-                LayoutMode::Standard | LayoutMode::Wide => FULL_SIDEBAR_MIN_WIDTH,
-            }
-}
-
-/// Workspace width after the shell sidebar, before a section's own padding.
-#[cfg(test)]
-pub(crate) fn workspace_width_for_viewport(
-    layout: LayoutMode,
-    manually_collapsed: bool,
-    viewport_width: f32,
-) -> f32 {
-    (viewport_width - sidebar_width_for_viewport(layout, manually_collapsed, viewport_width))
-        .max(0.0)
+    effective_sidebar_width(layout, manually_collapsed)
 }
 
 #[cfg(test)]
@@ -226,7 +185,7 @@ mod tests {
     use super::{
         IssuesPaneMode, LayoutMode, MOBILE_NAV_ITEM_MIN_WIDTH, effective_sidebar_is_rail,
         effective_sidebar_width, issues_pane_mode, layout_for_width, mobile_nav_item_width,
-        sidebar_is_rail_for_viewport, sidebar_width_for_viewport, workspace_width_for_viewport,
+        sidebar_width_for_viewport,
     };
 
     #[test]
@@ -314,12 +273,12 @@ mod tests {
     fn effective_sidebar_width_releases_desktop_space_without_mobile_sidebar() {
         assert_eq!(effective_sidebar_width(LayoutMode::Mobile, false), 0.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Mobile, true), 0.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Compact, false), 64.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Compact, true), 64.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Compact, false), 48.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Compact, true), 48.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Standard, false), 200.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Standard, true), 64.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Standard, true), 48.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Wide, false), 200.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Wide, true), 64.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Wide, true), 48.0);
     }
 
     #[test]
@@ -329,59 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_expansion_is_continuous_at_mode_boundaries() {
-        for (before, at, layout) in [
-            (959.0, 960.0, LayoutMode::Standard),
-            (1_199.0, 1_200.0, LayoutMode::Wide),
-        ] {
-            assert!(
-                workspace_width_for_viewport(layout_for_width(before), false, before,)
-                    <= workspace_width_for_viewport(layout, false, at)
-            );
+    fn sidebar_widths_match_native_component_contract() {
+        for width in [720.0, 959.0, 960.0, 1_199.0, 1_200.0, 2_000.0] {
+            let layout = layout_for_width(width);
             assert_eq!(
-                sidebar_width_for_viewport(layout, false, at),
-                sidebar_width_for_viewport(layout, false, before)
+                sidebar_width_for_viewport(layout, false, width),
+                if layout.is_rail() { 48.0 } else { 200.0 }
             );
         }
-    }
-
-    #[test]
-    fn sidebar_treatment_matches_progressive_width() {
-        assert!(sidebar_is_rail_for_viewport(
-            LayoutMode::Standard,
-            false,
-            960.0
-        ));
-        assert!(sidebar_is_rail_for_viewport(
-            LayoutMode::Standard,
-            false,
-            1_095.0
-        ));
-        assert!(!sidebar_is_rail_for_viewport(
-            LayoutMode::Standard,
-            false,
-            1_096.0
-        ));
-        assert!(!sidebar_is_rail_for_viewport(
-            LayoutMode::Wide,
-            false,
-            1_200.0
-        ));
-    }
-
-    #[test]
-    fn workspace_width_never_decreases_as_viewport_grows() {
-        // Mobile intentionally changes from a top navigation bar to a desktop
-        // shell at 720px; the invariant applies within the desktop policy.
-        let mut previous = workspace_width_for_viewport(layout_for_width(720.0), false, 720.0);
-        for width in (721..=2_000).map(|width| width as f32) {
-            let layout = layout_for_width(width);
-            let current = workspace_width_for_viewport(layout, false, width);
-            assert!(
-                current + 0.001 >= previous,
-                "width={width}, current={current}, previous={previous}"
-            );
-            previous = current;
+        for layout in [LayoutMode::Standard, LayoutMode::Wide] {
+            assert_eq!(sidebar_width_for_viewport(layout, true, 1_100.0), 48.0);
         }
     }
 }
