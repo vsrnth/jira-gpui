@@ -187,9 +187,12 @@ canvas:
 | --- | --- |
 | below 720 px | Mobile navigation with one visible pane; selecting an issue opens its detail view and a back action returns to the list |
 | 720–959 px | Compact desktop layout with a 64 px navigation rail, issue list, and detail pane |
-| 960–1,199 px | Standard desktop layout with full navigation and narrower list/detail columns |
-| 1,200 px and wider | Wide desktop layout with full navigation and expanded list/detail columns |
+| 960–1,095 px | Standard layout progressively allocates the sidebar while keeping its rail contents centered and preserving workspace width |
+| 1,096–1,199 px | Standard desktop layout with full navigation, issue list, and detail pane |
+| 1,200 px and wider | Wide desktop layout with full navigation, issue list, and detail pane |
 
+The four mobile destinations fit the supported 320 px minimum without horizontal
+scrolling; issue, update, and team counts remain available in accessible labels.
 List rows, detail fields, comments, and rich text use constrained flex children
 and wrapping/truncation so long Jira content does not determine the window
 width.

@@ -49,23 +49,21 @@ interaction quality—not a mandate to copy visual treatments.
 - `4400dc8` — add the selected-issue accent rail.
 - `19a9c4b` — improve onboarding validation and accessibility.
 - `a5c4cb2` — tailor settings feedback to the host platform.
+- `1c6760a` — complete responsive shell and mobile navigation polish.
 
 ## Ordered remaining plan
 
 Each slice is independently reviewed and validated using the gate below, then
-committed separately. **Responsive shell/mobile navigation is in progress; all
-other remaining slices are queued.**
+committed separately. **Issues/detail is in progress; all other remaining
+slices are queued.**
 
-1. **In progress — Responsive shell/mobile navigation:** Fix non-monotonic content
-   widths, establish reliable breakpoints, and prevent narrow-navigation
-   overflow.
-2. **Queued — Issues/detail:** Make exact-key Jira loading and failure visible
+1. **In progress — Issues/detail:** Make exact-key Jira loading and failure visible
    on mobile; align page hierarchy and selected, empty, loading, and error
    states.
-3. **Queued — Updates:** Establish consistent heading, filter, and card
+2. **Queued — Updates:** Establish consistent heading, filter, and card
    hierarchy; keep state distinctions readable and responsive without
    decorative motion.
-4. **Queued — Team Tracker:** Keep table selection/detail identity consistent
+3. **Queued — Team Tracker:** Keep table selection/detail identity consistent
    through sort, filter, and rebuild; align sort and selection semantics, use
    semantic colors, and bound detail geometry.
 
