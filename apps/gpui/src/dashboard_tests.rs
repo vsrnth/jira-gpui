@@ -2,7 +2,7 @@ use super::settings::{persisted_direct_team_member, team_identifier_lines};
 use super::*;
 use crate::app_shell::AppearancePreference;
 use crate::presentation::{UpdateViewModel, normalized_issue_key};
-use crate::responsive::effective_sidebar_width;
+use crate::responsive::sidebar_width_for_viewport;
 use crate::sample_data::{sample_issues, sample_users};
 use gpui::VisualTestContext;
 use gpui_component::searchable_list::SearchableListDelegate as _;
@@ -413,7 +413,7 @@ fn sidebar_toggle_is_manual_only_on_standard_and_wide_layouts(cx: &mut gpui::Tes
 #[gpui::test]
 fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(1_000.), px(700.)), |_, _| {
+    let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -452,6 +452,37 @@ fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::Te
         collapsed_main.origin.x,
         collapsed.origin.x + collapsed.size.width
     );
+}
+
+#[gpui::test]
+fn mobile_navigation_fits_all_destinations_at_supported_minimum(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let navigation = visual
+        .debug_bounds("mobile-navigation")
+        .expect("mobile navigation should be laid out");
+    for id in [
+        "mobile-issues",
+        "mobile-updates",
+        "mobile-team",
+        "mobile-settings",
+    ] {
+        let bounds = visual
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} should be laid out"));
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(bounds.origin.x >= navigation.origin.x);
+        assert!(
+            bounds.origin.x + bounds.size.width
+                <= navigation.origin.x + navigation.size.width + px(1.)
+        );
+    }
 }
 
 #[test]
@@ -1190,14 +1221,14 @@ fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
                 sidebar_collapsed,
             );
             let content = width
-                - effective_sidebar_width(layout, sidebar_collapsed)
+                - sidebar_width_for_viewport(layout, sidebar_collapsed, width)
                 - 2. * layout.list_padding();
             let table_min = team_table_min_width(mode, layout);
             assert!(clamped >= 0.);
             assert!(clamped + TEAM_DETAIL_RESIZE_HANDLE_WIDTH + table_min <= content + 0.01);
             assert!(clamped <= content / 2. + 0.01);
             if width == 1_200. && !sidebar_collapsed {
-                assert_eq!(clamped, 320.);
+                assert_eq!(clamped, 356.);
             }
             if width == 1_370. {
                 assert_eq!(clamped, DETAIL_SIDEBAR_DEFAULT_WIDTH);

@@ -1,15 +1,35 @@
 use super::*;
-use crate::responsive::{effective_sidebar_is_rail, effective_sidebar_width};
-use gpui_component::{Selectable, Sizable as _, tooltip::Tooltip};
+use crate::responsive::{
+    mobile_nav_item_width, sidebar_is_rail_for_viewport, sidebar_width_for_viewport,
+};
+use gpui_component::{Sizable as _, tooltip::Tooltip};
+
+struct MobileNavItem {
+    id: &'static str,
+    label: &'static str,
+    accessible_label: String,
+    selected: bool,
+    section: Section,
+    width: f32,
+}
 
 impl Dashboard {
-    fn render_sidebar(&self, layout: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
-        let rail = effective_sidebar_is_rail(layout, self.sidebar_collapsed);
+    fn render_sidebar(
+        &self,
+        layout: LayoutMode,
+        viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let rail = sidebar_is_rail_for_viewport(layout, self.sidebar_collapsed, viewport_width);
         v_flex()
             .id("dashboard-sidebar")
             .debug_selector(|| "dashboard-sidebar".to_owned())
             .h_full()
-            .w(px(effective_sidebar_width(layout, self.sidebar_collapsed)))
+            .w(px(sidebar_width_for_viewport(
+                layout,
+                self.sidebar_collapsed,
+                viewport_width,
+            )))
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
@@ -86,7 +106,7 @@ impl Dashboard {
                 v_flex()
                     .flex_1()
                     .p_3()
-                    .when(rail, |this| this.p_2())
+                    .when(rail, |this| this.p_2().items_center())
                     .gap_1()
                     .child(self.nav_item(
                         "Issues",
@@ -304,7 +324,7 @@ impl Dashboard {
             )
     }
 
-    fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) {
+    fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) -> bool {
         if section == Section::Team
             && self
                 .selected_issue
@@ -315,12 +335,13 @@ impl Dashboard {
                 self.sync_message =
                     "Finish the confirmed Jira change before changing views".to_owned();
                 cx.notify();
-                return;
+                return false;
             }
             self.clear_selection_for_team_scope(cx);
         }
         self.section = section;
         cx.notify();
+        true
     }
 
     fn refresh_visible(&self) -> bool {
@@ -437,93 +458,130 @@ impl Dashboard {
             )
     }
 
-    fn render_mobile_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_mobile_nav(&self, viewport_width: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let issues_active = self.section == Section::Issues;
         let updates_active = self.section == Section::Updates;
         let team_active = self.section == Section::Team;
         let settings_active = self.section == Section::Settings;
+        let nav_item_width = mobile_nav_item_width(viewport_width);
 
         h_flex()
+            .id("mobile-navigation")
+            .debug_selector(|| "mobile-navigation".to_owned())
             .w_full()
             .h(px(48.))
             .flex_shrink_0()
-            .px_2()
+            .px_1()
             .gap_1()
             .items_center()
-            .overflow_x_scrollbar()
+            .overflow_x_hidden()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(
-                Button::new("mobile-issues")
-                    .compact()
-                    .flex_1()
-                    .min_w(px(76.))
-                    .selected(issues_active)
-                    .toggled(issues_active)
-                    .when(issues_active, |this| this.primary())
-                    .label(format!("Issues · {}", self.issues.len()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.section = Section::Issues;
+            .child(self.mobile_nav_item(
+                MobileNavItem {
+                    id: "mobile-issues",
+                    label: "Issues",
+                    accessible_label: format!("Issues · {} issues", self.issues.len()),
+                    selected: issues_active,
+                    section: Section::Issues,
+                    width: nav_item_width,
+                },
+                cx,
+            ))
+            .child(self.mobile_nav_item(
+                MobileNavItem {
+                    id: "mobile-updates",
+                    label: "Updates",
+                    accessible_label: format!("Updates · {} unread", self.unread_count()),
+                    selected: updates_active,
+                    section: Section::Updates,
+                    width: nav_item_width,
+                },
+                cx,
+            ))
+            .child(self.mobile_nav_item(
+                MobileNavItem {
+                    id: "mobile-team",
+                    label: "Team",
+                    accessible_label: format!(
+                        "Team · {} in-progress tickets",
+                        team_issue_counts(&self.team_issues).1
+                    ),
+                    selected: team_active,
+                    section: Section::Team,
+                    width: nav_item_width,
+                },
+                cx,
+            ))
+            .child(self.mobile_nav_item(
+                MobileNavItem {
+                    id: "mobile-settings",
+                    label: "Settings",
+                    accessible_label: "Settings".to_owned(),
+                    selected: settings_active,
+                    section: Section::Settings,
+                    width: nav_item_width,
+                },
+                cx,
+            ))
+    }
+
+    fn mobile_nav_item(&self, item: MobileNavItem, cx: &mut Context<Self>) -> impl IntoElement {
+        let MobileNavItem {
+            id,
+            label,
+            accessible_label,
+            selected,
+            section,
+            width,
+        } = item;
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .accessibility_id(id)
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(accessible_label.clone())
+            .aria_selected(selected)
+            .tab_index(0)
+            .flex_1()
+            .min_w_0()
+            .w(px(width))
+            .h(px(36.))
+            .px_1()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(cx.theme().sidebar_accent)
+                    .text_color(cx.theme().sidebar_accent_foreground)
+            })
+            .when(!selected, |this| {
+                this.text_color(cx.theme().foreground)
+                    .hover(|style| style.bg(cx.theme().accent))
+            })
+            .tooltip(move |window, cx| Tooltip::new(accessible_label.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.activate_section(section, cx) {
+                    this.mobile_detail_open = false;
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if is_activation_key(event) {
+                    window.prevent_default();
+                    if this.activate_section(section, cx) {
                         this.mobile_detail_open = false;
                         cx.notify();
-                    })),
-            )
+                    }
+                }
+            }))
+            .focus(|style| style.border_1().border_color(cx.theme().primary))
             .child(
-                Button::new("mobile-updates")
-                    .compact()
-                    .flex_1()
-                    .min_w(px(76.))
-                    .selected(updates_active)
-                    .toggled(updates_active)
-                    .when(updates_active, |this| this.primary())
-                    .label(format!("Updates · {}", self.unread_count()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.section = Section::Updates;
-                        this.mobile_detail_open = false;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("mobile-team")
-                    .compact()
-                    .flex_1()
-                    .min_w(px(76.))
-                    .selected(team_active)
-                    .toggled(team_active)
-                    .when(team_active, |this| this.primary())
-                    .label(format!("Team · {}", team_issue_counts(&self.team_issues).1))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.selected_issue.as_ref().is_some_and(|selected| {
-                            !this.team_issues.iter().any(|issue| &issue.id == selected)
-                        }) {
-                            if this.issue_edit_flow.is_submitting() {
-                                this.sync_message =
-                                    "Finish the confirmed Jira change before changing views"
-                                        .to_owned();
-                                cx.notify();
-                                return;
-                            }
-                            this.clear_selection_for_team_scope(cx);
-                        }
-                        this.section = Section::Team;
-                        this.mobile_detail_open = false;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("mobile-settings")
-                    .compact()
-                    .flex_1()
-                    .min_w(px(76.))
-                    .selected(settings_active)
-                    .toggled(settings_active)
-                    .when(settings_active, |this| this.primary())
-                    .label("Settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.section = Section::Settings;
-                        this.mobile_detail_open = false;
-                        cx.notify();
-                    })),
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .justify_center()
+                    .child(div().min_w_0().truncate().child(label)),
             )
     }
 }
@@ -536,7 +594,8 @@ impl Render for Dashboard {
         self.ensure_settings_input(window, cx);
         self.ensure_team_input(window, cx);
         self.ensure_team_table(window, cx);
-        let layout = layout_for_width(f32::from(window.viewport_size().width));
+        let viewport_width = f32::from(window.viewport_size().width);
+        let layout = layout_for_width(viewport_width);
         let table_mode = team_table_mode_for_width(f32::from(window.viewport_size().width));
         if !layout.is_mobile() {
             self.detail_sidebar_width = px(clamped_team_detail_width(
@@ -574,7 +633,7 @@ impl Render for Dashboard {
                 .min_w_0()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
-                .child(self.render_mobile_nav(cx))
+                .child(self.render_mobile_nav(viewport_width, cx))
                 .child(self.render_mobile_status(cx))
                 .child(main)
         } else {
@@ -583,7 +642,7 @@ impl Render for Dashboard {
                 .min_w_0()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
-                .child(self.render_sidebar(layout, cx))
+                .child(self.render_sidebar(layout, viewport_width, cx))
                 .child(main)
         }
     }

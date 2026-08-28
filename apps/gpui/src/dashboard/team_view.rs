@@ -39,7 +39,7 @@ pub(super) fn clamped_team_detail_width(
     sidebar_collapsed: bool,
 ) -> f32 {
     let content_width = (viewport_width
-        - crate::responsive::effective_sidebar_width(layout, sidebar_collapsed)
+        - crate::responsive::sidebar_width_for_viewport(layout, sidebar_collapsed, viewport_width)
         - 2. * layout.list_padding())
     .max(0.);
     let table_min_width = team_table_min_width(table_mode, layout);

@@ -18,6 +18,31 @@ pub(crate) enum IssuesPaneMode {
     ListAndDetail,
 }
 
+/// Widths at which the shell changes its navigation treatment.
+///
+/// Keep these values together so a breakpoint is not duplicated in rendering
+/// code.  They are logical pixels, matching GPUI's window viewport units.
+#[cfg(test)]
+const MOBILE_NAV_ITEM_MIN_WIDTH: f32 = 68.0;
+const COMPACT_BREAKPOINT: f32 = 720.0;
+const STANDARD_BREAKPOINT: f32 = 960.0;
+const WIDE_BREAKPOINT: f32 = 1_200.0;
+
+const SIDEBAR_RAIL_WIDTH: f32 = 64.0;
+const STANDARD_SIDEBAR_WIDTH: f32 = 200.0;
+const FULL_SIDEBAR_MIN_WIDTH: f32 = STANDARD_SIDEBAR_WIDTH;
+// 200px is wide enough for the full native labels and avoids a second
+// workspace contraction at the Wide breakpoint.
+const WIDE_SIDEBAR_WIDTH: f32 = STANDARD_SIDEBAR_WIDTH;
+
+/// Number of logical pixels available to each item in the four-item mobile
+/// navigation bar. The result intentionally includes the bar's fixed padding
+/// and gaps, making the narrowest supported geometry directly testable.
+pub(crate) fn mobile_nav_item_width(viewport_width: f32) -> f32 {
+    let available = (viewport_width - 8.0 - 3.0 * 4.0).max(0.0);
+    available / 4.0
+}
+
 /// Selects which issue panes the dashboard should attach for the current mode.
 ///
 pub(crate) fn issues_pane_mode(layout: LayoutMode, mobile_detail_open: bool) -> IssuesPaneMode {
@@ -33,11 +58,11 @@ pub(crate) fn issues_pane_mode(layout: LayoutMode, mobile_detail_open: bool) -> 
 }
 
 pub(crate) fn layout_for_width(width: f32) -> LayoutMode {
-    if width >= 1_200.0 {
+    if width >= WIDE_BREAKPOINT {
         LayoutMode::Wide
-    } else if width >= 960.0 {
+    } else if width >= STANDARD_BREAKPOINT {
         LayoutMode::Standard
-    } else if width >= 720.0 {
+    } else if width >= COMPACT_BREAKPOINT {
         LayoutMode::Compact
     } else {
         LayoutMode::Mobile
@@ -59,17 +84,18 @@ impl LayoutMode {
 
     pub(crate) fn sidebar_width(self) -> f32 {
         match self {
-            Self::Wide => 236.0,
-            Self::Standard => 200.0,
-            Self::Compact | Self::Mobile => 64.0,
+            Self::Wide => WIDE_SIDEBAR_WIDTH,
+            Self::Standard => STANDARD_SIDEBAR_WIDTH,
+            Self::Compact | Self::Mobile => SIDEBAR_RAIL_WIDTH,
         }
     }
 
     pub(crate) fn issue_list_width(self) -> f32 {
         match self {
-            Self::Wide => 494.0,
-            Self::Standard => 414.0,
-            Self::Compact => 350.0,
+            // Keep the initial list allocation stable as the shell moves from
+            // rail to full sidebar. A larger list here would make the detail
+            // workspace shrink at the 960/1,200px mode boundaries.
+            Self::Wide | Self::Standard | Self::Compact => 350.0,
             Self::Mobile => 0.0,
         }
     }
@@ -78,7 +104,7 @@ impl LayoutMode {
         match self {
             Self::Compact => (280.0, 420.0),
             Self::Standard => (320.0, 520.0),
-            Self::Wide => (360.0, 640.0),
+            Self::Wide => (320.0, 640.0),
             Self::Mobile => (0.0, 0.0),
         }
     }
@@ -140,11 +166,67 @@ pub(crate) fn effective_sidebar_width(layout: LayoutMode, manually_collapsed: bo
     }
 }
 
+/// Returns the shell's sidebar allocation for a viewport.
+///
+/// Expanding the sidebar exactly at a breakpoint causes a one-pixel resize to
+/// remove over a hundred pixels from the workspace. The policy therefore
+/// interpolates the sidebar from the rail width over the extra space needed by
+/// the wider shell. The workspace is continuous and non-decreasing at every
+/// breakpoint, while the sidebar still reaches its intended native width.
+pub(crate) fn sidebar_width_for_viewport(
+    layout: LayoutMode,
+    manually_collapsed: bool,
+    viewport_width: f32,
+) -> f32 {
+    if layout.is_mobile() || manually_collapsed {
+        return effective_sidebar_width(layout, manually_collapsed);
+    }
+
+    match layout {
+        LayoutMode::Mobile => 0.0,
+        LayoutMode::Compact => SIDEBAR_RAIL_WIDTH,
+        LayoutMode::Standard => {
+            let expansion = STANDARD_SIDEBAR_WIDTH - SIDEBAR_RAIL_WIDTH;
+            SIDEBAR_RAIL_WIDTH + (viewport_width - STANDARD_BREAKPOINT).clamp(0.0, expansion)
+        }
+        LayoutMode::Wide => WIDE_SIDEBAR_WIDTH,
+    }
+}
+
+/// Whether the shell should use its icon rail treatment at this width.
+///
+/// Standard and Wide expand progressively, so their content must remain in
+/// the compact rail until the corresponding full sidebar width is available.
+pub(crate) fn sidebar_is_rail_for_viewport(
+    layout: LayoutMode,
+    manually_collapsed: bool,
+    viewport_width: f32,
+) -> bool {
+    effective_sidebar_is_rail(layout, manually_collapsed)
+        || sidebar_width_for_viewport(layout, manually_collapsed, viewport_width)
+            < match layout {
+                LayoutMode::Mobile | LayoutMode::Compact => layout.sidebar_width(),
+                LayoutMode::Standard | LayoutMode::Wide => FULL_SIDEBAR_MIN_WIDTH,
+            }
+}
+
+/// Workspace width after the shell sidebar, before a section's own padding.
+#[cfg(test)]
+pub(crate) fn workspace_width_for_viewport(
+    layout: LayoutMode,
+    manually_collapsed: bool,
+    viewport_width: f32,
+) -> f32 {
+    (viewport_width - sidebar_width_for_viewport(layout, manually_collapsed, viewport_width))
+        .max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        IssuesPaneMode, LayoutMode, effective_sidebar_is_rail, effective_sidebar_width,
-        issues_pane_mode, layout_for_width,
+        IssuesPaneMode, LayoutMode, MOBILE_NAV_ITEM_MIN_WIDTH, effective_sidebar_is_rail,
+        effective_sidebar_width, issues_pane_mode, layout_for_width, mobile_nav_item_width,
+        sidebar_is_rail_for_viewport, sidebar_width_for_viewport, workspace_width_for_viewport,
     };
 
     #[test]
@@ -236,7 +318,70 @@ mod tests {
         assert_eq!(effective_sidebar_width(LayoutMode::Compact, true), 64.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Standard, false), 200.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Standard, true), 64.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Wide, false), 236.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Wide, false), 200.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Wide, true), 64.0);
+    }
+
+    #[test]
+    fn mobile_navigation_fits_the_supported_minimum_without_scrolling() {
+        assert_eq!(mobile_nav_item_width(320.0), 75.0);
+        assert!(mobile_nav_item_width(320.0) >= MOBILE_NAV_ITEM_MIN_WIDTH);
+    }
+
+    #[test]
+    fn sidebar_expansion_is_continuous_at_mode_boundaries() {
+        for (before, at, layout) in [
+            (959.0, 960.0, LayoutMode::Standard),
+            (1_199.0, 1_200.0, LayoutMode::Wide),
+        ] {
+            assert!(
+                workspace_width_for_viewport(layout_for_width(before), false, before,)
+                    <= workspace_width_for_viewport(layout, false, at)
+            );
+            assert_eq!(
+                sidebar_width_for_viewport(layout, false, at),
+                sidebar_width_for_viewport(layout, false, before)
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_treatment_matches_progressive_width() {
+        assert!(sidebar_is_rail_for_viewport(
+            LayoutMode::Standard,
+            false,
+            960.0
+        ));
+        assert!(sidebar_is_rail_for_viewport(
+            LayoutMode::Standard,
+            false,
+            1_095.0
+        ));
+        assert!(!sidebar_is_rail_for_viewport(
+            LayoutMode::Standard,
+            false,
+            1_096.0
+        ));
+        assert!(!sidebar_is_rail_for_viewport(
+            LayoutMode::Wide,
+            false,
+            1_200.0
+        ));
+    }
+
+    #[test]
+    fn workspace_width_never_decreases_as_viewport_grows() {
+        // Mobile intentionally changes from a top navigation bar to a desktop
+        // shell at 720px; the invariant applies within the desktop policy.
+        let mut previous = workspace_width_for_viewport(layout_for_width(720.0), false, 720.0);
+        for width in (721..=2_000).map(|width| width as f32) {
+            let layout = layout_for_width(width);
+            let current = workspace_width_for_viewport(layout, false, width);
+            assert!(
+                current + 0.001 >= previous,
+                "width={width}, current={current}, previous={previous}"
+            );
+            previous = current;
+        }
     }
 }
