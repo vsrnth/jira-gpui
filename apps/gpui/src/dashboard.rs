@@ -29,7 +29,7 @@ use gpui_component::{
 use jira_application::{
     ApplicationError, AttachmentDownloadRequest, CancellationToken, DEFAULT_JQL_SCOPE,
     DefaultPollingPolicy, IssueLocator, IssueTransition, JiraCommentWritePort, JiraIssueEditPort,
-    JiraReadPort, MAX_JQL_SCOPE_LENGTH, SyncMode,
+    JiraReadPort, MAX_JQL_SCOPE_LENGTH,
 };
 
 use jira_desktop_notifications::{TEST_NOTIFICATION_BODY, TEST_NOTIFICATION_SUMMARY};
@@ -143,19 +143,49 @@ fn should_close_status_filter_after_change(
 }
 
 fn refresh_complete_message(result: &RefreshResult) -> String {
-    let mode = match result.outcome.mode {
-        SyncMode::Baseline => "baseline",
-        SyncMode::Incremental => "incremental",
-        SyncMode::Reconciliation => "reconciliation",
-    };
-    format!(
-        "Refresh complete · {} issues · {} new local updates · {} local updates loaded · desktop notifications: {} accepted by desktop service, {} unavailable · {mode}",
+    let mut parts = vec![format!(
+        "Refresh complete · {} {}",
         result.cached.issues.len(),
-        result.outcome.events_inserted,
-        result.cached.events.len(),
-        result.outcome.notifications_delivered,
-        result.outcome.notification_failures,
-    )
+        pluralize(result.cached.issues.len(), "issue", "issues")
+    )];
+    if result.outcome.events_inserted > 0 {
+        parts.push(format!(
+            "{} {}",
+            result.outcome.events_inserted,
+            pluralize(
+                result.outcome.events_inserted,
+                "new local update",
+                "new local updates"
+            )
+        ));
+    }
+    if result.outcome.notifications_delivered > 0 {
+        parts.push(format!(
+            "{} desktop notification{} accepted by desktop service",
+            result.outcome.notifications_delivered,
+            if result.outcome.notifications_delivered == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if result.outcome.notification_failures > 0 {
+        parts.push(format!(
+            "{} desktop notification{} unavailable",
+            result.outcome.notification_failures,
+            if result.outcome.notification_failures == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    parts.join(" · ")
+}
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
 }
 
 fn refresh_notification_message(result: &RefreshResult) -> String {

@@ -12,7 +12,7 @@ use jira_application::{
     AddCommentRequest, AssignIssueRequest, AssignableUserSearchRequest, ErrorKind,
     IssueFetchRequest, IssuePage, IssueTransitionsRequest, JiraAttachmentReadPort,
     JiraCommentWritePort, JiraIssueActivityPort, JiraIssueDetailReadPort, JiraIssueEditPort,
-    JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort, JiraUserReadPort, PortFuture,
+    JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort, JiraUserReadPort, PortFuture, SyncMode,
     TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::JiraSiteId;
@@ -469,6 +469,101 @@ fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::Te
 }
 
 #[gpui::test]
+fn sidebar_navigation_replaces_branding_and_keeps_toggle_reachable(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let sidebar = visual
+        .debug_bounds("dashboard-sidebar")
+        .expect("sidebar should be laid out");
+    let navigation = visual
+        .debug_bounds("sidebar-navigation")
+        .expect("sidebar navigation should be laid out");
+    assert_eq!(navigation.origin.y, sidebar.origin.y);
+    assert!(
+        visual.debug_bounds("sidebar-branding").is_none(),
+        "the removed branding block must not reserve a layout region"
+    );
+    let toggle = visual
+        .debug_bounds("sidebar-toggle")
+        .expect("expanded sidebar should expose its toggle in navigation");
+    assert!(toggle.origin.y < px(60.));
+
+    visual.simulate_click(
+        gpui::point(
+            toggle.origin.x + toggle.size.width / 2.,
+            toggle.origin.y + toggle.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.sidebar_collapsed));
+    assert!(
+        visual.debug_bounds("sidebar-toggle").is_some(),
+        "collapsed standard sidebar must retain an expand toggle"
+    );
+}
+
+#[gpui::test]
+fn long_sync_status_stays_bounded_beside_desktop_content_at_short_height(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.sync_message = "Refresh complete · 192 issues · 0 new local updates · 0 local updates loaded · desktop notifications: 0 accepted by desktop service, 0 unavailable · baseline · additional diagnostic context that must remain inside the sidebar".to_owned();
+    let window = cx.open_window(gpui::size(px(1_100.), px(160.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let sidebar = visual
+        .debug_bounds("dashboard-sidebar")
+        .expect("sidebar should be laid out");
+    let status = visual
+        .debug_bounds("sidebar-sync-status")
+        .expect("desktop sync status should be laid out");
+    let main = visual
+        .debug_bounds("dashboard-main")
+        .expect("main content should be laid out");
+    assert!(status.origin.x + status.size.width <= main.origin.x);
+    assert!(status.origin.y + status.size.height <= sidebar.origin.y + sidebar.size.height);
+    assert!(main.origin.y >= sidebar.origin.y);
+}
+
+#[gpui::test]
+fn long_sync_status_stays_above_mobile_content_at_short_height(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.sync_message = "Refresh complete · 192 issues · 0 new local updates · 0 local updates loaded · desktop notifications: 0 accepted by desktop service, 0 unavailable · baseline · additional diagnostic context that must remain inside the status region".to_owned();
+    let window = cx.open_window(gpui::size(px(320.), px(160.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let navigation = visual
+        .debug_bounds("mobile-navigation")
+        .expect("mobile navigation should be laid out");
+    let status = visual
+        .debug_bounds("mobile-sync-status")
+        .expect("mobile sync status should be laid out");
+    let status_text = visual
+        .debug_bounds("mobile-sync-status-text")
+        .expect("mobile sync status text should be laid out");
+    let main = visual
+        .debug_bounds("dashboard-main")
+        .expect("main content should be laid out");
+    assert!(status.origin.y >= navigation.origin.y + navigation.size.height);
+    assert!(status.origin.y + status.size.height <= main.origin.y);
+    assert!(status_text.origin.y + status_text.size.height <= status.origin.y + status.size.height);
+}
+
+#[gpui::test]
 fn mobile_navigation_fits_all_destinations_at_supported_minimum(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
     let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| {
@@ -627,6 +722,57 @@ fn refresh_status_uses_submission_wording_for_desktop_notifications() {
     let message = refresh_complete_message(&result);
     assert!(message.contains("accepted by desktop service"));
     assert!(!message.contains("delivered"));
+}
+
+#[test]
+fn refresh_status_omits_zero_counts_and_internal_details() {
+    let mut result = refresh_result_with_inserted_events(0);
+    result.outcome.mode = SyncMode::Baseline;
+    result.outcome.notifications_delivered = 0;
+    result.outcome.notification_failures = 0;
+
+    assert_eq!(
+        refresh_complete_message(&result),
+        "Refresh complete · 5 issues"
+    );
+}
+
+#[test]
+fn refresh_status_reports_notification_failures_without_claiming_delivery() {
+    let mut result = refresh_result_with_inserted_events(0);
+    result.outcome.notification_failures = 2;
+
+    let message = refresh_complete_message(&result);
+    assert_eq!(
+        message,
+        "Refresh complete · 5 issues · 2 desktop notifications unavailable"
+    );
+    assert!(!message.contains("delivered"));
+}
+
+#[test]
+fn refresh_status_uses_singular_nouns_for_single_counts() {
+    let mut result = refresh_result_with_inserted_events(1);
+    result.cached.issues.truncate(1);
+    result.outcome.notifications_delivered = 1;
+    result.outcome.notification_failures = 1;
+
+    assert_eq!(
+        refresh_complete_message(&result),
+        "Refresh complete · 1 issue · 1 new local update · 1 desktop notification accepted by desktop service · 1 desktop notification unavailable"
+    );
+}
+
+#[test]
+fn refresh_status_uses_plural_nouns_for_multiple_counts() {
+    let mut result = refresh_result_with_inserted_events(2);
+    result.outcome.notifications_delivered = 2;
+    result.outcome.notification_failures = 2;
+
+    assert_eq!(
+        refresh_complete_message(&result),
+        "Refresh complete · 5 issues · 2 new local updates · 2 desktop notifications accepted by desktop service · 2 desktop notifications unavailable"
+    );
 }
 
 #[test]

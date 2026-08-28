@@ -36,78 +36,25 @@ impl Dashboard {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .child(
-                h_flex()
-                    .h(px(60.))
-                    .px_3()
-                    .gap_2()
-                    .when(rail, |this| this.justify_center().px_2().gap_0())
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(if !rail {
-                        h_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .size_8()
-                                    .flex_shrink_0()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(cx.theme().radius)
-                                    .bg(cx.theme().sidebar_primary)
-                                    .text_color(cx.theme().sidebar_primary_foreground)
-                                    .font_bold()
-                                    .child("JD"),
-                            )
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .child(self.workspace_name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(self.workspace_members.clone()),
-                                    ),
-                            )
-                            .child(self.render_sidebar_toggle(layout, false, cx))
-                            .into_any_element()
-                    } else if self.sidebar_collapsed && layout.supports_manual_sidebar_collapse() {
-                        self.render_sidebar_toggle(layout, true, cx)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex()
-                            .size_8()
-                            .items_center()
-                            .justify_center()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().sidebar_primary)
-                            .text_color(cx.theme().sidebar_primary_foreground)
-                            .font_bold()
-                            .child("JD")
-                            .into_any_element()
-                    }),
-            )
-            .child(
                 v_flex()
+                    .id("sidebar-navigation")
+                    .debug_selector(|| "sidebar-navigation".to_owned())
                     .flex_1()
                     .p_3()
+                    .min_h_0()
                     .when(rail, |this| this.p_2().items_center())
                     .gap_1()
+                    .when(
+                        layout.supports_manual_sidebar_collapse()
+                            && (!rail || self.sidebar_collapsed),
+                        |this| {
+                            this.child(self.render_sidebar_toggle(
+                                layout,
+                                self.sidebar_collapsed,
+                                cx,
+                            ))
+                        },
+                    )
                     .child(self.nav_item(
                         "Issues",
                         Some(self.issues.len()),
@@ -145,17 +92,23 @@ impl Dashboard {
                 this.child(
                     v_flex()
                         .p_4()
+                        .min_h_0()
+                        .flex_shrink_0()
                         .gap_1()
+                        .max_h(px(176.))
                         .border_t_1()
                         .border_color(cx.theme().sidebar_border)
                         .child(
                             div()
                                 .id("sidebar-sync-status")
                                 .debug_selector(|| "sidebar-sync-status".to_owned())
+                                .role(gpui::accesskit::Role::Status)
                                 .w_full()
                                 .min_w_0()
                                 .aria_label(self.sync_message.clone())
                                 .max_h(px(72.))
+                                .min_h_0()
+                                .flex_shrink_0()
                                 .overflow_y_scrollbar()
                                 .whitespace_normal()
                                 .text_xs()
@@ -210,6 +163,7 @@ impl Dashboard {
 
         div()
             .id("sidebar-toggle")
+            .debug_selector(|| "sidebar-toggle".to_owned())
             .role(gpui::accesskit::Role::Button)
             .aria_label(label)
             .tab_index(0)
@@ -428,9 +382,13 @@ impl Dashboard {
         v_flex()
             .id("mobile-sync-status")
             .debug_selector(|| "mobile-sync-status".to_owned())
+            .role(gpui::accesskit::Role::Status)
             .w_full()
             .min_w_0()
+            .min_h_0()
             .flex_shrink_0()
+            .max_h(px(104.))
+            .overflow_hidden()
             .px_3()
             .py_2()
             .border_b_1()
@@ -442,6 +400,7 @@ impl Dashboard {
                     .child(
                         div()
                             .id("mobile-sync-status-text")
+                            .debug_selector(|| "mobile-sync-status-text".to_owned())
                             .aria_label(self.sync_message.clone())
                             .flex_1()
                             .min_w_0()
@@ -624,8 +583,16 @@ impl Render for Dashboard {
             .debug_selector(|| "dashboard-main".to_owned())
             .h_full()
             .min_w_0()
+            .min_h_0()
             .flex_1()
-            .child(div().min_w_0().min_h_0().flex_1().child(content));
+            .child(
+                div()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(content),
+            );
 
         if layout.is_mobile() {
             v_flex()
