@@ -153,6 +153,9 @@ impl Dashboard {
                                 .when(!configured, |this| {
                                     this.child(
                                         v_flex()
+                                            .id("team-unconfigured")
+                                            .role(gpui::accesskit::Role::Status)
+                                            .aria_label("Team tracker is not configured")
                                             .items_center()
                                             .gap_2()
                                             .p_6()
@@ -174,6 +177,17 @@ impl Dashboard {
                                 .when(configured && mobile_rows.is_empty(), |this| {
                                     this.child(
                                         v_flex()
+                                            .id(if team_loading {
+                                                "team-loading"
+                                            } else {
+                                                "team-empty"
+                                            })
+                                            .role(gpui::accesskit::Role::Status)
+                                            .aria_label(if team_loading {
+                                                "Loading in-progress team tickets"
+                                            } else {
+                                                "No in-progress team tickets found"
+                                            })
                                             .items_center()
                                             .gap_2()
                                             .p_6()
@@ -208,6 +222,9 @@ impl Dashboard {
                                 .when(!configured, |this| {
                                     this.child(
                                         v_flex()
+                                            .id("team-unconfigured")
+                                            .role(gpui::accesskit::Role::Status)
+                                            .aria_label("Team tracker is not configured")
                                             .items_center()
                                             .gap_2()
                                             .p_6()
@@ -233,6 +250,17 @@ impl Dashboard {
                                     |this| {
                                         this.child(
                                             v_flex()
+                                                .id(if team_loading {
+                                                    "team-loading"
+                                                } else {
+                                                    "team-empty"
+                                                })
+                                                .role(gpui::accesskit::Role::Status)
+                                                .aria_label(if team_loading {
+                                                    "Loading in-progress team tickets"
+                                                } else {
+                                                    "No in-progress team tickets found"
+                                                })
                                                 .items_center()
                                                 .gap_2()
                                                 .p_6()
@@ -293,14 +321,20 @@ impl Dashboard {
                                 .child(self.issue_detail(layout, cx)),
                         )
                     })
-                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DetailSidebarResize>, _, cx| {
+                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DetailSidebarResize>, window, cx| {
+                        let viewport_width = f32::from(window.viewport_size().width);
+                        let layout = layout_for_width(viewport_width);
+                        let table_mode = team_table_mode_for_width(viewport_width);
                         let container_right = event.bounds.right();
-                        let max_width = (event.bounds.size.width / 2.).max(px(DETAIL_SIDEBAR_MIN_WIDTH));
                         let requested = container_right - event.event.position.x;
-                        let clamped = requested.clamp(
-                            px(DETAIL_SIDEBAR_MIN_WIDTH),
-                            max_width,
+                        let clamped = clamped_team_detail_width(
+                            f32::from(requested),
+                            viewport_width,
+                            layout,
+                            table_mode,
+                            this.sidebar_collapsed,
                         );
+                        let clamped = px(clamped);
                         if clamped != this.detail_sidebar_width {
                             this.detail_sidebar_width = clamped;
                             cx.notify();

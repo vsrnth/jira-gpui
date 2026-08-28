@@ -2266,6 +2266,11 @@ impl Dashboard {
                     let Some(issue_id) = table.read(cx).selected_team_ticket_issue_id() else {
                         return;
                     };
+                    table.update(cx, |table, _| {
+                        table
+                            .delegate_mut()
+                            .set_selected_issue_id(Some(issue_id.clone()));
+                    });
                     if this.issue_edit_flow.is_submitting()
                         && this.selected_issue.as_ref() != Some(&issue_id)
                     {
@@ -2280,8 +2285,16 @@ impl Dashboard {
                     cx.notify();
                 }
                 TableEvent::ClearSelection => {
+                    table.update(cx, |table, _| {
+                        table.delegate_mut().set_selected_issue_id(None);
+                    });
                     let stale_selection = this.selected_issue.as_ref().is_some_and(|selected| {
-                        !this.team_issues.iter().any(|issue| &issue.id == selected)
+                        !this.team_issues.iter().any(|issue| {
+                            &issue.id == selected
+                                && issue.status.category.as_deref().is_some_and(|category| {
+                                    category.trim().eq_ignore_ascii_case("in progress")
+                                })
+                        })
                     });
                     if this.section == Section::Team && stale_selection {
                         this.clear_selection_for_team_scope(cx);

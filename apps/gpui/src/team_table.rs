@@ -86,6 +86,7 @@ pub struct TeamTicketTableDelegate {
     sort_column: SortColumn,
     sort_order: ColumnSort,
     dense_columns: bool,
+    selected_issue_id: Option<IssueId>,
 }
 
 impl TeamTicketTableDelegate {
@@ -101,6 +102,7 @@ impl TeamTicketTableDelegate {
             sort_column: SortColumn::LastUpdated,
             sort_order: ColumnSort::Ascending,
             dense_columns: false,
+            selected_issue_id: None,
         };
         this.replace_rows(issues, events, users, now, None);
         this
@@ -120,6 +122,7 @@ impl TeamTicketTableDelegate {
             sort_column: SortColumn::LastUpdated,
             sort_order: ColumnSort::Ascending,
             dense_columns,
+            selected_issue_id: None,
         };
         this.replace_rows(issues, events, users, now, None);
         this
@@ -139,13 +142,30 @@ impl TeamTicketTableDelegate {
             sort_column: SortColumn::LastUpdated,
             sort_order: ColumnSort::Ascending,
             dense_columns,
+            selected_issue_id: None,
         };
         this.replace_rows(issues, events, users, now, offset);
         this
     }
 
     pub fn set_dense_columns(&mut self, dense_columns: bool) {
+        if self.dense_columns == dense_columns {
+            return;
+        }
         self.dense_columns = dense_columns;
+        if !sort_column_is_visible(self.sort_column, dense_columns) {
+            // Restore the documented stalest-first default so no hidden column silently controls
+            // row order after a density change.
+            self.sort_column = SortColumn::LastUpdated;
+            self.sort_order = ColumnSort::Ascending;
+            self.sort_rows();
+        }
+    }
+
+    /// Mirrors the table state's selected identity so sorting can restore its row index without
+    /// borrowing the TableState while its delegate is already being updated.
+    pub fn set_selected_issue_id(&mut self, issue_id: Option<IssueId>) {
+        self.selected_issue_id = issue_id;
     }
 
     /// Rebuilds and default-sorts the rows. The oldest activity is first so the stalest work is
@@ -276,8 +296,15 @@ impl TeamTicketTableStateExt for TableState<TeamTicketTableDelegate> {
         if self.delegate().dense_columns == dense_columns {
             return;
         }
+        let selected_issue_id = self.selected_team_ticket_issue_id();
         self.delegate_mut().set_dense_columns(dense_columns);
         self.refresh(cx);
+        match selected_issue_id
+            .and_then(|issue_id| row_index_for_issue_id(&self.delegate().rows, &issue_id))
+        {
+            Some(row_ix) => self.set_selected_row(row_ix, cx),
+            None => self.clear_selection(cx),
+        }
         cx.notify();
     }
 }
@@ -300,28 +327,29 @@ impl TableDelegate for TeamTicketTableDelegate {
             return Column::default();
         };
         let width = column_widths(self.dense_columns)[col_ix];
+        let sort = self.sort_for_column(column);
         match column {
             SortColumn::Key => Column::new("key", "Ticket")
                 .width(px(width))
-                .sortable()
+                .sort(sort)
                 .fixed_left(),
             SortColumn::Summary => Column::new("summary", "Summary")
                 .width(px(width))
-                .sortable(),
+                .sort(sort),
             SortColumn::Assignee => Column::new("assignee", "Assignee")
                 .width(px(width))
-                .sortable(),
-            SortColumn::Status => Column::new("status", "Status").width(px(width)).sortable(),
+                .sort(sort),
+            SortColumn::Status => Column::new("status", "Status").width(px(width)).sort(sort),
             SortColumn::LatestUpdate => Column::new("latest_update", "Latest update")
                 .width(px(width))
-                .sortable(),
+                .sort(sort),
             SortColumn::LastUpdated => Column::new("last_updated", "Updated")
                 .width(px(width))
-                .sort(ColumnSort::Ascending),
-            SortColumn::Elapsed => Column::new("elapsed", "Age").width(px(width)).sortable(),
+                .sort(sort),
+            SortColumn::Elapsed => Column::new("elapsed", "Age").width(px(width)).sort(sort),
             SortColumn::Activity => Column::new("activity", "Activity")
                 .width(px(width))
-                .sortable(),
+                .sort(sort),
         }
     }
 
@@ -329,17 +357,33 @@ impl TableDelegate for TeamTicketTableDelegate {
         &mut self,
         col_ix: usize,
         sort: ColumnSort,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
     ) {
-        if let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) {
+        let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) else {
+            return;
+        };
+        // TableState stores a row index, so capture the identity before reordering and restore
+        // the row index after sorting. This also emits the normal SelectRow event, keeping the
+        // dashboard detail pane synchronized with keyboard and pointer selection.
+        let selected_issue_id = self.selected_issue_id.clone();
+        if matches!(sort, ColumnSort::Default) {
+            // Default means the table's intentional stalest-first order, not an unsorted list.
+            // The generic table renders this as a neutral header indicator, which accurately
+            // communicates that no user-selected column sort is active.
+            self.sort_column = SortColumn::LastUpdated;
+            self.sort_order = ColumnSort::Ascending;
+        } else {
             self.sort_column = column;
-            self.sort_order = if matches!(sort, ColumnSort::Default) {
-                ColumnSort::Ascending
-            } else {
-                sort
-            };
-            self.sort_rows();
+            self.sort_order = sort;
+        }
+        self.sort_rows();
+        if let Some(row_ix) =
+            selected_issue_id.and_then(|issue_id| row_index_for_issue_id(&self.rows, &issue_id))
+        {
+            cx.defer_in(window, move |table, _window, cx| {
+                table.set_selected_row(row_ix, cx);
+            });
         }
     }
 
@@ -370,8 +414,8 @@ impl TableDelegate for TeamTicketTableDelegate {
             .tooltip(move |window, cx| Tooltip::new(value_for_tooltip.clone()).build(window, cx))
             .child(value.to_owned());
         cell = match column {
-            SortColumn::Key => cell.text_color(cx.theme().blue).text_sm(),
-            SortColumn::Status => cell.text_color(cx.theme().green).text_sm(),
+            SortColumn::Key => cell.text_color(cx.theme().link).text_sm(),
+            SortColumn::Status => cell.text_color(cx.theme().success).text_sm(),
             SortColumn::Elapsed => cell
                 .text_color(age_color(row.elapsed_seconds, cx))
                 .text_xs(),
@@ -402,6 +446,40 @@ fn cell_value(row: &TeamTicketRow, column: SortColumn) -> &str {
         SortColumn::LastUpdated => row.last_updated.as_str(),
         SortColumn::Elapsed => row.elapsed.as_str(),
         SortColumn::Activity => row.activity.as_str(),
+    }
+}
+
+impl TeamTicketTableDelegate {
+    fn sort_for_column(&self, column: SortColumn) -> ColumnSort {
+        if self.sort_column == column {
+            self.sort_order
+        } else {
+            ColumnSort::Default
+        }
+    }
+}
+
+fn sort_column_is_visible(column: SortColumn, dense_columns: bool) -> bool {
+    if dense_columns {
+        matches!(
+            column,
+            SortColumn::Key
+                | SortColumn::Summary
+                | SortColumn::Assignee
+                | SortColumn::Status
+                | SortColumn::Activity
+        )
+    } else {
+        matches!(
+            column,
+            SortColumn::Key
+                | SortColumn::Summary
+                | SortColumn::Assignee
+                | SortColumn::Status
+                | SortColumn::LatestUpdate
+                | SortColumn::LastUpdated
+                | SortColumn::Elapsed
+        )
     }
 }
 
@@ -532,12 +610,27 @@ fn format_elapsed(seconds: i64) -> String {
 }
 
 fn age_color(seconds: i64, cx: &Context<TableState<TeamTicketTableDelegate>>) -> gpui::Hsla {
+    match age_tone(seconds) {
+        AgeTone::Fresh => cx.theme().muted_foreground,
+        AgeTone::Aging => cx.theme().warning,
+        AgeTone::Stale => cx.theme().danger,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgeTone {
+    Fresh,
+    Aging,
+    Stale,
+}
+
+fn age_tone(seconds: i64) -> AgeTone {
     if seconds >= 14 * 24 * 60 * 60 {
-        cx.theme().red
+        AgeTone::Stale
     } else if seconds >= 7 * 24 * 60 * 60 {
-        cx.theme().yellow
+        AgeTone::Aging
     } else {
-        cx.theme().muted_foreground
+        AgeTone::Fresh
     }
 }
 
@@ -701,6 +794,9 @@ mod tests {
         assert_eq!(format_elapsed(60), "1m");
         assert_eq!(format_elapsed(3_600), "1h");
         assert_eq!(format_elapsed(86_400), "1d");
+        assert_eq!(age_tone(7 * 24 * 60 * 60 - 1), AgeTone::Fresh);
+        assert_eq!(age_tone(7 * 24 * 60 * 60), AgeTone::Aging);
+        assert_eq!(age_tone(14 * 24 * 60 * 60), AgeTone::Stale);
 
         let mut future = issues[0].clone();
         future.status.category = Some("in progress".to_owned());
@@ -778,6 +874,45 @@ mod tests {
         );
         assert_eq!(SortColumn::from_index(DENSE_COLUMN_COUNT, true), None);
         assert_eq!(SortColumn::from_index(6, false), Some(SortColumn::Elapsed));
+    }
+
+    #[test]
+    fn dense_refresh_restores_default_when_wide_only_sort_would_be_hidden() {
+        let mut table = TeamTicketTableDelegate::new_with_density(
+            &sample_issues(),
+            &[],
+            &sample_users(),
+            datetime!(2026-08-19 00:00 UTC),
+            false,
+        );
+        table.sort_column = SortColumn::Elapsed;
+        table.sort_order = ColumnSort::Descending;
+        table.sort_rows();
+        table.set_dense_columns(true);
+
+        assert_eq!(table.sort_column, SortColumn::LastUpdated);
+        assert_eq!(table.sort_order, ColumnSort::Ascending);
+        assert_eq!(table.rows()[0].key, "DESK-171");
+        assert_eq!(
+            table.sort_for_column(SortColumn::Activity),
+            ColumnSort::Default
+        );
+
+        table.set_dense_columns(false);
+        table.sort_column = SortColumn::LatestUpdate;
+        table.sort_order = ColumnSort::Descending;
+        table.sort_rows();
+        table.set_dense_columns(true);
+        assert_eq!(table.sort_column, SortColumn::LastUpdated);
+        assert_eq!(table.sort_order, ColumnSort::Ascending);
+
+        table.set_dense_columns(true);
+        table.sort_column = SortColumn::Activity;
+        table.sort_order = ColumnSort::Descending;
+        table.sort_rows();
+        table.set_dense_columns(false);
+        assert_eq!(table.sort_column, SortColumn::LastUpdated);
+        assert_eq!(table.sort_order, ColumnSort::Ascending);
     }
 
     #[test]

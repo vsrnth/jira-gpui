@@ -538,12 +538,14 @@ impl Dashboard {
                     .child(
                         h_flex()
                             .min_w_0()
-                            .justify_between()
+                            .when(mobile, |this| this.flex_col().items_start().gap_1())
+                            .when(!mobile, |this| this.justify_between())
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(
                                 h_flex()
                                     .min_w_0()
+                                    .when(mobile, |this| this.w_full())
                                     .gap_1()
                                     .child(
                                         div()
@@ -553,7 +555,15 @@ impl Dashboard {
                                     )
                                     .child(self.priority_badge(issue.priority.clone(), cx)),
                             )
-                            .child(div().flex_shrink_0().child(issue.updated.clone())),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .when(!mobile, |this| this.flex_shrink_0())
+                                    .when(mobile, |this| {
+                                        this.w_full().whitespace_normal().line_clamp(2)
+                                    })
+                                    .child(issue.updated.clone()),
+                            ),
                     ),
             )
             .into_any_element()

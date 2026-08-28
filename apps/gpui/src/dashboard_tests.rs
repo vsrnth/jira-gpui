@@ -7,6 +7,7 @@ use crate::responsive::sidebar_width_for_viewport;
 use crate::sample_data::{sample_issues, sample_users};
 use gpui::VisualTestContext;
 use gpui_component::searchable_list::SearchableListDelegate as _;
+use gpui_component::table::{ColumnSort, TableDelegate as _};
 use jira_application::{
     AddCommentRequest, AssignIssueRequest, AssignableUserSearchRequest, ErrorKind,
     IssueFetchRequest, IssuePage, IssueTransitionsRequest, JiraAttachmentReadPort,
@@ -1097,6 +1098,175 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
     assert!(
         mobile_table_bounds.size.height > px(300.),
         "mobile team table body collapsed: {mobile_table_bounds:?}"
+    );
+}
+
+#[gpui::test]
+fn team_table_sort_keeps_selected_detail_identity_after_reordering(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Team;
+    dashboard.team_members = vec![PersistedTeamMember {
+        identifier: "amina".to_owned(),
+        account_id: "amina".to_owned(),
+        display_name: "Amina Yusuf".to_owned(),
+    }];
+    dashboard.team_issues = sample_issues();
+    let window = cx.open_window(gpui::size(px(1_370.), px(900.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let table = dashboard_entity
+        .read_with(&visual, |dashboard, _| dashboard.team_table.clone())
+        .expect("team table should be created by Team render");
+    let selected_id = table.read_with(&visual, |table, _| {
+        table
+            .delegate()
+            .issue_id_for_row(0)
+            .expect("team table should have a first row")
+    });
+
+    visual.update(|_, cx| {
+        table.update(cx, |table, cx| {
+            table.set_selected_row(0, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .perform_sort(0, ColumnSort::Descending, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    assert_eq!(
+        table.read_with(&visual, |table, _| table.selected_row()),
+        Some(2)
+    );
+
+    let selected_after_sort = table
+        .read_with(&visual, |table, _| table.selected_team_ticket_issue_id())
+        .expect("sorting should retain a selected row");
+    assert_eq!(selected_after_sort, selected_id);
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.selected_issue.clone()),
+        Some(selected_id.clone())
+    );
+
+    let mut reordered_issues = sample_issues();
+    reordered_issues.reverse();
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, _| {
+            dashboard.team_issues = reordered_issues.clone()
+        });
+        table.update(cx, |table, cx| {
+            table.replace_team_ticket_rows_with_offset(
+                &reordered_issues,
+                &[],
+                &sample_users(),
+                datetime!(2026-08-19 00:00 UTC),
+                Some(UtcOffset::UTC),
+                cx,
+            );
+        });
+    });
+    visual.run_until_parked();
+    assert_eq!(
+        table.read_with(&visual, |table, _| table.selected_team_ticket_issue_id()),
+        Some(selected_id.clone())
+    );
+
+    let remaining_issues = sample_issues()
+        .into_iter()
+        .filter(|issue| issue.id != selected_id)
+        .collect::<Vec<_>>();
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, _| {
+            dashboard.team_issues = remaining_issues.clone()
+        });
+        table.update(cx, |table, cx| {
+            table.replace_team_ticket_rows_with_offset(
+                &remaining_issues,
+                &[],
+                &sample_users(),
+                datetime!(2026-08-19 00:00 UTC),
+                Some(UtcOffset::UTC),
+                cx,
+            );
+        });
+    });
+    visual.run_until_parked();
+    assert!(
+        table
+            .read_with(&visual, |table, _| table.selected_row())
+            .is_none()
+    );
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.selected_issue.is_none()));
+}
+
+#[gpui::test]
+fn team_table_density_refresh_keeps_identity_after_hidden_sort_resets(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Team;
+    dashboard.team_members = vec![PersistedTeamMember {
+        identifier: "amina".to_owned(),
+        account_id: "amina".to_owned(),
+        display_name: "Amina Yusuf".to_owned(),
+    }];
+    dashboard.team_issues = sample_issues();
+    let window = cx.open_window(gpui::size(px(1_920.), px(900.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let table = dashboard_entity
+        .read_with(&visual, |dashboard, _| dashboard.team_table.clone())
+        .expect("team table should be created by Team render");
+    let selected_id = table.read_with(&visual, |table, _| {
+        table
+            .delegate()
+            .issue_id_for_row(0)
+            .expect("team table should have a first row")
+    });
+    visual.update(|_, cx| {
+        table.update(cx, |table, cx| table.set_selected_row(0, cx));
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .perform_sort(5, ColumnSort::Descending, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    assert_eq!(
+        table.read_with(&visual, |table, _| table.selected_team_ticket_issue_id()),
+        Some(selected_id.clone())
+    );
+    assert_eq!(
+        table.read_with(&visual, |table, _| table.selected_row()),
+        Some(2)
+    );
+
+    visual.simulate_resize(gpui::size(px(1_370.), px(900.)));
+    visual.run_until_parked();
+    assert_eq!(
+        table.read_with(&visual, |table, _| table.selected_team_ticket_issue_id()),
+        Some(selected_id)
+    );
+    assert_eq!(
+        table.read_with(&visual, |table, _| table.selected_row()),
+        Some(0)
     );
 }
 
