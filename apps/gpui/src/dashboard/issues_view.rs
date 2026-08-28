@@ -88,6 +88,7 @@ impl Dashboard {
                     .into_any_element()
             })
             .when_some(self.search_input.clone(), |this, input| {
+                let lookup_loading = matches!(self.remote_lookup, RemoteLookupState::Loading { .. });
                 if mobile {
                     this.child(
                         v_flex()
@@ -108,7 +109,13 @@ impl Dashboard {
                                 Button::new("search-jira")
                                     .compact()
                                     .w_full()
-                                    .label("Search Jira")
+                                    .label(if lookup_loading {
+                                        "Searching Jira…"
+                                    } else {
+                                        "Search Jira"
+                                    })
+                                    .loading(lookup_loading)
+                                    .disabled(lookup_loading)
                                     .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
                             ),
                     )
@@ -131,11 +138,22 @@ impl Dashboard {
                             .child(
                                 Button::new("search-jira")
                                     .compact()
-                                    .label("Search Jira")
+                                    .label(if lookup_loading {
+                                        "Searching Jira…"
+                                    } else {
+                                        "Search Jira"
+                                    })
+                                    .loading(lookup_loading)
+                                    .disabled(lookup_loading)
                                     .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
                             ),
                     )
                 }
+            })
+            .when(mobile, |this| {
+                this.when_some(self.remote_lookup_list_status(cx), |this, status| {
+                    this.child(status)
+                })
             })
             .child(
                 h_flex()
@@ -288,6 +306,62 @@ impl Dashboard {
             RemoteLookupState::Idle
             | RemoteLookupState::Loading { .. }
             | RemoteLookupState::Error { .. } => None,
+        }
+    }
+
+    fn remote_lookup_list_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        match &self.remote_lookup {
+            RemoteLookupState::Loading { query } => {
+                let query = super::detail_view::normalized_lookup_query(query);
+                Some(
+                    h_flex()
+                        .id("remote-lookup-loading")
+                        .debug_selector(|| "remote-lookup-loading".to_owned())
+                        .role(gpui::accesskit::Role::Status)
+                        .aria_label(format!("Jira lookup in progress for {query}"))
+                        .min_w_0()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Spinner::new())
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("Looking up {query}…")),
+                        )
+                        .into_any_element(),
+                )
+            }
+            RemoteLookupState::Error { query, copy } => {
+                let query = super::detail_view::normalized_lookup_query(query);
+                Some(
+                    v_flex()
+                        .id("remote-lookup-error")
+                        .debug_selector(|| "remote-lookup-error".to_owned())
+                        .role(gpui::accesskit::Role::Alert)
+                        .aria_label(format!(
+                            "Jira lookup failed for {query}: {}",
+                            copy.message()
+                        ))
+                        .min_w_0()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().danger.opacity(0.45))
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(div().font_semibold().child("Jira lookup failed"))
+                        .child(div().min_w_0().child(copy.message()))
+                        .into_any_element(),
+                )
+            }
+            RemoteLookupState::Idle | RemoteLookupState::Loaded { .. } => None,
         }
     }
 

@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) fn normalized_lookup_query(query: &str) -> String {
+    crate::presentation::normalized_issue_key(query)
+        .map(|key| key.to_string())
+        .unwrap_or_else(|| query.trim().to_owned())
+}
+
 impl Dashboard {
     fn rich_text_palette(&self, cx: &mut Context<Self>) -> RichTextPalette {
         RichTextPalette {
@@ -43,6 +49,12 @@ impl Dashboard {
         let Some(issue) = issue else {
             let status_surface = match &detail_state {
                 DetailState::RemoteLoading { query } => v_flex()
+                    .id("issue-detail-remote-loading")
+                    .role(gpui::accesskit::Role::Status)
+                    .aria_label(format!(
+                        "Jira lookup in progress for {}",
+                        normalized_lookup_query(query)
+                    ))
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Jira lookup"))
                     .child(
@@ -52,10 +64,20 @@ impl Dashboard {
                                 .whitespace_normal()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(format!("Looking up {query}…")),
+                                .child(format!(
+                                    "Looking up {}…",
+                                    normalized_lookup_query(query)
+                                )),
                         ),
                     ),
-                DetailState::RemoteError { copy, .. } => v_flex()
+                DetailState::RemoteError { query, copy } => v_flex()
+                    .id("issue-detail-remote-error")
+                    .role(gpui::accesskit::Role::Alert)
+                    .aria_label(format!(
+                        "Jira lookup failed for {}: {}",
+                        normalized_lookup_query(query),
+                        copy.message()
+                    ))
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Jira lookup failed"))
                     .child(
@@ -67,6 +89,12 @@ impl Dashboard {
                             .child(copy.message()),
                     ),
                 DetailState::Error { copy, .. } => v_flex()
+                    .id("issue-detail-error-surface")
+                    .role(gpui::accesskit::Role::Alert)
+                    .aria_label(format!(
+                        "Unable to load issue details: {}",
+                        copy.message()
+                    ))
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Unable to load issue details"))
                     .child(
@@ -78,10 +106,14 @@ impl Dashboard {
                             .child(copy.message()),
                     ),
                 DetailState::Loading { .. } => v_flex()
+                    .id("issue-detail-loading-surface")
+                    .role(gpui::accesskit::Role::Status)
+                    .aria_label("Loading issue details")
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Loading issue details"))
                     .child(h_flex().gap_2().child(Spinner::new())),
                 DetailState::Empty | DetailState::Loaded(_) => v_flex()
+                    .id("issue-detail-empty-surface")
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Select an issue"))
                     .child(
@@ -176,6 +208,7 @@ impl Dashboard {
             .gap(px(if layout.is_mobile() { 16. } else { 20. }))
             .child(
                 v_flex()
+                    .debug_selector(|| "issue-detail-header".to_owned())
                     .min_w_0()
                     .gap_2()
                     .child(
@@ -226,9 +259,14 @@ impl Dashboard {
                         },
                     ),
             )
+            .when_some(
+                self.render_selected_detail_feedback(&detail_state, cx),
+                |this, feedback| this.child(feedback),
+            )
             .child(self.render_issue_edit_controls(Some(&issue), layout, cx))
             .child(
                 v_flex()
+                    .debug_selector(|| "issue-detail-description".to_owned())
                     .gap_2()
                     .child(div().text_sm().font_semibold().child("Description"))
                     .child(
@@ -272,6 +310,55 @@ impl Dashboard {
             .into_any_element()
     }
 
+    fn render_selected_detail_feedback(
+        &self,
+        detail_state: &DetailState,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match detail_state {
+            DetailState::Loading { .. } => Some(
+                h_flex()
+                    .id("issue-detail-loading")
+                    .debug_selector(|| "issue-detail-loading".to_owned())
+                    .role(gpui::accesskit::Role::Status)
+                    .aria_label("Loading issue details")
+                    .min_w_0()
+                    .gap_2()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().link.opacity(0.45))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new())
+                    .child(div().min_w_0().child("Loading issue details…"))
+                    .into_any_element(),
+            ),
+            DetailState::Error { copy, .. } => Some(
+                v_flex()
+                    .id("issue-detail-error")
+                    .debug_selector(|| "issue-detail-error".to_owned())
+                    .role(gpui::accesskit::Role::Alert)
+                    .aria_label(format!("Unable to load issue details: {}", copy.message()))
+                    .min_w_0()
+                    .gap_1()
+                    .p_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().danger.opacity(0.45))
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(div().font_semibold().child("Unable to load issue details"))
+                    .child(div().min_w_0().child(copy.message()))
+                    .into_any_element(),
+            ),
+            DetailState::Empty
+            | DetailState::RemoteLoading { .. }
+            | DetailState::RemoteError { .. }
+            | DetailState::Loaded(_) => None,
+        }
+    }
+
     fn render_detail_state_for(
         &self,
         detail_state: &DetailState,
@@ -292,29 +379,13 @@ impl Dashboard {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(if self.selected_issue.is_some() {
-                            "Select the issue to load its Jira details."
+                            "This cached issue is a preview. Connect to Jira to load comments and attachments."
                         } else {
                             "Select an issue to load comments and attachments."
                         }),
                 )
                 .into_any_element(),
-            DetailState::Loading { .. } => v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .child("Comments and attachments"),
-                )
-                .child(
-                    h_flex().gap_2().child(Spinner::new()).child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Loading issue details…"),
-                    ),
-                )
-                .into_any_element(),
+            DetailState::Loading { .. } | DetailState::Error { .. } => v_flex().into_any_element(),
             DetailState::RemoteLoading { query } => v_flex()
                 .gap_2()
                 .child(div().text_sm().font_semibold().child("Jira lookup"))
@@ -323,21 +394,6 @@ impl Dashboard {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(format!("Looking up {query}…")),
-                )
-                .into_any_element(),
-            DetailState::Error { copy, .. } => v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .child("Comments and attachments"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(copy.message()),
                 )
                 .into_any_element(),
             DetailState::RemoteError { copy, .. } => v_flex()

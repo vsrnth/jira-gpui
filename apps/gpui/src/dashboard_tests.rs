@@ -1119,6 +1119,98 @@ fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui::TestAppCont
 }
 
 #[gpui::test]
+fn mobile_remote_lookup_loading_and_error_states_stay_visible_in_the_list(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.remote_lookup = RemoteLookupState::Loading {
+        query: " ix-404 ".to_owned(),
+    };
+    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let loading = visual
+        .debug_bounds("remote-lookup-loading")
+        .expect("mobile lookup loading state should be visible in the list");
+    assert!(loading.size.width > px(0.) && loading.size.height > px(0.));
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.remote_lookup = RemoteLookupState::Error {
+                query: " ix-404 ".to_owned(),
+                copy: OutcomeCopy::new(
+                    "Jira lookup · issue was not found",
+                    FeedbackSeverity::Error,
+                    FeedbackCertainty::Definite,
+                    RecoveryDirective::Retry,
+                ),
+            };
+            cx.notify();
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let error = visual
+        .debug_bounds("remote-lookup-error")
+        .expect("mobile lookup error state should be visible in the list");
+    assert!(error.size.width > px(0.) && error.size.height > px(0.));
+    assert!(visual.debug_bounds("remote-lookup-loading").is_none());
+}
+
+#[gpui::test]
+fn selected_detail_feedback_is_early_and_has_stable_state_identity(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let issue = sample_issues().into_iter().next().expect("sample issue");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.selected_issue = Some(issue.id.clone());
+    dashboard.mobile_detail_open = true;
+    dashboard.detail_state = DetailState::Loading {
+        issue_id: issue.id.clone(),
+    };
+    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let loading = visual
+        .debug_bounds("issue-detail-loading")
+        .expect("selected detail loading state should be laid out");
+    let description = visual
+        .debug_bounds("issue-detail-description")
+        .expect("selected detail description should be laid out");
+    assert!(loading.origin.y < description.origin.y);
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.detail_state = DetailState::Error {
+                issue_id: issue.id.clone(),
+                copy: OutcomeCopy::new(
+                    "Issue details unavailable · Jira issue was not found",
+                    FeedbackSeverity::Error,
+                    FeedbackCertainty::Definite,
+                    RecoveryDirective::Retry,
+                ),
+            };
+            cx.notify();
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let error = visual
+        .debug_bounds("issue-detail-error")
+        .expect("selected detail error state should be laid out");
+    assert!(error.origin.y < description.origin.y);
+    assert!(visual.debug_bounds("issue-detail-loading").is_none());
+}
+
+#[gpui::test]
 fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
