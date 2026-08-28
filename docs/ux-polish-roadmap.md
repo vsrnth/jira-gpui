@@ -51,19 +51,20 @@ interaction quality—not a mandate to copy visual treatments.
 - `a5c4cb2` — tailor settings feedback to the host platform.
 - `1c6760a` — complete responsive shell and mobile navigation polish.
 - `16e980d` — complete Issues/detail loading, error, and responsive hierarchy polish.
+- `ff534fd` — complete Updates heading, filter, state, and responsive hierarchy polish.
 
 ## Ordered remaining plan
 
 Each slice is independently reviewed and validated using the gate below, then
-committed separately. **Updates is in progress; Team Tracker remains queued.**
+committed separately. **Updates is complete; Team Tracker is in progress.**
 
 1. **Completed — Issues/detail:** Make exact-key Jira loading and failure visible
    on mobile; align page hierarchy and selected, empty, loading, and error
    states.
-2. **In progress — Updates:** Establish consistent heading, filter, and card
+2. **Completed — Updates:** Establish consistent heading, filter, and card
    hierarchy; keep state distinctions readable and responsive without
    decorative motion.
-3. **Queued — Team Tracker:** Keep table selection/detail identity consistent
+3. **In progress — Team Tracker:** Keep table selection/detail identity consistent
    through sort, filter, and rebuild; align sort and selection semantics, use
    semantic colors, and bound detail geometry.
 
