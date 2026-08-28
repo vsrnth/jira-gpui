@@ -69,9 +69,12 @@ impl Dashboard {
         let show_mobile_detail = mobile && self.mobile_detail_open;
         let table = self.team_table.clone();
         let (_, displayed_team_count) = team_issue_counts(&self.team_issues);
-        let team_loading = configured
-            && displayed_team_count == 0
-            && (self.team_task.is_some() || self.team_feedback_loading);
+        let team_loading =
+            configured && displayed_team_count == 0 && self.team_feedback.is_loading();
+        let team_error = configured && displayed_team_count == 0 && self.team_feedback.is_error();
+        let team_feedback_message = self.team_feedback.display_message();
+        let team_feedback_error = self.team_feedback.is_error();
+        let team_feedback_error_label = self.team_feedback.error_accessible_label();
         let mobile_rows = self
             .team_issues
             .iter()
@@ -100,13 +103,38 @@ impl Dashboard {
                     .child(div().min_w_0().whitespace_normal().text_xs().text_color(cx.theme().muted_foreground).child(
                         if configured { team_summary(displayed_team_count, self.team_members.len()) } else { "No team members configured · no Jira request will be made".to_owned() },
                     ))
-                    .when_some(self.team_feedback.clone(), |this, feedback| {
+                    .when_some(team_feedback_message, |this, feedback| {
                         this.child(
-                            div()
+                            v_flex()
+                                .id(if team_feedback_error && !team_error {
+                                    "team-error"
+                                } else {
+                                    "team-feedback"
+                                })
                                 .min_w_0()
                                 .whitespace_normal()
                                 .text_xs()
-                                .text_color(cx.theme().muted_foreground)
+                                .debug_selector(move || {
+                                    if team_feedback_error && !team_error {
+                                        "team-error".to_owned()
+                                    } else {
+                                        "team-feedback".to_owned()
+                                    }
+                                })
+                                .text_color(if team_feedback_error {
+                                    cx.theme().danger
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .role(if team_feedback_error {
+                                    gpui::accesskit::Role::Alert
+                                } else {
+                                    gpui::accesskit::Role::Status
+                                })
+                                .aria_label(
+                                    team_feedback_error_label
+                                        .unwrap_or_else(|| feedback.clone()),
+                                )
                                 .child(feedback),
                         )
                     }),
@@ -175,30 +203,62 @@ impl Dashboard {
                                     )
                                 })
                                 .when(configured && mobile_rows.is_empty(), |this| {
+                                    let status_id = if team_loading {
+                                        "team-loading"
+                                    } else if team_error {
+                                        "team-error"
+                                    } else {
+                                        "team-empty"
+                                    };
+                                    let status_label = if team_loading {
+                                        "Loading in-progress team tickets"
+                                    } else if team_error {
+                                        "Team tracker error"
+                                    } else {
+                                        "No in-progress team tickets found"
+                                    };
+                                    let status_label = if team_error {
+                                        format!(
+                                            "{status_label} · {}",
+                                            self.team_feedback
+                                                .display_message()
+                                                .unwrap_or_else(|| {
+                                                    "Unable to refresh team tickets".to_owned()
+                                                })
+                                        )
+                                    } else {
+                                        status_label.to_owned()
+                                    };
                                     this.child(
                                         v_flex()
-                                            .id(if team_loading {
-                                                "team-loading"
+                                            .id(status_id)
+                                            .debug_selector(move || status_id.to_owned())
+                                            .role(if team_error {
+                                                gpui::accesskit::Role::Alert
                                             } else {
-                                                "team-empty"
+                                                gpui::accesskit::Role::Status
                                             })
-                                            .role(gpui::accesskit::Role::Status)
-                                            .aria_label(if team_loading {
-                                                "Loading in-progress team tickets"
-                                            } else {
-                                                "No in-progress team tickets found"
-                                            })
+                                            .aria_label(status_label)
                                             .items_center()
                                             .gap_2()
                                             .p_6()
                                             .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_color(if team_error {
+                                                cx.theme().danger
+                                            } else {
+                                                cx.theme().muted_foreground
+                                            })
                                             .when(team_loading, |this| {
                                                 this.child(Spinner::new()).child(
                                                     div().child("Loading team tickets…"),
                                                 )
                                             })
-                                            .when(!team_loading, |this| {
+                                            .when(team_error, |this| {
+                                                this.child(self.team_feedback.display_message().unwrap_or_else(
+                                                    || "Unable to refresh team tickets".to_owned(),
+                                                ))
+                                            })
+                                            .when(!team_loading && !team_error, |this| {
                                                 this.child("No in-progress team tickets found.")
                                             }),
                                     )
@@ -248,30 +308,62 @@ impl Dashboard {
                                         && displayed_team_count == 0
                                         && !matches!(table_mode, TeamTableMode::Cards),
                                     |this| {
+                                        let status_id = if team_loading {
+                                            "team-loading"
+                                        } else if team_error {
+                                            "team-error"
+                                        } else {
+                                            "team-empty"
+                                        };
+                                        let status_label = if team_loading {
+                                            "Loading in-progress team tickets"
+                                        } else if team_error {
+                                            "Team tracker error"
+                                        } else {
+                                            "No in-progress team tickets found"
+                                        };
+                                        let status_label = if team_error {
+                                            format!(
+                                                "{status_label} · {}",
+                                                self.team_feedback
+                                                    .display_message()
+                                                    .unwrap_or_else(|| {
+                                                        "Unable to refresh team tickets".to_owned()
+                                                    })
+                                            )
+                                        } else {
+                                            status_label.to_owned()
+                                        };
                                         this.child(
                                             v_flex()
-                                                .id(if team_loading {
-                                                    "team-loading"
+                                                .id(status_id)
+                                                .debug_selector(move || status_id.to_owned())
+                                                .role(if team_error {
+                                                    gpui::accesskit::Role::Alert
                                                 } else {
-                                                    "team-empty"
+                                                    gpui::accesskit::Role::Status
                                                 })
-                                                .role(gpui::accesskit::Role::Status)
-                                                .aria_label(if team_loading {
-                                                    "Loading in-progress team tickets"
-                                                } else {
-                                                    "No in-progress team tickets found"
-                                                })
+                                                .aria_label(status_label)
                                                 .items_center()
                                                 .gap_2()
                                                 .p_6()
                                                 .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
+                                                .text_color(if team_error {
+                                                    cx.theme().danger
+                                                } else {
+                                                    cx.theme().muted_foreground
+                                                })
                                                 .when(team_loading, |this| {
                                                     this.child(Spinner::new()).child(
                                                         div().child("Loading team tickets…"),
                                                     )
                                                 })
-                                                .when(!team_loading, |this| {
+                                                .when(team_error, |this| {
+                                                    this.child(self.team_feedback.display_message().unwrap_or_else(
+                                                        || "Unable to refresh team tickets".to_owned(),
+                                                    ))
+                                                })
+                                                .when(!team_loading && !team_error, |this| {
                                                     this.child("No in-progress team tickets found.")
                                                 }),
                                         )

@@ -1255,7 +1255,8 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
         display_name: "Amina Yusuf".to_owned(),
     }];
     dashboard.team_issues = sample_issues();
-    dashboard.team_feedback = Some("Team tracker refreshed · fetched 5 · displaying 3".to_owned());
+    dashboard.team_feedback =
+        TeamFeedback::Info("Team tracker refreshed · fetched 5 · displaying 3".to_owned());
 
     let window = cx.open_window(gpui::size(px(1370.), px(900.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
@@ -2075,6 +2076,150 @@ fn team_refresh_feedback_reports_fetched_and_displayed_counts() {
         team_refresh_feedback("Team tracker refreshed", &sample_issues()),
         "Team tracker refreshed · fetched 5 · displaying 3 in-progress tickets"
     );
+}
+
+#[test]
+fn team_feedback_is_typed_and_never_reports_loading_and_error_together() {
+    let states = [
+        TeamFeedback::Idle,
+        TeamFeedback::Loading("Refreshing team tracker…".to_owned()),
+        TeamFeedback::Info("Team tracker refreshed".to_owned()),
+        TeamFeedback::Error {
+            source: TeamFeedbackErrorSource::Refresh,
+            message: "Jira is unavailable".to_owned(),
+        },
+    ];
+
+    assert!(states[0].display_message().is_none());
+    assert!(states[1].is_loading());
+    assert!(!states[1].is_error());
+    assert!(!states[2].is_loading());
+    assert!(!states[2].is_error());
+    assert!(states[3].is_error());
+    assert!(!states[3].is_loading());
+}
+
+#[test]
+fn team_feedback_display_copy_preserves_error_context() {
+    assert_eq!(
+        TeamFeedback::Error {
+            source: TeamFeedbackErrorSource::Refresh,
+            message: "Jira is unavailable".to_owned(),
+        }
+        .display_message()
+        .as_deref(),
+        Some("Team tracker refresh failed · Jira is unavailable")
+    );
+    assert_eq!(
+        TeamFeedback::Error {
+            source: TeamFeedbackErrorSource::Save,
+            message: "Team tracker could not be saved".to_owned(),
+        }
+        .display_message()
+        .as_deref(),
+        Some("Team tracker could not be saved")
+    );
+    assert_eq!(
+        TeamFeedback::Error {
+            source: TeamFeedbackErrorSource::Connection,
+            message: "Connect Jira before saving the team tracker".to_owned(),
+        }
+        .display_message()
+        .as_deref(),
+        Some("Connect Jira before saving the team tracker")
+    );
+    assert_eq!(
+        TeamFeedback::Error {
+            source: TeamFeedbackErrorSource::PrimaryRefreshBlocked,
+            message: "Jira is unavailable".to_owned(),
+        }
+        .display_message()
+        .as_deref(),
+        Some("Team tracker was not refreshed because Jira refresh failed · Jira is unavailable")
+    );
+}
+
+#[test]
+fn team_feedback_alert_label_is_only_present_for_errors() {
+    let error = TeamFeedback::Error {
+        source: TeamFeedbackErrorSource::Refresh,
+        message: "Jira is unavailable".to_owned(),
+    };
+    assert_eq!(
+        error.error_accessible_label().as_deref(),
+        Some("Team tracker error · Team tracker refresh failed · Jira is unavailable")
+    );
+    assert!(
+        TeamFeedback::Loading("Refreshing team tracker…".to_owned())
+            .error_accessible_label()
+            .is_none()
+    );
+    assert!(
+        TeamFeedback::Info("Team tracker refreshed".to_owned())
+            .error_accessible_label()
+            .is_none()
+    );
+    assert!(TeamFeedback::Idle.error_accessible_label().is_none());
+}
+
+#[gpui::test]
+fn team_error_state_is_distinct_from_empty_state_in_dense_and_card_views(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Team;
+    dashboard.team_members = vec![PersistedTeamMember {
+        identifier: "amina".to_owned(),
+        account_id: "amina".to_owned(),
+        display_name: "Amina Yusuf".to_owned(),
+    }];
+    dashboard.team_issues.clear();
+    dashboard.team_feedback = TeamFeedback::Error {
+        source: TeamFeedbackErrorSource::Refresh,
+        message: "Jira is unavailable".to_owned(),
+    };
+    let window = cx.open_window(gpui::size(px(1_370.), px(900.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("team-error").is_some());
+    assert!(visual.debug_bounds("team-empty").is_none());
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.team_feedback = TeamFeedback::Info(
+                "Team tracker refreshed · fetched 0 · displaying 0 in-progress tickets".to_owned(),
+            );
+            cx.notify();
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("team-empty").is_some());
+    assert!(visual.debug_bounds("team-error").is_none());
+
+    visual.simulate_resize(gpui::size(px(390.), px(800.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.team_feedback = TeamFeedback::Error {
+                source: TeamFeedbackErrorSource::Refresh,
+                message: "Jira is unavailable".to_owned(),
+            };
+            cx.notify();
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("team-error").is_some());
+    assert!(visual.debug_bounds("team-empty").is_none());
 }
 
 #[test]

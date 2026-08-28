@@ -187,7 +187,31 @@ impl Dashboard {
                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Email resolution requires exactly one active Jira user because the User search domain does not retain email. Uses existing read:jira-user/read:jira-work scopes; no new scope is needed."))
                                     .when_some(team_input, |this, input| this.child(Textarea::new(&input).w_full().h(px(if layout.is_mobile() { 110. } else { 120. })).aria_label("Team tracker members").disabled(!live || self.team_task.is_some() || self.operation_in_progress)))
                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{} configured · maximum {}", self.team_members.len(), MAX_TEAM_MEMBERS)))
-                                    .when_some(self.team_feedback.clone(), |this, message| this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(message)))
+                                    .when(!matches!(self.team_feedback, TeamFeedback::Idle), |this| {
+                                        let is_error = self.team_feedback.is_error();
+                                        let message = self.team_feedback.display_message()
+                                            .expect("non-idle team feedback has a message");
+                                        let error_label = self.team_feedback.error_accessible_label();
+                                        let accessibility_label =
+                                            error_label.unwrap_or_else(|| message.clone());
+                                        this.child(
+                                            v_flex()
+                                                .id("team-settings-feedback")
+                                                .text_sm()
+                                                .text_color(if is_error {
+                                                    cx.theme().danger
+                                                } else {
+                                                    cx.theme().muted_foreground
+                                                })
+                                                .role(if is_error {
+                                                    gpui::accesskit::Role::Alert
+                                                } else {
+                                                    gpui::accesskit::Role::Status
+                                                })
+                                                .aria_label(accessibility_label)
+                                                .child(message),
+                                        )
+                                    })
                                     .child(h_flex().gap_2().when(layout.is_mobile(), |this| this.flex_col()).child(Button::new("save-team").primary().label(if self.team_task.is_some() { "Saving team…" } else { "Save team" }).disabled(!live || self.team_task.is_some() || self.operation_in_progress).on_click(cx.listener(|this, _, _, cx| this.begin_save_team(cx)))).child(Button::new("refresh-team").ghost().label("Refresh team").disabled(!live || self.team_task.is_some() || self.operation_in_progress || self.team_automatic_polling_paused).on_click(cx.listener(|this, _, _, cx| this.begin_team_refresh(cx))))),
                             )
                             .child(

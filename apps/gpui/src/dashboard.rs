@@ -249,6 +249,63 @@ fn refresh_visible_for_section(section: Section) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeamFeedbackErrorSource {
+    Refresh,
+    Save,
+    Connection,
+    PrimaryRefreshBlocked,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TeamFeedback {
+    Idle,
+    Loading(String),
+    Info(String),
+    Error {
+        source: TeamFeedbackErrorSource,
+        message: String,
+    },
+}
+
+impl TeamFeedback {
+    fn display_message(&self) -> Option<String> {
+        match self {
+            Self::Idle => None,
+            Self::Loading(message) | Self::Info(message) => Some(message.clone()),
+            Self::Error { source, message } => Some(match source {
+                TeamFeedbackErrorSource::Refresh => {
+                    format!("Team tracker refresh failed · {message}")
+                }
+                TeamFeedbackErrorSource::Save | TeamFeedbackErrorSource::Connection => {
+                    message.clone()
+                }
+                TeamFeedbackErrorSource::PrimaryRefreshBlocked => format!(
+                    "Team tracker was not refreshed because Jira refresh failed · {message}"
+                ),
+            }),
+        }
+    }
+
+    fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading(_))
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, Self::Error { .. })
+    }
+
+    fn error_accessible_label(&self) -> Option<String> {
+        self.is_error().then(|| {
+            format!(
+                "Team tracker error · {}",
+                self.display_message()
+                    .expect("error feedback has a display message")
+            )
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DashboardEvent {
     AppearanceChanged(AppearancePreference),
 }
@@ -582,8 +639,7 @@ pub struct Dashboard {
     team_table_subscriptions: Vec<Subscription>,
     team_input: Option<Entity<TextareaState>>,
     team_text: String,
-    team_feedback: Option<String>,
-    team_feedback_loading: bool,
+    team_feedback: TeamFeedback,
     team_task: Option<gpui::Task<()>>,
     team_age_task: Option<gpui::Task<()>>,
     /// Fixture dashboards use a fixed clock; live dashboards resolve the clock at refresh time.
@@ -781,8 +837,7 @@ impl Dashboard {
             team_table_subscriptions: Vec::new(),
             team_input: None,
             team_text: String::new(),
-            team_feedback: None,
-            team_feedback_loading: false,
+            team_feedback: TeamFeedback::Idle,
             team_task: None,
             team_age_task: None,
             team_clock: Some(time::macros::datetime!(2026-08-18 00:00 UTC)),
@@ -880,8 +935,7 @@ impl Dashboard {
             team_table_subscriptions: Vec::new(),
             team_input: None,
             team_text: String::new(),
-            team_feedback: None,
-            team_feedback_loading: false,
+            team_feedback: TeamFeedback::Idle,
             team_task: None,
             team_age_task: None,
             team_clock: None,
@@ -1095,8 +1149,8 @@ impl Dashboard {
                         this.operation_in_progress = true;
                         this.sync_message = "Automatic refresh…".to_owned();
                         if !this.team_members.is_empty() && !this.team_automatic_polling_paused {
-                            this.team_feedback_loading = true;
-                            this.team_feedback = Some("Refreshing team tracker…".to_owned());
+                            this.team_feedback =
+                                TeamFeedback::Loading("Refreshing team tracker…".to_owned());
                         }
                         cx.notify();
                         true
@@ -1135,17 +1189,18 @@ impl Dashboard {
                             if let Some(team_result) = team_result {
                                 match team_result {
                                     Ok(team_result) => {
-                                        this.team_feedback_loading = false;
                                         this.apply_team_cached(team_result.cached, cx);
-                                        this.team_feedback = Some(team_refresh_feedback(
-                                            "Team tracker refreshed",
-                                            &this.team_issues,
-                                        ));
+                                        this.team_feedback =
+                                            TeamFeedback::Info(team_refresh_feedback(
+                                                "Team tracker refreshed",
+                                                &this.team_issues,
+                                            ));
                                     }
                                     Err(error) => {
-                                        this.team_feedback_loading = false;
-                                        this.team_feedback =
-                                            Some(safe_sync_error(&error).to_owned())
+                                        this.team_feedback = TeamFeedback::Error {
+                                            source: TeamFeedbackErrorSource::Refresh,
+                                            message: safe_sync_error(&error).to_owned(),
+                                        };
                                     }
                                 }
                             }
@@ -1167,6 +1222,12 @@ impl Dashboard {
                             };
                             if next.is_none() {
                                 this.automatic_polling_paused = true;
+                            }
+                            if this.team_feedback.is_loading() {
+                                this.team_feedback = TeamFeedback::Error {
+                                    source: TeamFeedbackErrorSource::PrimaryRefreshBlocked,
+                                    message: safe_sync_error(&error).to_owned(),
+                                };
                             }
                             cx.notify();
                             next
@@ -2377,15 +2438,15 @@ impl Dashboard {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
-            self.team_feedback_loading = false;
-            self.team_feedback =
-                Some("Team tracker is unavailable until Jira is connected".to_owned());
+            self.team_feedback = TeamFeedback::Error {
+                source: TeamFeedbackErrorSource::Connection,
+                message: "Team tracker is unavailable until Jira is connected".to_owned(),
+            };
             cx.notify();
             return;
         };
         self.operation_in_progress = true;
-        self.team_feedback_loading = true;
-        self.team_feedback = Some("Refreshing team tracker…".to_owned());
+        self.team_feedback = TeamFeedback::Loading("Refreshing team tracker…".to_owned());
         let task = cx.spawn(async move |this, cx| {
             let result = workspace.refresh_team(&CancellationToken::new()).await;
             let _ = this.update(cx, |this, cx| {
@@ -2393,16 +2454,17 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     Ok(result) => {
-                        this.team_feedback_loading = false;
                         this.apply_team_cached(result.cached, cx);
-                        this.team_feedback = Some(team_refresh_feedback(
+                        this.team_feedback = TeamFeedback::Info(team_refresh_feedback(
                             "Team tracker refreshed",
                             &this.team_issues,
                         ));
                     }
                     Err(error) => {
-                        this.team_feedback_loading = false;
-                        this.team_feedback = Some(safe_sync_error(&error).to_owned())
+                        this.team_feedback = TeamFeedback::Error {
+                            source: TeamFeedbackErrorSource::Refresh,
+                            message: safe_sync_error(&error).to_owned(),
+                        }
                     }
                 }
                 cx.notify();
@@ -2430,8 +2492,7 @@ impl Dashboard {
         self.operation_in_progress = true;
         self.sync_message = "Refreshing Jira…".to_owned();
         if !self.team_members.is_empty() && !self.team_automatic_polling_paused {
-            self.team_feedback_loading = true;
-            self.team_feedback = Some("Refreshing team tracker…".to_owned());
+            self.team_feedback = TeamFeedback::Loading("Refreshing team tracker…".to_owned());
         }
         cx.notify();
 
@@ -2451,16 +2512,17 @@ impl Dashboard {
                         this.apply_cached(outcome.cached, cx);
                         match team_result {
                             Ok(team) => {
-                                this.team_feedback_loading = false;
                                 this.apply_team_cached(team.cached, cx);
-                                this.team_feedback = Some(team_refresh_feedback(
+                                this.team_feedback = TeamFeedback::Info(team_refresh_feedback(
                                     "Team tracker refreshed",
                                     &this.team_issues,
                                 ));
                             }
                             Err(error) => {
-                                this.team_feedback_loading = false;
-                                this.team_feedback = Some(safe_sync_error(&error).to_owned())
+                                this.team_feedback = TeamFeedback::Error {
+                                    source: TeamFeedbackErrorSource::Refresh,
+                                    message: safe_sync_error(&error).to_owned(),
+                                }
                             }
                         }
                         this.issue_edit_flow.refresh_succeeded();
@@ -2480,16 +2542,17 @@ impl Dashboard {
                         };
                         match team_result {
                             Ok(team) => {
-                                this.team_feedback_loading = false;
                                 this.apply_team_cached(team.cached, cx);
-                                this.team_feedback = Some(team_refresh_feedback(
+                                this.team_feedback = TeamFeedback::Info(team_refresh_feedback(
                                     "Team tracker refreshed",
                                     &this.team_issues,
                                 ));
                             }
                             Err(error) => {
-                                this.team_feedback_loading = false;
-                                this.team_feedback = Some(safe_sync_error(&error).to_owned())
+                                this.team_feedback = TeamFeedback::Error {
+                                    source: TeamFeedbackErrorSource::Refresh,
+                                    message: safe_sync_error(&error).to_owned(),
+                                }
                             }
                         }
                     }
@@ -2722,8 +2785,7 @@ impl Dashboard {
             |this, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.team_text = input.read(cx).value().to_string();
-                    this.team_feedback_loading = false;
-                    this.team_feedback = None;
+                    this.team_feedback = TeamFeedback::Idle;
                     cx.notify();
                 }
             },
@@ -2811,8 +2873,10 @@ impl Dashboard {
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
-            self.team_feedback_loading = false;
-            self.team_feedback = Some("Connect Jira before saving the team tracker".to_owned());
+            self.team_feedback = TeamFeedback::Error {
+                source: TeamFeedbackErrorSource::Connection,
+                message: "Connect Jira before saving the team tracker".to_owned(),
+            };
             cx.notify();
             return;
         };
@@ -2822,8 +2886,8 @@ impl Dashboard {
         let previous_accounts = workspace.team_members();
         let issue_jql_scope = workspace.jql_scope();
         self.operation_in_progress = true;
-        self.team_feedback_loading = true;
-        self.team_feedback = Some("Resolving team members and refreshing Jira…".to_owned());
+        self.team_feedback =
+            TeamFeedback::Loading("Resolving team members and refreshing Jira…".to_owned());
         let task = cx.spawn(async move |this, cx| {
             let preferences = settings::ProductionPreferences;
             let result = settings::run_team_transaction(
@@ -2839,7 +2903,6 @@ impl Dashboard {
                 this.operation_in_progress = false;
                 match result {
                     settings::TeamSaveResult::Saved { members, refreshed } => {
-                        this.team_feedback_loading = false;
                         this.team_automatic_polling_paused = false;
                         this.team_members = members;
                         this.team_text = this
@@ -2870,13 +2933,12 @@ impl Dashboard {
                                     })
                             }));
                         this.apply_team_cached(refreshed.cached, cx);
-                        this.team_feedback = Some(team_refresh_feedback(
+                        this.team_feedback = TeamFeedback::Info(team_refresh_feedback(
                             "Team tracker saved and refreshed",
                             &this.team_issues,
                         ));
                     }
                     settings::TeamSaveResult::Failed(failure) => {
-                        this.team_feedback_loading = false;
                         this.team_members = previous_members;
                         this.team_text = previous_text;
                         let copy = team_outcome_copy(settings::team_failure_kind(&failure));
@@ -2887,7 +2949,10 @@ impl Dashboard {
                             this.team_events.clear();
                             this.refresh_team_table(cx);
                         }
-                        this.team_feedback = Some(copy.to_owned());
+                        this.team_feedback = TeamFeedback::Error {
+                            source: TeamFeedbackErrorSource::Save,
+                            message: copy.to_owned(),
+                        };
                     }
                 }
                 cx.notify();
