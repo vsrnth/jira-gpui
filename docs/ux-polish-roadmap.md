@@ -55,6 +55,8 @@ interaction quality—not a mandate to copy visual treatments.
 - `377d7e3` — complete Team Tracker selection, sorting, semantic color, and responsive geometry polish.
 - `df3a6bf` — simplify the dashboard shell by removing redundant workspace branding, bounding concise live sync status, and preserving refresh/site context.
 - `4632e3a` — make issue-row mouse selection consistent with a focus-visible-only keyboard ring and verify compact transition chooser bounds.
+- `8df4758` — distinguish typed Team Tracker refresh failures from successful zero-results empty states while preserving truthful context, accessibility, and cached rows.
+- `c279eb2` — complete explicit review and publication of the macOS UX baseline matrix.
 
 ## Ordered plan
 
@@ -70,13 +72,6 @@ committed separately. **All currently ordered slices are complete.**
 3. **Completed — Team Tracker:** Keep table selection/detail identity consistent
    through sort, filter, and rebuild; align sort and selection semantics, use
    semantic colors, and bound detail geometry.
-
-## Follow-up
-
-- Baseline publication remains pending explicit user approval under
-  `docs/ui-automation.md`; no baseline acceptance is implied here.
-- Lower-priority future work may distinguish a typed Team refresh error from a
-  zero-results empty state.
 
 ## Per-slice validation gate
 
