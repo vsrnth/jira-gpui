@@ -3,8 +3,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
-    relative,
+    Pixels, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
@@ -18,6 +18,8 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
+
+use jira_http::JiraBaseUrl;
 
 use crate::config::{LiveSession, StartupSelection, live_session_from_manual_configuration};
 use crate::credential_store::{
@@ -69,6 +71,7 @@ const SCOPED_TOKEN_SCOPES: &str =
     "For full functionality, select exactly: read:jira-user, read:jira-work, write:jira-work.";
 const KEYRING_STORAGE_COPY: &str = "Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs.";
 const WRITE_SAFETY_COPY: &str = "Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions.";
+const TOKEN_REENTRY_COPY: &str = "Re-enter your scoped API token and try again.";
 
 const ONBOARDING_MAX_WIDTH: f32 = 600.0;
 const ONBOARDING_CARD_PADDING: f32 = 16.0;
@@ -85,6 +88,84 @@ fn is_submit_event(event: &InputEvent) -> bool {
 
 fn should_check_saved_credentials(startup: &StartupSelection) -> bool {
     matches!(startup, StartupSelection::Preview)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConnectionReadiness {
+    base_url: bool,
+    email: bool,
+    api_token: bool,
+}
+
+impl ConnectionReadiness {
+    fn is_ready(self) -> bool {
+        self.base_url && self.email && self.api_token
+    }
+}
+
+/// Keeps the onboarding gate local, deterministic, and independent of the network request.
+fn connection_readiness(base_url: &str, email: &str, api_token: &str) -> ConnectionReadiness {
+    let api_token = api_token.trim();
+    ConnectionReadiness {
+        base_url: JiraBaseUrl::parse(base_url).is_ok(),
+        email: is_plausible_email(email),
+        api_token: !api_token.is_empty()
+            && api_token
+                .chars()
+                .all(|character| !character.is_whitespace()),
+    }
+}
+
+fn should_show_validation_guidance(
+    connecting: bool,
+    validation_attempted: bool,
+    user_started_entering: bool,
+) -> bool {
+    !connecting && (validation_attempted || user_started_entering)
+}
+
+fn validation_guidance(readiness: ConnectionReadiness) -> Option<String> {
+    let mut guidance = Vec::new();
+    if !readiness.base_url {
+        guidance.push("Enter an https:// URL ending in .atlassian.net with no path, port, query, or fragment.");
+    }
+    if !readiness.email {
+        guidance.push("Enter a valid Atlassian account email.");
+    }
+    if !readiness.api_token {
+        guidance.push("Enter a non-empty scoped API token without whitespace.");
+    }
+    (!guidance.is_empty()).then(|| guidance.join(" "))
+}
+
+fn is_plausible_email(value: &str) -> bool {
+    let value = value.trim();
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    if local.is_empty()
+        || domain.is_empty()
+        || domain.contains('@')
+        || local
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return false;
+    }
+
+    let labels: Vec<_> = domain.split('.').collect();
+    !labels.iter().any(|label| {
+        label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    }) && labels.len() >= 2
+}
+
+fn connection_failure_copy(error: &str) -> String {
+    format!("{error} {TOKEN_REENTRY_COPY}")
 }
 
 fn saved_login_warning(error: CredentialStoreError) -> String {
@@ -108,6 +189,8 @@ pub struct AppShell {
     connection_error: Option<String>,
     connection_warning: Option<String>,
     connection_status: Option<String>,
+    validation_attempted: bool,
+    user_started_entering: bool,
     connecting: bool,
     notification_width: Pixels,
     input_subscriptions: Vec<Subscription>,
@@ -152,6 +235,8 @@ impl AppShell {
             connection_error,
             connection_warning: None,
             connection_status,
+            validation_attempted: false,
+            user_started_entering: false,
             connecting: preview,
             notification_width: cx.theme().notification.width,
             input_subscriptions: Vec::new(),
@@ -210,6 +295,8 @@ impl AppShell {
             connection_error: None,
             connection_warning: None,
             connection_status: None,
+            validation_attempted: false,
+            user_started_entering: false,
             connecting: false,
             notification_width: cx.theme().notification.width,
             input_subscriptions: Vec::new(),
@@ -287,7 +374,11 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
-            if is_submit_event(event) {
+            if matches!(event, InputEvent::Change) {
+                this.user_started_entering = true;
+                this.validation_attempted = false;
+                cx.notify();
+            } else if is_submit_event(event) {
                 this.connect(window, cx);
             }
         })
@@ -344,12 +435,26 @@ impl AppShell {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.connection_enabled || self.connecting {
+        if self.connecting {
             return;
         }
         let base_url = self.base_url.read(cx).unmask_value().to_string();
         let email = self.email.read(cx).unmask_value().to_string();
         let api_token = self.api_token.read(cx).unmask_value().to_string();
+        if !connection_readiness(&base_url, &email, &api_token).is_ready() {
+            self.validation_attempted = true;
+            // Local validation must not replace the masked input: the user can correct the
+            // fields and submit again without having to paste the token again.
+            cx.notify();
+            return;
+        }
+        if !self.connection_enabled {
+            return;
+        }
+        // A valid dispatch owns the form feedback from here: show only the request progress
+        // until it resolves, then retain any actual failure alert and re-entry copy.
+        self.validation_attempted = false;
+        self.user_started_entering = false;
         let credentials_to_save = if self.remember_credentials {
             Some(SavedCredentials::new(
                 base_url.clone(),
@@ -408,7 +513,7 @@ impl AppShell {
                         this.connection_status = None;
                         // StartupError's Display implementation is intentionally
                         // redacted; don't expose request or credential details here.
-                        this.connection_error = Some(error.to_string());
+                        this.connection_error = Some(connection_failure_copy(&error.to_string()));
                         cx.notify();
                     });
                 }
@@ -434,6 +539,18 @@ impl AppShell {
     fn render_connection_form(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = layout_for_width(f32::from(window.viewport_size().width));
         let mobile = layout.is_mobile();
+        let readiness = connection_readiness(
+            &self.base_url.read(cx).unmask_value(),
+            &self.email.read(cx).unmask_value(),
+            &self.api_token.read(cx).unmask_value(),
+        );
+        let validation_guidance = should_show_validation_guidance(
+            self.connecting,
+            self.validation_attempted,
+            self.user_started_entering,
+        )
+        .then(|| validation_guidance(readiness))
+        .flatten();
         let error = self.connection_error.as_ref().map(|message| {
             h_flex()
                 .min_w_0()
@@ -448,6 +565,8 @@ impl AppShell {
                 .py_2()
                 .text_sm()
                 .text_color(cx.theme().danger)
+                .id("connection-error")
+                .role(Role::Alert)
                 .child(div().flex_shrink_0().font_semibold().child("!"))
                 .child(div().min_w_0().child(message.clone()))
         });
@@ -528,6 +647,19 @@ impl AppShell {
                     )
                     .when_some(error, |this, error| this.child(error))
                     .when_some(warning, |this, warning| this.child(warning))
+                    .when_some(validation_guidance, |this, guidance| {
+                        this.child(
+                            h_flex()
+                                .id("connection-validation-guidance")
+                                .role(Role::Status)
+                                .aria_label(guidance.clone())
+                                .min_w_0()
+                                .w_full()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(guidance),
+                        )
+                    })
                     .child(
                         v_flex()
                             .min_w_0()
@@ -598,6 +730,9 @@ impl AppShell {
                                     )
                                     .when_some(self.connection_status.as_ref(), |this, status| {
                                         this.child(h_flex()
+                                            .id("connection-status")
+                                            .role(Role::Status)
+                                            .aria_label(status.clone())
                                             .min_w_0()
                                             .items_center()
                                             .gap_2()
@@ -610,7 +745,7 @@ impl AppShell {
                                         Button::new("connect-jira")
                                             .label(if self.connecting { "Connecting…" } else { "Connect" })
                                             .primary()
-                                            .disabled(self.connecting || !self.connection_enabled)
+                                            .disabled(self.connecting || !self.connection_enabled || !readiness.is_ready())
                                             .w_full()
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.connect(window, cx);
@@ -679,17 +814,146 @@ impl Render for AppShell {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppearancePreference, CHECKING_KEYRING_STATUS, KEYRING_STORAGE_COPY,
+        AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, KEYRING_STORAGE_COPY,
         REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL, SCOPED_TOKEN_LABEL,
-        SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, VERIFYING_SCOPED_TOKEN_STATUS,
-        WRITE_SAFETY_COPY, is_submit_event, notification_width_for_viewport,
+        SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
+        VERIFYING_SCOPED_TOKEN_STATUS, WRITE_SAFETY_COPY, connection_failure_copy,
+        connection_readiness, is_submit_event, notification_width_for_viewport,
         save_credentials_warning, saved_login_warning, should_check_saved_credentials,
+        should_show_validation_guidance, validation_guidance,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
     use gpui::WindowAppearance;
     use gpui_component::ThemeMode;
     use gpui_component::input::InputEvent;
+
+    #[test]
+    fn connection_readiness_requires_all_three_fields() {
+        assert!(
+            connection_readiness(
+                "https://example.atlassian.net",
+                "person@example.com",
+                "token-value",
+            )
+            .is_ready()
+        );
+        assert!(
+            !connection_readiness(
+                "http://example.atlassian.net",
+                "person@example.com",
+                "token-value"
+            )
+            .is_ready()
+        );
+        assert!(
+            !connection_readiness("https://example.atlassian.net", "person", "token-value")
+                .is_ready()
+        );
+        assert!(
+            !connection_readiness(
+                "https://example.atlassian.net",
+                "person@example.com",
+                " \t "
+            )
+            .is_ready()
+        );
+    }
+
+    #[test]
+    fn connection_readiness_matches_jira_base_url_and_manual_token_rules() {
+        assert!(
+            connection_readiness(
+                "https://jira.example.atlassian.net/",
+                "person+jira@example.co.uk",
+                "token",
+            )
+            .is_ready()
+        );
+        for invalid_url in [
+            "https://jira.example.com",
+            "https://jira.example.atlassian.net/tenant",
+            "https://jira.example.atlassian.net:8443",
+            "https://jira.example.atlassian.net/?token=secret",
+            "https://jira.example.atlassian.net#fragment",
+        ] {
+            assert!(
+                !connection_readiness(invalid_url, "person@example.com", "token").is_ready(),
+                "{invalid_url}"
+            );
+        }
+        assert!(
+            connection_readiness(
+                "https://jira.example.atlassian.net",
+                "person@example.com",
+                "\t token \n",
+            )
+            .is_ready()
+        );
+        assert!(
+            !connection_readiness(
+                "https://jira.example.atlassian.net",
+                "person@example.com",
+                "tok en",
+            )
+            .is_ready()
+        );
+        assert!(
+            !connection_readiness(
+                "https://jira.example.atlassian.net",
+                "@example.com",
+                "token"
+            )
+            .is_ready()
+        );
+        assert!(
+            !connection_readiness(
+                "https://jira.example.atlassian.net",
+                "person@example",
+                "token",
+            )
+            .is_ready()
+        );
+    }
+
+    #[test]
+    fn validation_guidance_is_targeted_and_absent_when_everything_is_ready() {
+        let guidance = validation_guidance(ConnectionReadiness {
+            base_url: false,
+            email: false,
+            api_token: false,
+        })
+        .unwrap();
+        assert!(guidance.contains(".atlassian.net"));
+        assert!(guidance.contains("account email"));
+        assert!(guidance.contains("without whitespace"));
+        assert!(
+            validation_guidance(ConnectionReadiness {
+                base_url: true,
+                email: true,
+                api_token: true,
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn validation_guidance_is_suppressed_while_connecting() {
+        assert!(!should_show_validation_guidance(true, true, true));
+        assert!(!should_show_validation_guidance(true, false, true));
+        assert!(should_show_validation_guidance(false, true, false));
+        assert!(should_show_validation_guidance(false, false, true));
+        assert!(!should_show_validation_guidance(false, false, false));
+    }
+
+    #[test]
+    fn failed_connection_copy_requires_token_reentry_without_exposing_a_secret() {
+        let copy = connection_failure_copy("Jira rejected the credentials");
+        assert!(copy.contains("Jira rejected the credentials"));
+        assert!(copy.contains(TOKEN_REENTRY_COPY));
+        assert!(copy.contains("Re-enter"));
+        assert!(!copy.contains("token-value"));
+    }
 
     #[test]
     fn saved_credentials_are_checked_only_for_preview() {
