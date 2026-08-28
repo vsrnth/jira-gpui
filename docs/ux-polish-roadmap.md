@@ -53,6 +53,8 @@ interaction quality—not a mandate to copy visual treatments.
 - `16e980d` — complete Issues/detail loading, error, and responsive hierarchy polish.
 - `ff534fd` — complete Updates heading, filter, state, and responsive hierarchy polish.
 - `377d7e3` — complete Team Tracker selection, sorting, semantic color, and responsive geometry polish.
+- `df3a6bf` — simplify the dashboard shell by removing redundant workspace branding, bounding concise live sync status, and preserving refresh/site context.
+- `4632e3a` — make issue-row mouse selection consistent with a focus-visible-only keyboard ring and verify compact transition chooser bounds.
 
 ## Ordered plan
 
