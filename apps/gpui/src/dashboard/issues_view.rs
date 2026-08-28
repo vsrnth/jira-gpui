@@ -420,11 +420,13 @@ impl Dashboard {
             );
         let issue_id = issue.id.clone();
         let keyboard_issue_id = issue.id.clone();
+        let debug_issue_id = issue.id.clone();
         let is_remote_result = !label.is_empty();
         let mobile = layout.is_mobile();
         let accessible_label = format!("Open {}: {}", issue.key, issue.summary);
         div()
             .id(format!("issue-row-{}", issue.id))
+            .debug_selector(move || format!("issue-row-{debug_issue_id}"))
             .role(gpui::accesskit::Role::Button)
             .aria_label(accessible_label)
             .aria_selected(selected)
@@ -472,7 +474,8 @@ impl Dashboard {
                     cx.notify();
                 }
             }))
-            .focus(|style| style.border_1().border_color(cx.theme().primary))
+            // Keep pointer selection quiet; reserve the full-row ring for keyboard focus.
+            .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
             .child(
                 v_flex()
                     .w_full()

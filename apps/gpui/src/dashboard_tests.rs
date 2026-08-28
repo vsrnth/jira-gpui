@@ -967,6 +967,49 @@ fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
+fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx.open_window(gpui::size(px(1200.), px(900.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let issue = sample_issues()
+        .into_iter()
+        .find(|issue| issue.key.as_str() == "DESK-179")
+        .expect("sample issue");
+    let row = visual
+        .debug_bounds("issue-row-10179")
+        .expect("issue row should be laid out");
+    assert!(row.size.width > px(0.));
+    assert!(row.size.height > px(0.));
+
+    visual.simulate_click(
+        gpui::point(
+            row.origin.x + row.size.width / 2.,
+            row.origin.y + row.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.selected_issue.clone()),
+        Some(issue.id.clone()),
+        "clicking an issue row should still select it",
+    );
+    let selected_row = visual
+        .debug_bounds("issue-row-10179")
+        .expect("selected issue row should remain laid out");
+    assert_eq!(selected_row.size, row.size);
+}
+
+#[gpui::test]
 fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
@@ -1015,6 +1058,14 @@ fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpu
     assert!(
         option_bounds.size.height > px(0.),
         "transition option collapsed: {option_bounds:?}"
+    );
+    assert!(
+        option_bounds.size.height <= px(32.),
+        "transition option is too tall for a compact row: {option_bounds:?}"
+    );
+    assert!(
+        option_bounds.size.width <= px(320.),
+        "transition option grew beyond the compact popover width: {option_bounds:?}"
     );
 
     visual.simulate_click(
