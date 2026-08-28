@@ -361,12 +361,20 @@ impl Dashboard {
             .min_w_0()
             .w_full()
             .cursor_pointer()
+            .relative()
             .border_b_1()
             .border_color(cx.theme().border)
             .when(selected, |this| {
-                this.bg(cx.theme().list_active)
-                    .border_l_2()
-                    .border_color(cx.theme().primary)
+                this.bg(cx.theme().list_active).child(
+                    div()
+                        .absolute()
+                        .top(px(8.))
+                        .bottom(px(8.))
+                        .left_0()
+                        .w(px(3.))
+                        .rounded_full()
+                        .bg(cx.theme().list_active_border),
+                )
             })
             .when(!selected, |this| {
                 this.hover(|style| style.bg(cx.theme().list_hover))
