@@ -1,4 +1,5 @@
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
+use super::updates_view::update_filter_is_selected;
 use super::*;
 use crate::app_shell::AppearancePreference;
 use crate::presentation::{UpdateViewModel, normalized_issue_key};
@@ -199,6 +200,18 @@ fn update_filter_returns_only_unread_ticket_groups() {
 
     groups[0].unread = false;
     assert!(filtered_update_group_indices(&groups, UpdateFilter::Unread).is_empty());
+}
+
+#[test]
+fn update_filter_selection_drives_toggle_accessibility_state() {
+    assert!(update_filter_is_selected(
+        UpdateFilter::Unread,
+        UpdateFilter::Unread
+    ));
+    assert!(!update_filter_is_selected(
+        UpdateFilter::Unread,
+        UpdateFilter::All
+    ));
 }
 
 #[test]
@@ -1273,6 +1286,102 @@ fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::T
             <= card_bounds.origin.x + card_bounds.size.width + px(1.),
         "update actions escape card right edge: card={card_bounds:?}, actions={actions_bounds:?}"
     );
+}
+
+#[gpui::test]
+fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let issue_id = IssueId::new("100").expect("issue");
+    let event_id = jira_domain::EventId::new("event-mobile").expect("event");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Updates;
+    dashboard.update_groups = vec![UpdateGroupViewModel {
+        issue_id: issue_id.clone(),
+        issue_key: "PLATFORM-12345".to_owned(),
+        issue_summary: "A deliberately long summary that must remain readable without escaping the narrow mobile card".to_owned(),
+        latest_occurred_at: "2026-08-23 14:35:27 Asia/Kolkata".to_owned(),
+        unread_count: 1,
+        unread: true,
+        events: vec![UpdateViewModel {
+            event_id,
+            issue_id,
+            issue_key: "PLATFORM-12345".to_owned(),
+            issue_summary: "A deliberately long summary".to_owned(),
+            change: "Status changed to In Progress with a long activity description".to_owned(),
+            occurred_at: "2026-08-23 14:35:27 Asia/Kolkata".to_owned(),
+            unread: true,
+        }],
+    }];
+
+    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    for id in [
+        "updates-header",
+        "updates-heading",
+        "updates-filters",
+        "updates-description",
+        "update-list",
+        "update-card-0",
+        "update-row-0-0",
+        "update-actions-0",
+    ] {
+        let bounds = visual
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} should be laid out"));
+        assert!(
+            bounds.origin.x >= px(0.),
+            "{id} escapes left edge: {bounds:?}"
+        );
+        assert!(
+            bounds.origin.x + bounds.size.width <= px(320.) + px(1.),
+            "{id} escapes right edge: {bounds:?}"
+        );
+    }
+
+    let header = visual
+        .debug_bounds("updates-header")
+        .expect("updates header should be laid out");
+    let filters = visual
+        .debug_bounds("updates-filters")
+        .expect("updates filters should be laid out");
+    let description = visual
+        .debug_bounds("updates-description")
+        .expect("updates description should be laid out");
+    assert!(filters.origin.y > header.origin.y);
+    assert!(description.origin.y > filters.origin.y);
+}
+
+#[gpui::test]
+fn updates_empty_filters_have_distinct_stable_state_surfaces(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Updates;
+    dashboard.update_groups.clear();
+    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("updates-empty-all").is_some());
+    assert!(visual.debug_bounds("updates-empty-unread").is_none());
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.update_filter = UpdateFilter::Unread;
+            cx.notify();
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("updates-empty-all").is_none());
+    assert!(visual.debug_bounds("updates-empty-unread").is_some());
 }
 
 #[test]
