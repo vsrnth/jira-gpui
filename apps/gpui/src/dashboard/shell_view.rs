@@ -2,10 +2,7 @@ use super::*;
 use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
 use gpui_component::{
     Sizable as _,
-    sidebar::{
-        Sidebar, SidebarCollapsible, SidebarFooter, SidebarMenu, SidebarMenuItem,
-        SidebarToggleButton,
-    },
+    sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem, SidebarToggleButton},
     tooltip::Tooltip,
 };
 
@@ -16,6 +13,14 @@ struct MobileNavItem {
     selected: bool,
     section: Section,
     width: f32,
+}
+
+pub(super) fn refresh_action_label(operation_in_progress: bool) -> &'static str {
+    if operation_in_progress {
+        "Refreshing Jira…"
+    } else {
+        "Refresh Jira"
+    }
 }
 
 impl Dashboard {
@@ -146,7 +151,7 @@ impl Dashboard {
                     .w(px(200.))
                     .when_some(header, |this, header| this.header(header))
                     .child(menu)
-                    .footer(SidebarFooter::new().child(footer)),
+                    .footer(footer),
             )
     }
 
@@ -206,20 +211,8 @@ impl Dashboard {
         sidebar_action: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = if self.operation_in_progress {
-            "Refreshing…"
-        } else {
-            "Refresh"
-        };
-        let tooltip = format!(
-            "{} Jira · {}",
-            if self.operation_in_progress {
-                "Refreshing"
-            } else {
-                "Refresh"
-            },
-            self.sync_message
-        );
+        let label = refresh_action_label(self.operation_in_progress);
+        let tooltip = label.to_owned();
 
         if icon_only {
             div()

@@ -1,4 +1,5 @@
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
+use super::shell_view::refresh_action_label;
 use super::updates_view::update_filter_is_selected;
 use super::*;
 use crate::app_shell::AppearancePreference;
@@ -395,6 +396,14 @@ fn sidebar_state_starts_expanded_and_refresh_stays_hidden_on_settings() {
     assert!(refresh_visible_for_section(Section::Updates));
     assert!(refresh_visible_for_section(Section::Team));
     assert!(!refresh_visible_for_section(Section::Settings));
+}
+
+#[test]
+fn refresh_action_labels_are_concise_and_do_not_include_sync_detail() {
+    assert_eq!(refresh_action_label(false), "Refresh Jira");
+    assert_eq!(refresh_action_label(true), "Refreshing Jira…");
+    assert!(!refresh_action_label(false).contains("Refresh complete"));
+    assert!(!refresh_action_label(true).contains("Refresh complete"));
 }
 
 #[gpui::test]
