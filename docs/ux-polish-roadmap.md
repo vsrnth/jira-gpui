@@ -85,6 +85,11 @@ interaction quality—not a mandate to copy visual treatments.
   that stages a transition for explicit confirmation without writing to Jira.
 - `48089a6` — replace the Team tracker's custom drag rail and width math with
   native Resizable panels and session-persistent component state.
+- `7dddcc2`, `2a4120c`, `abc94ed`, `e357bcc`, `9a9688e` — complete the
+  accessibility hooks and deterministic, no-side-effect fixture host for local
+  UI verification.
+- `ac8a618` — add the local-only real-window XCUITest harness and five semantic
+  smoke scenarios.
 
 ## Ordered plan
 
@@ -117,15 +122,21 @@ committed separately. **All currently ordered slices are complete.**
    - native window, viewport-test, and offscreen-capture bounds;
    - dynamically clamped mobile/navigation geometry; and
    - the deliberately physical 3px selected-issue rail.
+8. **Completed — Local semantic macOS UI automation:** Verify deterministic
+   real-window XCUITest coverage for onboarding, issue/detail identity, updates,
+   team, and settings without Jira, keychain, notification, or write side
+   effects.
 
 ## Latest UI verification
 
-The complete five-scenario macOS matrix was regenerated after the status
+The complete five-case macOS visual matrix was regenerated after the status
 Popover, sizing audit, and Team Resizable migration by following
 `docs/ui-automation.md`. Issues, Team, Settings, onboarding, and local updates
-were visually reviewed at their canonical matrix sizes. No clipping, overlap,
-or pane-boundary regressions were found. Candidate PNGs remain ignored local
-development artifacts and were not published as new baselines.
+were visually reviewed at their canonical matrix sizes. The final five-scenario
+real-window XCUITest suite also passed for onboarding, issues/detail identity,
+updates, team, and settings. No clipping, overlap, pane-boundary, or semantic
+interaction regressions were found. Candidate PNGs and XCUITest results remain
+ignored local development artifacts and were not published as new baselines.
 
 ## Per-slice validation gate
 
