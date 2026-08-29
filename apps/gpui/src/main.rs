@@ -46,8 +46,7 @@ fn initial_window_bounds(cx: &App) -> WindowBounds {
 fn main() {
     use gpui::{WindowDecorations, WindowOptions};
     use gpui_component::{Root, TitleBar};
-    use gpui_component_assets::Assets;
-    use jira_gpui::{AppShell, startup_from_environment};
+    use jira_gpui::{AppAssets, AppShell, startup_from_environment};
 
     #[cfg(target_os = "linux")]
     if desktop_integration::register_from_environment().is_err() {
@@ -57,7 +56,7 @@ fn main() {
     let startup = startup_from_environment();
 
     gpui_platform::application()
-        .with_assets(Assets)
+        .with_assets(AppAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
 

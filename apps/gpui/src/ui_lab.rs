@@ -15,17 +15,15 @@ use anyhow::{Context as _, Result, bail};
 pub mod matrix;
 pub mod visual;
 #[cfg(target_os = "macos")]
-use gpui::{AppContext as _, Size, VisualTestAppContext, px, size};
-#[cfg(target_os = "macos")]
-use gpui_component::{Root, Theme, ThemeMode};
-#[cfg(target_os = "macos")]
-use gpui_component_assets::Assets;
-
-#[cfg(target_os = "macos")]
 use crate::{
+    AppAssets,
     app_shell::{AppShell, AppearancePreference},
     dashboard::{Dashboard, SampleSection},
 };
+#[cfg(target_os = "macos")]
+use gpui::{AppContext as _, Size, VisualTestAppContext, px, size};
+#[cfg(target_os = "macos")]
+use gpui_component::{Root, Theme, ThemeMode};
 
 /// The supported semantic fixture scenarios.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,7 +201,7 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
     let (image, report) = {
         let mut cx = VisualTestAppContext::with_asset_source(
             gpui_platform::current_platform(false),
-            Arc::new(Assets),
+            Arc::new(AppAssets),
         );
         cx.update(|cx| {
             gpui_component::init(cx);

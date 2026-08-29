@@ -5,6 +5,7 @@
 //! of a platform renderer, which keeps the application logic independent from
 //! the native window entry points.
 
+mod app_assets;
 mod app_shell;
 mod config;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -25,5 +26,6 @@ pub mod ui_automation;
 #[cfg(feature = "ui-lab")]
 pub mod ui_lab;
 
+pub use app_assets::{AppAssets, AppIconName};
 pub use app_shell::AppShell;
 pub use config::{StartupSelection, startup_from_environment};
