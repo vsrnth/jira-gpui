@@ -1,10 +1,22 @@
 use super::*;
 use crate::app_shell::AppearancePreference;
-use gpui_component::Selectable;
+use gpui_component::button::{Toggle, ToggleVariants};
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
 
 const APPEARANCE_HELP_COPY: &str = "Follow the system appearance or choose a fixed theme.";
+const APPEARANCE_PREFERENCES: [AppearancePreference; 3] = [
+    AppearancePreference::System,
+    AppearancePreference::Light,
+    AppearancePreference::Dark,
+];
+const SETTINGS_GROUP_LABELS: [&str; 5] = [
+    "Appearance",
+    "Issue scope",
+    "Team tracker",
+    "Desktop notifications",
+    "Saved Jira login",
+];
 const SCOPE_HELP_COPY: &str = "This is a scope expression. Jira Desk appends assigned-or-watched account membership, incremental updated overlap, and ORDER BY updated DESC. Do not include ORDER BY.";
 const LIVE_WORKSPACE_COPY: &str =
     "Settings become available after a live Jira workspace is connected.";
@@ -72,26 +84,43 @@ fn current_settings_platform() -> SettingsPlatform {
     SettingsPlatform::Macos
 }
 
+fn appearance_toggle_checks(selected: AppearancePreference) -> [bool; 3] {
+    APPEARANCE_PREFERENCES.map(|preference| preference == selected)
+}
+
 impl Dashboard {
     fn render_appearance_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.appearance_preference;
-        let preference_button = |preference: AppearancePreference| {
-            let label = preference.label();
-            let selected = selected == preference;
-            let id = format!("appearance-{}", label.to_lowercase());
-            Button::new(id.clone())
-                .debug_selector(move || id)
-                .compact()
-                .flex_1()
-                .selected(selected)
-                .toggled(selected)
-                .when(selected, |this| this.primary())
-                .label(label)
-                .tooltip(format!("Use {label} appearance"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_appearance_preference(preference, window, cx);
-                }))
-        };
+        let dashboard = cx.entity().downgrade();
+        let checks = appearance_toggle_checks(selected);
+        let preference_toggles =
+            APPEARANCE_PREFERENCES
+                .into_iter()
+                .enumerate()
+                .map(|(index, preference)| {
+                    let label = preference.label();
+                    let id = format!("appearance-{}", label.to_lowercase());
+                    let dashboard = dashboard.clone();
+                    div()
+                        .id(id.clone())
+                        .debug_selector(move || id.clone())
+                        .child(
+                            Toggle::new(format!("appearance-toggle-{}", label.to_lowercase()))
+                                .checked(checks[index])
+                                .outline()
+                                .label(label)
+                                .tooltip(format!("Use {label} appearance"))
+                                .on_click(move |_, window, cx| {
+                                    if let Some(dashboard) = dashboard.upgrade() {
+                                        dashboard.update(cx, |this, cx| {
+                                            this.select_appearance_preference(
+                                                preference, window, cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        )
+                });
 
         v_flex()
             .gap_2()
@@ -103,11 +132,10 @@ impl Dashboard {
             )
             .child(
                 h_flex()
+                    .id("appearance-preferences")
                     .w_full()
                     .gap_1()
-                    .child(preference_button(AppearancePreference::System))
-                    .child(preference_button(AppearancePreference::Light))
-                    .child(preference_button(AppearancePreference::Dark)),
+                    .children(preference_toggles),
             )
     }
 
@@ -515,28 +543,25 @@ impl Dashboard {
             .with_group_variant(GroupBoxVariant::Outline)
             .sidebar_width(px(200.))
             .pages(vec![
-                SettingPage::new("General")
+                SettingPage::new("Settings")
                     .icon(IconName::Settings2)
                     .default_open(true)
                     .resettable(false)
-                    .group(SettingGroup::new().title("Appearance").item(appearance)),
-                SettingPage::new("Jira")
-                    .icon(IconName::LayoutDashboard)
-                    .resettable(false)
-                    .group(SettingGroup::new().title("Issue scope").item(issue_scope)),
-                SettingPage::new("Team tracker")
-                    .icon(IconName::CircleUser)
-                    .resettable(false)
-                    .group(SettingGroup::new().title("Team tracker").item(team)),
-                SettingPage::new("Desktop")
-                    .icon(IconName::Bell)
-                    .resettable(false)
                     .groups(vec![
                         SettingGroup::new()
-                            .title("Desktop notifications")
+                            .title(SETTINGS_GROUP_LABELS[0])
+                            .item(appearance),
+                        SettingGroup::new()
+                            .title(SETTINGS_GROUP_LABELS[1])
+                            .item(issue_scope),
+                        SettingGroup::new()
+                            .title(SETTINGS_GROUP_LABELS[2])
+                            .item(team),
+                        SettingGroup::new()
+                            .title(SETTINGS_GROUP_LABELS[3])
                             .item(notifications),
                         SettingGroup::new()
-                            .title("Saved Jira login")
+                            .title(SETTINGS_GROUP_LABELS[4])
                             .item(saved_login),
                     ]),
             ]);
@@ -553,13 +578,13 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPEARANCE_HELP_COPY, DIAGNOSTIC_EVENTS_COPY, LINUX_KEYRING_COPY,
+        APPEARANCE_HELP_COPY, APPEARANCE_PREFERENCES, DIAGNOSTIC_EVENTS_COPY, LINUX_KEYRING_COPY,
         LINUX_NOTIFICATION_DISPLAY_COPY, LINUX_NOTIFICATION_HELP_COPY, LIVE_WORKSPACE_COPY,
         MACOS_KEYRING_COPY, MACOS_NOTIFICATION_HELP_COPY, NOTIFICATION_TEST_RESULT_ID,
         NOTIFICATION_TEST_RESULT_ROLE, SAVED_LOGIN_DELETE_RESULT_ID,
-        SAVED_LOGIN_DELETE_RESULT_ROLE, SCOPE_HELP_COPY, SavedLoginDeleteOutcome,
-        SavedLoginDeleteState, SettingsPlatform, saved_login_delete_feedback_for_state,
-        settings_platform_copy,
+        SAVED_LOGIN_DELETE_RESULT_ROLE, SCOPE_HELP_COPY, SETTINGS_GROUP_LABELS,
+        SavedLoginDeleteOutcome, SavedLoginDeleteState, SettingsPlatform, appearance_toggle_checks,
+        saved_login_delete_feedback_for_state, settings_platform_copy,
     };
     use crate::dashboard::Dashboard;
 
@@ -571,6 +596,29 @@ mod tests {
             APPEARANCE_HELP_COPY,
             "Follow the system appearance or choose a fixed theme."
         );
+    }
+
+    #[test]
+    fn settings_page_uses_meaningful_native_groups() {
+        assert_eq!(
+            SETTINGS_GROUP_LABELS,
+            [
+                "Appearance",
+                "Issue scope",
+                "Team tracker",
+                "Desktop notifications",
+                "Saved Jira login",
+            ]
+        );
+    }
+
+    #[test]
+    fn appearance_toggle_checks_select_exactly_one_control() {
+        for (selected_index, selected) in APPEARANCE_PREFERENCES.into_iter().enumerate() {
+            let checks = appearance_toggle_checks(selected);
+            assert_eq!(checks.iter().filter(|checked| **checked).count(), 1);
+            assert!(checks[selected_index]);
+        }
     }
 
     #[test]
