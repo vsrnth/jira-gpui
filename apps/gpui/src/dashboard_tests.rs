@@ -1,5 +1,5 @@
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
-use super::shell_view::refresh_action_label;
+use super::shell_view::{refresh_action_label, should_render_sidebar_sync_message};
 use super::updates_view::update_filter_is_selected;
 use super::*;
 use crate::app_shell::AppearancePreference;
@@ -614,17 +614,16 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     assert!(toggle.origin.y >= workspace_header.origin.y);
     assert!(toggle.origin.y + toggle.size.height <= navigation.origin.y + navigation.size.height);
 
-    let status = visual
-        .debug_bounds("sidebar-sync-status")
-        .expect("expanded sidebar should expose sync status");
+    assert!(
+        visual.debug_bounds("sidebar-sync-status").is_none(),
+        "preview sync status should not duplicate the account footer"
+    );
     let refresh = visual
         .debug_bounds("sidebar-refresh")
         .expect("expanded sidebar should expose refresh action");
     let profile = visual
         .debug_bounds("sidebar-profile")
         .expect("expanded sidebar should expose account footer");
-    assert!(status.size.width > px(0.) && status.size.height > px(0.));
-    assert!(status.origin.y < refresh.origin.y);
     assert!(refresh.origin.y < profile.origin.y);
     assert!(profile.origin.x >= sidebar.origin.x);
     assert!(profile.origin.x + profile.size.width <= sidebar.origin.x + sidebar.size.width);
@@ -675,6 +674,20 @@ fn long_sync_status_stays_bounded_beside_desktop_content_at_short_height(
     assert!(status.origin.x + status.size.width <= main.origin.x);
     assert!(status.origin.y + status.size.height <= sidebar.origin.y + sidebar.size.height);
     assert!(main.origin.y >= sidebar.origin.y);
+}
+
+#[test]
+fn sidebar_sync_message_visibility_only_hides_redundant_preview_copy() {
+    assert!(!should_render_sidebar_sync_message(
+        "Preview data · Jira connection not configured"
+    ));
+    for message in [
+        "Opening local cache…",
+        "Refresh complete · 2 issues",
+        "Startup error · unavailable",
+    ] {
+        assert!(should_render_sidebar_sync_message(message));
+    }
 }
 
 #[gpui::test]
@@ -1812,6 +1825,38 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
             "metadata value escapes native details surface: selector={selector}, details={details:?}, value={value:?}"
         );
     }
+
+    let type_surface = visual
+        .debug_bounds("issue-detail-type-surface")
+        .expect("issue type metadata surface should be laid out");
+    let status_trigger = visual
+        .debug_bounds("issue-status-trigger")
+        .expect("status metadata trigger should be laid out");
+    let priority_surface = visual
+        .debug_bounds("issue-detail-priority-surface")
+        .expect("priority metadata surface should be laid out");
+    let metadata_row = visual
+        .debug_bounds("issue-detail-metadata-row")
+        .expect("metadata row should be laid out");
+    for (name, bounds) in [
+        ("type", type_surface),
+        ("status", status_trigger),
+        ("priority", priority_surface),
+    ] {
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(
+            bounds.origin.y >= metadata_row.origin.y
+                && bounds.origin.y + bounds.size.height
+                    <= metadata_row.origin.y + metadata_row.size.height + px(1.),
+            "{name} surface escapes metadata row: row={metadata_row:?}, surface={bounds:?}"
+        );
+    }
+    assert!(
+        (f32::from(type_surface.size.height) - f32::from(status_trigger.size.height)).abs() <= 1.
+    );
+    assert!(
+        (f32::from(type_surface.size.height) - f32::from(priority_surface.size.height)).abs() <= 1.
+    );
 }
 
 #[gpui::test]

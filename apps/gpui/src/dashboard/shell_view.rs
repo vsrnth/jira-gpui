@@ -26,6 +26,10 @@ pub(super) fn refresh_action_label(operation_in_progress: bool) -> &'static str 
     }
 }
 
+pub(super) fn should_render_sidebar_sync_message(message: &str) -> bool {
+    message != "Preview data · Jira connection not configured"
+}
+
 impl Dashboard {
     fn render_sidebar(
         &self,
@@ -194,26 +198,29 @@ impl Dashboard {
             .gap_1()
             .border_t_1()
             .border_color(cx.theme().sidebar_border)
-            .when(!collapsed, |this| {
-                this.max_h(gpui::rems(11.)).min_h_0().child(
-                    div()
-                        .id("sidebar-sync-status")
-                        .debug_selector(|| "sidebar-sync-status".to_owned())
-                        .role(gpui::accesskit::Role::Status)
-                        .w_full()
-                        .min_w_0()
-                        .aria_label(self.sync_message.clone())
-                        .h(gpui::rems(3.5))
-                        .max_h(gpui::rems(4.5))
-                        .min_h_0()
-                        .flex_shrink_1()
-                        .overflow_y_scrollbar()
-                        .whitespace_normal()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(self.sync_message.clone()),
-                )
-            })
+            .when(
+                !collapsed && should_render_sidebar_sync_message(&self.sync_message),
+                |this| {
+                    this.max_h(gpui::rems(11.)).min_h_0().child(
+                        div()
+                            .id("sidebar-sync-status")
+                            .debug_selector(|| "sidebar-sync-status".to_owned())
+                            .role(gpui::accesskit::Role::Status)
+                            .w_full()
+                            .min_w_0()
+                            .aria_label(self.sync_message.clone())
+                            .h(gpui::rems(3.5))
+                            .max_h(gpui::rems(4.5))
+                            .min_h_0()
+                            .flex_shrink_1()
+                            .overflow_y_scrollbar()
+                            .whitespace_normal()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.sync_message.clone()),
+                    )
+                },
+            )
             .when(self.refresh_visible(), |this| {
                 this.child(self.render_refresh_action("sidebar-refresh", collapsed, !collapsed, cx))
             })

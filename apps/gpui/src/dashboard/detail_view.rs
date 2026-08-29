@@ -274,12 +274,33 @@ impl Dashboard {
                     )
                     .child(
                         h_flex()
+                            .debug_selector(|| "issue-detail-metadata-row".to_owned())
                             .flex_wrap()
                             .min_w_0()
                             .gap_2()
-                            .child(self.pill(issue_type, cx))
+                            .child(
+                                h_flex()
+                                    .debug_selector(|| "issue-detail-type-surface".to_owned())
+                                    .h_6()
+                                    .min_w_0()
+                                    .items_center()
+                                    .px_2()
+                                    .rounded_full()
+                                    .bg(cx.theme().secondary)
+                                    .text_sm()
+                                    .text_color(cx.theme().secondary_foreground)
+                                    .child(issue_type),
+                            )
                             .child(self.status_control(Some(&issue), status, cx))
-                            .child(self.priority_badge(priority, cx)),
+                            .child(
+                                h_flex()
+                                    .debug_selector(|| "issue-detail-priority-surface".to_owned())
+                                    .h_6()
+                                    .min_w_0()
+                                    .items_center()
+                                    .text_sm()
+                                    .child(self.priority_badge(priority, cx)),
+                            ),
                     )
                     .when(
                         matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }),
@@ -759,7 +780,9 @@ impl Dashboard {
             _ => "Issue status · editing unavailable in this view".to_owned(),
         };
         let trigger = Button::new("issue-status-trigger")
+            .debug_selector(|| "issue-status-trigger".to_owned())
             .secondary()
+            .with_size(Size::Small)
             .dropdown_caret(true)
             .label(status)
             .disabled(trigger_disabled)
