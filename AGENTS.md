@@ -18,6 +18,7 @@
 6. Keep native macOS (arm64/x86_64) and Linux x86_64 Wayland as the supported desktop runtime targets; X11 and Windows remain out of scope.
 7. Keep Jira writes limited to explicit, user-confirmed comment creation, assignment changes, and status transitions through dedicated write ports. Dispatch each confirmed write once and prohibit automatic Jira writes, retries, deletes, other issue edits, and attachment mutations; local cache, preferences, notification state, and sync cursors may be written locally.
 8. Keep commits granular and Mitchell-style: each commit should contain one coherent, independently reviewable and validated change where practical, use an imperative conventional-style subject, avoid unrelated cleanup or mixed milestones, and separate policy or documentation-only changes when sensible. Sol is the only agent that creates commits; Luna workers must not commit.
+9. Every UI regression fix or new UI behavior must add deterministic local macOS automation coverage where feasible. Keep these tests local-only (never CI), fixture-based, free of Jira credentials, network access, and Jira writes, and use semantic accessibility assertions for behavior and identity plus bounded visual assertions for geometry and rendering.
 
 ## Agent skills
 
