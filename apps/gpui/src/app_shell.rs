@@ -8,10 +8,13 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
-    TitleBar,
+    TitleBar, WindowExt as _,
     button::Button,
     button::ButtonVariants as _,
     checkbox::Checkbox,
+    dialog::{
+        DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+    },
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
@@ -82,13 +85,15 @@ const JIRA_SITE_LABEL: &str = "Jira site";
 const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
 const SCOPED_TOKEN_PLACEHOLDER: &str = "Paste your scoped Jira API token";
 const SCOPED_TOKEN_SCOPES: &str =
-    "For full functionality, select exactly: read:jira-user, read:jira-work, write:jira-work.";
-const KEYRING_STORAGE_COPY: &str = "Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs.";
-const WRITE_SAFETY_COPY: &str = "Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions.";
+    "Required scopes: read:jira-user, read:jira-work, write:jira-work.";
+const KEYRING_STORAGE_COPY: &str = "Stored only in the system keyring—not app data.";
+const UNSAVED_CREDENTIALS_COPY: &str = "Not saved after this session.";
+const WRITE_SAFETY_COPY: &str = "Jira writes always require explicit confirmation.";
 const TOKEN_REENTRY_COPY: &str = "Re-enter your scoped API token and try again.";
 
-const ONBOARDING_MAX_WIDTH_REMS: f32 = 37.5;
-const ONBOARDING_CARD_PADDING_REMS: f32 = 1.0;
+const ONBOARDING_MAX_WIDTH_REMS: f32 = 31.5;
+const ONBOARDING_CARD_PADDING_REMS: f32 = 1.25;
+const ONBOARDING_DIALOG_ACTION_WIDTH_REMS: f32 = 7.0;
 
 fn is_submit_event(event: &InputEvent) -> bool {
     matches!(
@@ -501,6 +506,9 @@ impl AppShell {
                         this.connection_warning = None;
                         let dashboard = Self::dashboard_from_live(session, diagnostics, cx);
                         this.set_dashboard(dashboard, window, cx);
+                        if window.has_active_dialog(cx) {
+                            window.close_dialog(cx);
+                        }
                         cx.notify();
                     });
 
@@ -537,7 +545,7 @@ impl AppShell {
 
     fn labeled_input(
         label: &'static str,
-        help: &'static str,
+        help: Option<&'static str>,
         state: &Entity<InputState>,
         muted_foreground: gpui::Hsla,
     ) -> impl IntoElement {
@@ -545,25 +553,33 @@ impl AppShell {
             .gap_1()
             .child(div().text_sm().font_semibold().child(label))
             .child(Input::new(state).w_full().aria_label(label))
-            .child(div().text_xs().text_color(muted_foreground).child(help))
+            .when_some(help, |this, help| {
+                this.child(div().text_xs().text_color(muted_foreground).child(help))
+            })
     }
 
-    fn render_connection_form(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let layout = layout_for_width(f32::from(window.viewport_size().width));
-        let mobile = layout.is_mobile();
+    fn build_connection_dialog_content(
+        content: DialogContent,
+        view: &Entity<Self>,
+        base_url: &Entity<InputState>,
+        email: &Entity<InputState>,
+        api_token: &Entity<InputState>,
+        cx: &mut gpui::App,
+    ) -> DialogContent {
+        let shell = view.read(cx);
         let readiness = connection_readiness(
-            &self.base_url.read(cx).unmask_value(),
-            &self.email.read(cx).unmask_value(),
-            &self.api_token.read(cx).unmask_value(),
+            &base_url.read(cx).unmask_value(),
+            &email.read(cx).unmask_value(),
+            &api_token.read(cx).unmask_value(),
         );
         let validation_guidance = should_show_validation_guidance(
-            self.connecting,
-            self.validation_attempted,
-            self.user_started_entering,
+            shell.connecting,
+            shell.validation_attempted,
+            shell.user_started_entering,
         )
         .then(|| validation_guidance(readiness))
         .flatten();
-        let error = self.connection_error.as_ref().map(|message| {
+        let error = shell.connection_error.as_ref().map(|message| {
             h_flex()
                 .min_w_0()
                 .w_full()
@@ -582,7 +598,7 @@ impl AppShell {
                 .child(div().flex_shrink_0().font_semibold().child("!"))
                 .child(div().min_w_0().child(message.clone()))
         });
-        let warning = self.connection_warning.as_ref().map(|message| {
+        let warning = shell.connection_warning.as_ref().map(|message| {
             h_flex()
                 .min_w_0()
                 .w_full()
@@ -599,64 +615,32 @@ impl AppShell {
                 .child(div().flex_shrink_0().font_semibold().child("i"))
                 .child(div().min_w_0().child(message.clone()))
         });
+        let remember_copy = if shell.remember_credentials {
+            KEYRING_STORAGE_COPY
+        } else {
+            UNSAVED_CREDENTIALS_COPY
+        };
+        let submit_view = view.clone();
+        let remember_view = view.clone();
 
-        v_flex()
-            .id("connection-form-scroll")
-            .size_full()
-            .bg(cx.theme().background)
-            .when(!mobile, |this| this.items_center())
-            .when(mobile, |this| this.items_start())
-            .overflow_y_scrollbar()
+        content
+            .child(
+                DialogHeader::new()
+                    .p_4()
+                    .pb_0()
+                    .child(DialogTitle::new().child("Connect Jira"))
+                    .child(
+                        DialogDescription::new()
+                            .child("Enter your Jira site, Atlassian email, and scoped API token."),
+                    ),
+            )
             .child(
                 v_flex()
-                    .min_w_0()
-                    .w_full()
-                    .max_w(rems(ONBOARDING_MAX_WIDTH_REMS))
-                    .gap_2()
-                    .p(rems(layout.onboarding_padding() / 16.0))
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap_1()
-                            .px(rems(ONBOARDING_CARD_PADDING_REMS))
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .size_10()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(cx.theme().radius)
-                                            .bg(cx.theme().primary)
-                                            .text_color(cx.theme().primary_foreground)
-                                            .font_bold()
-                                            .child("JD"),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .min_w_0()
-                                            .gap_0p5()
-                                            .child(div().text_xl().font_semibold().child("Connect Jira"))
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Secure workspace connection"),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Loads issues assigned to or watched by your Jira account. No project name is required."),
-                            ),
-                    )
+                    .id("connection-dialog-body")
+                    .debug_selector(|| "onboarding-connect-dialog-body".to_owned())
+                    .px_4()
+                    .pb_4()
+                    .gap_3()
                     .when_some(error, |this, error| this.child(error))
                     .when_some(warning, |this, warning| this.child(warning))
                     .when_some(validation_guidance, |this, guidance| {
@@ -672,100 +656,207 @@ impl AppShell {
                                 .child(guidance),
                         )
                     })
+                    .child(Self::labeled_input(
+                        JIRA_SITE_LABEL,
+                        Some("Use your-team or a full HTTPS Atlassian Cloud URL."),
+                        base_url,
+                        cx.theme().muted_foreground,
+                    ))
+                    .child(Self::labeled_input(
+                        "Atlassian email",
+                        None,
+                        email,
+                        cx.theme().muted_foreground,
+                    ))
                     .child(
                         v_flex()
-                            .min_w_0()
-                            .gap_3()
-                            .p(rems(ONBOARDING_CARD_PADDING_REMS))
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
+                            .gap_1()
+                            .child(div().text_sm().font_semibold().child(SCOPED_TOKEN_LABEL))
                             .child(
-                                h_flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(div().text_xs().font_semibold().text_color(cx.theme().primary).child("Workspace credentials"))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Required")),
-                            )
-                            .child(Self::labeled_input(
-                                JIRA_SITE_LABEL,
-                                "Enter your Jira site name (for example, your-team) or a full HTTPS Atlassian Cloud URL. Cloud ID is discovered automatically.",
-                                &self.base_url,
-                                cx.theme().muted_foreground,
-                            ))
-                            .child(Self::labeled_input(
-                                "Atlassian email",
-                                "Email associated with your Jira account.",
-                                &self.email,
-                                cx.theme().muted_foreground,
-                            ))
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(div().text_sm().font_semibold().child(SCOPED_TOKEN_LABEL))
-                                    .child(
-                                        Input::new(&self.api_token)
-                                            .w_full()
-                                            .mask_toggle()
-                                            .aria_label(SCOPED_TOKEN_LABEL),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Create this token in Atlassian account security settings."),
-                                    )
-                                    .child(div().text_xs().text_color(cx.theme().foreground).child(SCOPED_TOKEN_SCOPES))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(KEYRING_STORAGE_COPY)),
+                                Input::new(api_token)
+                                    .w_full()
+                                    .mask_toggle()
+                                    .aria_label(SCOPED_TOKEN_LABEL),
                             )
                             .child(
-                                v_flex()
-                                    .gap_2()
-                                    .pt_1()
-                                    .child(
-                                        Checkbox::new("remember-jira-login")
-                                            .checked(self.remember_credentials)
-                                            .on_click(cx.listener(|this, checked, _, cx| {
-                                                this.remember_credentials = *checked;
-                                                cx.notify();
-                                            }))
-                                            .aria_label(REMEMBER_CREDENTIALS_LABEL)
-                                            .text_sm()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .w_full()
-                                                    .line_height(relative(1.2))
-                                                    .child(REMEMBER_CREDENTIALS_LABEL),
-                                            ),
-                                    )
-                                    .when_some(self.connection_status.as_ref(), |this, status| {
-                                        this.child(h_flex()
-                                            .id("connection-status")
-                                            .role(Role::Status)
-                                            .aria_label(status.clone())
-                                            .min_w_0()
-                                            .items_center()
-                                            .gap_2()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .when(self.connecting, |this| this.child(Spinner::new().xsmall()))
-                                            .child(div().min_w_0().child(status.clone())))
-                                    })
-                                    .child(
-                                        Button::new("connect-jira")
-                                            .label(if self.connecting { "Connecting…" } else { "Connect" })
-                                            .primary()
-                                            .disabled(self.connecting || !self.connection_enabled || !readiness.is_ready())
-                                            .w_full()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.connect(window, cx);
-                                            })),
-                                    )
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(WRITE_SAFETY_COPY)),
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SCOPED_TOKEN_SCOPES),
                             ),
+                    )
+                    .child(
+                        Checkbox::new("remember-jira-login")
+                            .checked(shell.remember_credentials)
+                            .on_click(move |checked, _, cx| {
+                                remember_view.update(cx, |this, cx| {
+                                    this.remember_credentials = *checked;
+                                    cx.notify();
+                                });
+                            })
+                            .aria_label(REMEMBER_CREDENTIALS_LABEL)
+                            .text_sm()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .w_full()
+                                    .line_height(relative(1.2))
+                                    .child(REMEMBER_CREDENTIALS_LABEL),
+                            ),
+                    )
+                    .when_some(shell.connection_status.as_ref(), |this, status| {
+                        this.child(
+                            h_flex()
+                                .id("connection-status")
+                                .role(Role::Status)
+                                .aria_label(status.clone())
+                                .min_w_0()
+                                .items_center()
+                                .gap_2()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .when(shell.connecting, |this| this.child(Spinner::new().xsmall()))
+                                .child(div().min_w_0().child(status.clone())),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{remember_copy} {WRITE_SAFETY_COPY}")),
                     ),
+            )
+            .child(
+                DialogFooter::new()
+                    .px_4()
+                    .pb_4()
+                    .child(
+                        div().w(rems(ONBOARDING_DIALOG_ACTION_WIDTH_REMS)).child(
+                            DialogClose::new().child(
+                                Button::new("cancel-jira-connection")
+                                    .w_full()
+                                    .label("Cancel")
+                                    .debug_selector(|| {
+                                        "onboarding-connect-dialog-cancel".to_owned()
+                                    })
+                                    .outline(),
+                            ),
+                        ),
+                    )
+                    .child(
+                        Button::new("connect-jira-submit")
+                            .w(rems(ONBOARDING_DIALOG_ACTION_WIDTH_REMS))
+                            .label(if shell.connecting {
+                                "Connecting…"
+                            } else {
+                                "Connect"
+                            })
+                            .primary()
+                            .debug_selector(|| "onboarding-connect-dialog-submit".to_owned())
+                            .disabled(
+                                shell.connecting
+                                    || !shell.connection_enabled
+                                    || !readiness.is_ready(),
+                            )
+                            .on_click(move |_, window, cx| {
+                                submit_view.update(cx, |this, cx| {
+                                    this.connect(window, cx);
+                                });
+                            }),
+                    ),
+            )
+    }
+
+    fn open_connection_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity();
+        let base_url = self.base_url.clone();
+        let email = self.email.clone();
+        let api_token = self.api_token.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let base_url = base_url.clone();
+            let email = email.clone();
+            let api_token = api_token.clone();
+            dialog.p_0().content(move |content, _, cx| {
+                Self::build_connection_dialog_content(
+                    content, &view, &base_url, &email, &api_token, cx,
+                )
+            })
+        });
+    }
+
+    #[cfg(feature = "ui-lab")]
+    pub(crate) fn open_connection_dialog_for_ui_lab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_connection_dialog(window, cx);
+    }
+
+    fn render_connection_form(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout = layout_for_width(f32::from(window.viewport_size().width));
+        let mobile = layout.is_mobile();
+        let connecting = self.connecting;
+
+        let welcome = v_flex()
+            .min_w_0()
+            .gap_3()
+            .items_center()
+            .px(rems(ONBOARDING_CARD_PADDING_REMS))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex()
+                            .size_10()
+                            .items_center()
+                            .justify_center()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().primary)
+                            .text_color(cx.theme().primary_foreground)
+                            .font_bold()
+                            .child("JD"),
+                    )
+                    .child(div().text_xl().font_semibold().child("Connect Jira")),
+            )
+            .child(
+                div()
+                    .max_w(rems(29.0))
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .text_center()
+                    .child("Sync issues assigned to or watched by your Jira account."),
+            )
+            .child(
+                Button::new("connect-jira")
+                    .label("Connect Jira")
+                    .primary()
+                    .debug_selector(|| "onboarding-connect-trigger".to_owned())
+                    .disabled(connecting)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_connection_dialog(window, cx);
+                    })),
+            );
+
+        v_flex()
+            .id("connection-form-scroll")
+            .size_full()
+            .bg(cx.theme().background)
+            .when(!mobile, |this| this.items_center())
+            .when(!mobile, |this| this.justify_center())
+            .when(mobile, |this| this.items_start())
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .w_full()
+                    .max_w(rems(ONBOARDING_MAX_WIDTH_REMS))
+                    .gap_4()
+                    .p(rems(layout.onboarding_padding() / 16.0))
+                    .child(welcome),
             )
     }
 }
@@ -779,6 +870,7 @@ impl Render for AppShell {
         );
         Theme::global_mut(cx).notification.width = notification_width;
         let notification_layer = Root::render_notification_layer(window, cx);
+        let dialog_layer = Root::render_dialog_layer(window, cx);
         let content = if let Some(dashboard) = &self.dashboard {
             v_flex()
                 .min_w_0()
@@ -819,6 +911,7 @@ impl Render for AppShell {
             .min_w_0()
             .child(TitleBar::new())
             .child(content)
+            .when_some(dialog_layer, |this, layer| this.child(layer))
             .when_some(notification_layer, |this, layer| this.child(layer))
             .into_any_element()
     }
@@ -830,10 +923,10 @@ mod tests {
         AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, JIRA_SITE_LABEL,
         KEYRING_STORAGE_COPY, REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL,
         SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
-        VERIFYING_SCOPED_TOKEN_STATUS, WRITE_SAFETY_COPY, connection_failure_copy,
-        connection_readiness, is_submit_event, notification_width_for_viewport,
-        save_credentials_warning, saved_login_warning, should_check_saved_credentials,
-        should_show_validation_guidance, validation_guidance,
+        UNSAVED_CREDENTIALS_COPY, VERIFYING_SCOPED_TOKEN_STATUS, WRITE_SAFETY_COPY,
+        connection_failure_copy, connection_readiness, is_submit_event,
+        notification_width_for_viewport, save_credentials_warning, saved_login_warning,
+        should_check_saved_credentials, should_show_validation_guidance, validation_guidance,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
@@ -1017,12 +1110,13 @@ mod tests {
         assert!(SCOPED_TOKEN_SCOPES.contains("write:jira-work"));
         assert_eq!(
             KEYRING_STORAGE_COPY,
-            "Jira permissions still apply. When enabled, the token is stored only in the system keyring—never in SQLite, preferences, or logs."
+            "Stored only in the system keyring—not app data."
         );
         assert_eq!(
             WRITE_SAFETY_COPY,
-            "Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions."
+            "Jira writes always require explicit confirmation."
         );
+        assert_eq!(UNSAVED_CREDENTIALS_COPY, "Not saved after this session.");
         assert!(CHECKING_KEYRING_STATUS.contains("Checking system keyring"));
         assert!(VERIFYING_SCOPED_TOKEN_STATUS.contains("verifying scoped token"));
     }
