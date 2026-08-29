@@ -3,8 +3,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    px, relative,
+    Pixels, Rems, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, relative, rems,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
@@ -29,11 +29,21 @@ use crate::dashboard::{Dashboard, DashboardEvent};
 use crate::diagnostics::DiagnosticsSink;
 use crate::responsive::layout_for_width;
 
-const NOTIFICATION_SIDE_MARGIN: f32 = 16.0;
+const NOTIFICATION_SIDE_MARGIN_REMS: f32 = 1.0;
 
-fn notification_width_for_viewport(viewport_width: f32, preferred_width: f32) -> f32 {
-    let available_width = (viewport_width - NOTIFICATION_SIDE_MARGIN * 2.0).max(0.0);
-    preferred_width.min(available_width)
+fn notification_width_for_viewport(
+    viewport_width: Pixels,
+    preferred_width: Rems,
+    rem_size: Pixels,
+) -> Pixels {
+    let side_margin = rems(NOTIFICATION_SIDE_MARGIN_REMS).to_pixels(rem_size);
+    let available_width = (viewport_width.as_f32() - (side_margin * 2.0).as_f32()).max(0.0);
+    Pixels::from(
+        preferred_width
+            .to_pixels(rem_size)
+            .as_f32()
+            .min(available_width),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,8 +83,8 @@ const KEYRING_STORAGE_COPY: &str = "Jira permissions still apply. When enabled, 
 const WRITE_SAFETY_COPY: &str = "Read access is required. Writes are limited to explicitly confirmed comments, assignee changes, and status transitions.";
 const TOKEN_REENTRY_COPY: &str = "Re-enter your scoped API token and try again.";
 
-const ONBOARDING_MAX_WIDTH: f32 = 600.0;
-const ONBOARDING_CARD_PADDING: f32 = 16.0;
+const ONBOARDING_MAX_WIDTH_REMS: f32 = 37.5;
+const ONBOARDING_CARD_PADDING_REMS: f32 = 1.0;
 
 fn is_submit_event(event: &InputEvent) -> bool {
     matches!(
@@ -192,7 +202,7 @@ pub struct AppShell {
     validation_attempted: bool,
     user_started_entering: bool,
     connecting: bool,
-    notification_width: Pixels,
+    notification_width: Rems,
     input_subscriptions: Vec<Subscription>,
     api_token_subscription: Option<Subscription>,
     appearance_preference: AppearancePreference,
@@ -238,7 +248,7 @@ impl AppShell {
             validation_attempted: false,
             user_started_entering: false,
             connecting: preview,
-            notification_width: cx.theme().notification.width,
+            notification_width: rems(cx.theme().notification.width / window.rem_size()),
             input_subscriptions: Vec::new(),
             api_token_subscription: None,
             appearance_preference: AppearancePreference::System,
@@ -298,7 +308,7 @@ impl AppShell {
             validation_attempted: false,
             user_started_entering: false,
             connecting: false,
-            notification_width: cx.theme().notification.width,
+            notification_width: rems(cx.theme().notification.width / window.rem_size()),
             input_subscriptions: Vec::new(),
             api_token_subscription: None,
             appearance_preference,
@@ -599,14 +609,14 @@ impl AppShell {
                 v_flex()
                     .min_w_0()
                     .w_full()
-                    .max_w(px(ONBOARDING_MAX_WIDTH))
+                    .max_w(rems(ONBOARDING_MAX_WIDTH_REMS))
                     .gap_2()
-                    .p(px(layout.onboarding_padding()))
+                    .p(rems(layout.onboarding_padding() / 16.0))
                     .child(
                         v_flex()
                             .min_w_0()
                             .gap_1()
-                            .px(px(ONBOARDING_CARD_PADDING))
+                            .px(rems(ONBOARDING_CARD_PADDING_REMS))
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -664,7 +674,7 @@ impl AppShell {
                         v_flex()
                             .min_w_0()
                             .gap_3()
-                            .p(px(ONBOARDING_CARD_PADDING))
+                            .p(rems(ONBOARDING_CARD_PADDING_REMS))
                             .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().border)
@@ -761,10 +771,11 @@ impl AppShell {
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let notification_width = notification_width_for_viewport(
-            window.viewport_size().width.as_f32(),
-            self.notification_width.as_f32(),
+            window.viewport_size().width,
+            self.notification_width,
+            window.rem_size(),
         );
-        Theme::global_mut(cx).notification.width = px(notification_width);
+        Theme::global_mut(cx).notification.width = notification_width;
         let notification_layer = Root::render_notification_layer(window, cx);
         let content = if let Some(dashboard) = &self.dashboard {
             v_flex()
@@ -824,7 +835,7 @@ mod tests {
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
-    use gpui::WindowAppearance;
+    use gpui::{WindowAppearance, px, rems};
     use gpui_component::ThemeMode;
     use gpui_component::input::InputEvent;
 
@@ -1058,14 +1069,29 @@ mod tests {
 
     #[test]
     fn notification_width_preserves_margins_on_narrow_viewports() {
-        assert_eq!(notification_width_for_viewport(320.0, 382.0), 288.0);
-        assert_eq!(notification_width_for_viewport(360.0, 382.0), 328.0);
-        assert_eq!(notification_width_for_viewport(390.0, 382.0), 358.0);
+        assert_eq!(
+            notification_width_for_viewport(px(320.0), rems(382.0 / 16.0), px(16.0)),
+            px(288.0)
+        );
+        assert_eq!(
+            notification_width_for_viewport(px(360.0), rems(382.0 / 16.0), px(16.0)),
+            px(328.0)
+        );
+        assert_eq!(
+            notification_width_for_viewport(px(390.0), rems(382.0 / 16.0), px(16.0)),
+            px(358.0)
+        );
     }
 
     #[test]
     fn notification_width_caps_at_preferred_desktop_width() {
-        assert_eq!(notification_width_for_viewport(1_024.0, 382.0), 382.0);
-        assert_eq!(notification_width_for_viewport(1_024.0, 300.0), 300.0);
+        assert_eq!(
+            notification_width_for_viewport(px(1_024.0), rems(382.0 / 16.0), px(16.0)),
+            px(382.0)
+        );
+        assert_eq!(
+            notification_width_for_viewport(px(1_024.0), rems(300.0 / 16.0), px(16.0)),
+            px(300.0)
+        );
     }
 }

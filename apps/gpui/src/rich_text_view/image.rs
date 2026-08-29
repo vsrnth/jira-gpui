@@ -8,7 +8,7 @@ use super::{
 use gpui::{
     AnyElement, ElementId, ImageSource as GpuiImageSource, InteractiveElement as _,
     IntoElement as _, ObjectFit, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, div, img, px,
+    StyledImage as _, div, img, rems,
 };
 use gpui_component::{h_flex, spinner::Spinner, v_flex};
 
@@ -25,7 +25,7 @@ pub(super) fn render_image(
         .min_w_0()
         .max_w_full()
         .gap_2()
-        .rounded(px(6.))
+        .rounded(rems(0.375))
         .border_1()
         .border_color(context.palette.border)
         // The ID is internal GPUI bookkeeping, never rendered or exposed as an
@@ -51,7 +51,7 @@ pub(super) fn render_image(
             frame = frame.child(
                 img(GpuiImageSource::Image(image.clone()))
                     .max_w_full()
-                    .max_h(px(MAX_IMAGE_HEIGHT))
+                    .max_h(rems(MAX_IMAGE_HEIGHT / 16.0))
                     .object_fit(ObjectFit::Contain)
                     // ImageSource::Image is already in memory, but GPUI may
                     // still decode it on the render path. Keep that fallback
@@ -88,7 +88,7 @@ pub(super) fn render_image(
         Some(RichImageRenderState::Loading) => {
             frame = frame.child(
                 h_flex()
-                    .min_h(px(72.))
+                    .min_h(rems(4.5))
                     .items_center()
                     .justify_center()
                     .gap_2()
@@ -100,7 +100,7 @@ pub(super) fn render_image(
             let unavailable = format!("Image unavailable · {name}");
             frame = frame.child(
                 div()
-                    .min_h(px(72.))
+                    .min_h(rems(4.5))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -123,7 +123,7 @@ pub(super) fn render_image(
             let unavailable = format!("Image unavailable · {name}");
             frame = frame.child(
                 div()
-                    .min_h(px(72.))
+                    .min_h(rems(4.5))
                     .flex()
                     .items_center()
                     .justify_center()

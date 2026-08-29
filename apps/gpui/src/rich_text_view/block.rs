@@ -7,7 +7,7 @@ use super::{
     HeadingSize, MAX_RENDER_CHILDREN, RenderBudget, RenderContext, RichBlock, RichListItem,
     heading_size, omitted_element, panel_accent, presentation_placeholder_label,
 };
-use gpui::{AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, px};
+use gpui::{AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, rems};
 use gpui_component::{StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
 
 pub(super) fn render_block(
@@ -45,7 +45,7 @@ pub(super) fn render_block(
                 .min_w_0()
                 .gap_1()
                 .p_3()
-                .rounded(px(4.))
+                .rounded(rems(0.25))
                 .border_1()
                 .border_color(context.palette.border)
                 .bg(context.palette.code_surface)
@@ -78,7 +78,7 @@ pub(super) fn render_block(
                 .min_w_0()
                 .gap_2()
                 .p_3()
-                .rounded(px(4.))
+                .rounded(rems(0.25))
                 .border_1()
                 .border_color(accent)
                 .bg(accent.opacity(0.08))
@@ -143,7 +143,7 @@ fn render_list(
                 .gap_2()
                 .child(
                     div()
-                        .w(px(18.))
+                        .w(rems(1.125))
                         .flex_shrink_0()
                         .text_sm()
                         .text_color(context.palette.muted)

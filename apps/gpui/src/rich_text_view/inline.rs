@@ -8,7 +8,7 @@ use super::{
 use gpui::{
     AnyElement, ElementId, FontStyle, FontWeight, HighlightStyle, IntoElement as _,
     ParentElement as _, SharedString, StrikethroughStyle, Styled as _, StyledText, UnderlineStyle,
-    div, px,
+    div, rems,
 };
 use gpui_component::{Icon, IconName, StyledExt as _, button::Button, h_flex};
 use std::ops::Range;
@@ -251,7 +251,7 @@ fn render_inline(
                         .font_family("monospace")
                         .bg(context.palette.code_surface)
                         .px_1()
-                        .rounded(px(2.)),
+                        .rounded(rems(0.125)),
                     RichMark::Emphasis => element.italic(),
                     RichMark::Strong => element.font_bold(),
                     RichMark::Strike => element.line_through(),
@@ -303,7 +303,7 @@ fn render_attachment_card(
         .compact()
         .outline()
         .max_w_full()
-        .max_w(px(520.))
+        .max_w(rems(32.5))
         .overflow_hidden()
         .icon(IconName::File)
         .label(filename)
@@ -314,11 +314,11 @@ fn render_attachment_card(
 
     h_flex()
         .min_w_0()
-        .max_w(px(520.))
+        .max_w(rems(32.5))
         .gap_1()
         .px_1()
-        .py(px(1.))
-        .rounded(px(3.))
+        .py(rems(0.0625))
+        .rounded(rems(0.1875))
         .border_1()
         .border_color(context.palette.border)
         .bg(context.palette.code_surface)
