@@ -545,6 +545,7 @@ impl AppShell {
 
     fn labeled_input(
         label: &'static str,
+        accessibility_id: &'static str,
         help: Option<&'static str>,
         state: &Entity<InputState>,
         muted_foreground: gpui::Hsla,
@@ -552,7 +553,12 @@ impl AppShell {
         v_flex()
             .gap_1()
             .child(div().text_sm().font_semibold().child(label))
-            .child(Input::new(state).w_full().aria_label(label))
+            .child(
+                Input::new(state)
+                    .w_full()
+                    .accessibility_id(accessibility_id)
+                    .aria_label(label),
+            )
             .when_some(help, |this, help| {
                 this.child(div().text_xs().text_color(muted_foreground).child(help))
             })
@@ -594,6 +600,8 @@ impl AppShell {
                 .text_sm()
                 .text_color(cx.theme().danger)
                 .id("connection-error")
+                .accessibility_id("onboarding-error")
+                .aria_label(message.clone())
                 .role(Role::Alert)
                 .child(div().flex_shrink_0().font_semibold().child("!"))
                 .child(div().min_w_0().child(message.clone()))
@@ -612,6 +620,10 @@ impl AppShell {
                 .py_2()
                 .text_sm()
                 .text_color(cx.theme().warning)
+                .id("connection-warning")
+                .accessibility_id("onboarding-warning")
+                .aria_label(message.clone())
+                .role(Role::Status)
                 .child(div().flex_shrink_0().font_semibold().child("i"))
                 .child(div().min_w_0().child(message.clone()))
         });
@@ -638,6 +650,9 @@ impl AppShell {
                 v_flex()
                     .id("connection-dialog-body")
                     .debug_selector(|| "onboarding-connect-dialog-body".to_owned())
+                    .accessibility_id("onboarding-connect-dialog-body")
+                    .role(Role::Group)
+                    .aria_label("Jira connection details")
                     .px_4()
                     .pb_4()
                     .gap_3()
@@ -647,6 +662,7 @@ impl AppShell {
                         this.child(
                             h_flex()
                                 .id("connection-validation-guidance")
+                                .accessibility_id("onboarding-validation")
                                 .role(Role::Status)
                                 .aria_label(guidance.clone())
                                 .min_w_0()
@@ -658,12 +674,14 @@ impl AppShell {
                     })
                     .child(Self::labeled_input(
                         JIRA_SITE_LABEL,
+                        "onboarding-jira-site",
                         Some("Use your-team or a full HTTPS Atlassian Cloud URL."),
                         base_url,
                         cx.theme().muted_foreground,
                     ))
                     .child(Self::labeled_input(
                         "Atlassian email",
+                        "onboarding-atlassian-email",
                         None,
                         email,
                         cx.theme().muted_foreground,
@@ -676,6 +694,7 @@ impl AppShell {
                                 Input::new(api_token)
                                     .w_full()
                                     .mask_toggle()
+                                    .accessibility_id("onboarding-api-token")
                                     .aria_label(SCOPED_TOKEN_LABEL),
                             )
                             .child(
@@ -708,6 +727,7 @@ impl AppShell {
                         this.child(
                             h_flex()
                                 .id("connection-status")
+                                .accessibility_id("onboarding-status")
                                 .role(Role::Status)
                                 .aria_label(status.clone())
                                 .min_w_0()
@@ -736,6 +756,7 @@ impl AppShell {
                                 Button::new("cancel-jira-connection")
                                     .w_full()
                                     .label("Cancel")
+                                    .accessibility_id("onboarding-connect-dialog-cancel")
                                     .debug_selector(|| {
                                         "onboarding-connect-dialog-cancel".to_owned()
                                     })
@@ -752,6 +773,7 @@ impl AppShell {
                                 "Connect"
                             })
                             .primary()
+                            .accessibility_id("onboarding-connect-dialog-submit")
                             .debug_selector(|| "onboarding-connect-dialog-submit".to_owned())
                             .disabled(
                                 shell.connecting
@@ -834,6 +856,7 @@ impl AppShell {
                 Button::new("connect-jira")
                     .label("Connect Jira")
                     .primary()
+                    .accessibility_id("onboarding-connect-trigger")
                     .debug_selector(|| "onboarding-connect-trigger".to_owned())
                     .disabled(connecting)
                     .on_click(cx.listener(|this, _, window, cx| {

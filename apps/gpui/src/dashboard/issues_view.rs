@@ -100,6 +100,7 @@ impl Dashboard {
                             .child(
                                 Input::new(&input)
                                     .cleanable(true)
+                                    .accessibility_id("issue-search")
                                     .aria_label("Issue key or summary")
                                     .min_w_0()
                                     .w_full(),
@@ -108,6 +109,7 @@ impl Dashboard {
                                 Button::new("search-jira")
                                     .compact()
                                     .w_full()
+                                    .accessibility_id("issue-search-submit")
                                     .label(if lookup_loading {
                                         "Searching Jira…"
                                     } else {
@@ -130,6 +132,7 @@ impl Dashboard {
                             .child(
                                 Input::new(&input)
                                     .cleanable(true)
+                                    .accessibility_id("issue-search")
                                     .aria_label("Issue key or summary")
                                     .min_w_0()
                                     .flex_1(),
@@ -137,6 +140,7 @@ impl Dashboard {
                             .child(
                                 Button::new("search-jira")
                                     .compact()
+                                    .accessibility_id("issue-search-submit")
                                     .label(if lookup_loading {
                                         "Searching Jira…"
                                     } else {
@@ -420,12 +424,14 @@ impl Dashboard {
         let issue_id = issue.id.clone();
         let keyboard_issue_id = issue.id.clone();
         let debug_issue_id = issue.id.clone();
+        let accessibility_issue_id = format!("issue-row-{}", issue.key);
         let is_remote_result = !label.is_empty();
         let mobile = layout.is_mobile();
         let accessible_label = format!("Open {}: {}", issue.key, issue.summary);
         div()
             .id(format!("issue-row-{}", issue.id))
             .debug_selector(move || format!("issue-row-{debug_issue_id}"))
+            .accessibility_id(accessibility_issue_id)
             .role(gpui::accesskit::Role::Button)
             .aria_label(accessible_label)
             .aria_selected(selected)

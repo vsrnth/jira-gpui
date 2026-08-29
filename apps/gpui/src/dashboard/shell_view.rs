@@ -1,13 +1,158 @@
 use super::*;
+use std::rc::Rc;
+
 use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
 use gpui_component::{
-    Sizable as _,
+    Collapsible as _, Sizable as _,
     sidebar::{
-        Sidebar, SidebarCollapsible, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem,
+        Sidebar, SidebarCollapsible, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenuItem,
         SidebarToggleButton,
     },
     tooltip::Tooltip,
 };
+
+type SidebarActivation = Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>;
+
+#[derive(Clone)]
+struct AccessibleSidebarMenu {
+    items: Vec<AccessibleSidebarMenuItem>,
+    collapsed: bool,
+}
+
+impl AccessibleSidebarMenu {
+    fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            collapsed: false,
+        }
+    }
+
+    fn child(mut self, child: AccessibleSidebarMenuItem) -> Self {
+        self.items.push(child);
+        self
+    }
+}
+
+impl gpui_component::Collapsible for AccessibleSidebarMenu {
+    fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
+    }
+}
+
+impl SidebarItem for AccessibleSidebarMenu {
+    fn render(
+        self,
+        id: impl Into<gpui::ElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> impl IntoElement {
+        let id = id.into();
+        v_flex()
+            .gap_2()
+            .children(self.items.into_iter().enumerate().map(|(index, item)| {
+                item.collapsed(self.collapsed)
+                    .render(format!("{id}-{index}"), window, cx)
+                    .into_any_element()
+            }))
+    }
+}
+
+#[derive(Clone)]
+struct AccessibleSidebarMenuItem {
+    item: SidebarMenuItem,
+    accessibility_id: &'static str,
+    accessible_label: String,
+    selected: bool,
+    activation: SidebarActivation,
+    /// Settings retains the component's own pointer handler so it can open its submenu. Its
+    /// wrapper handles AXPress and keyboard activation separately, preventing duplicate section
+    /// dispatch when a driver presses the semantic node.
+    component_handles_pointer: bool,
+}
+
+impl AccessibleSidebarMenuItem {
+    fn new(
+        item: SidebarMenuItem,
+        accessibility_id: &'static str,
+        accessible_label: impl Into<String>,
+        selected: bool,
+        activation: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self {
+            item,
+            accessibility_id,
+            accessible_label: accessible_label.into(),
+            selected,
+            activation: Rc::new(activation),
+            component_handles_pointer: false,
+        }
+    }
+
+    fn component_handles_pointer(mut self, handles_pointer: bool) -> Self {
+        self.component_handles_pointer = handles_pointer;
+        self
+    }
+}
+
+impl gpui_component::Collapsible for AccessibleSidebarMenuItem {
+    fn is_collapsed(&self) -> bool {
+        self.item.is_collapsed()
+    }
+
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.item = self.item.collapsed(collapsed);
+        self
+    }
+}
+
+impl SidebarItem for AccessibleSidebarMenuItem {
+    fn render(
+        self,
+        id: impl Into<gpui::ElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> impl IntoElement {
+        let item = self.item.render(id, window, cx).into_any_element();
+        let accessibility_id = self.accessibility_id;
+        let accessible_label = self.accessible_label;
+        let selected = self.selected;
+        let activation = self.activation;
+        let component_handles_pointer = self.component_handles_pointer;
+        let mut wrapper = div()
+            .id(accessibility_id)
+            .debug_selector(move || accessibility_id.to_owned())
+            .accessibility_id(accessibility_id)
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(accessible_label)
+            .aria_selected(selected)
+            .tab_index(0)
+            .on_key_down({
+                let activation = activation.clone();
+                move |event, window, cx| {
+                    if is_activation_key(event) {
+                        window.prevent_default();
+                        activation(&gpui::ClickEvent::default(), window, cx);
+                    }
+                }
+            })
+            .child(item);
+
+        if component_handles_pointer {
+            wrapper = wrapper
+                .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+                    activation(&gpui::ClickEvent::default(), window, cx)
+                });
+        } else {
+            wrapper = wrapper.on_click(move |event, window, cx| activation(event, window, cx));
+        }
+        wrapper
+    }
+}
 
 struct MobileNavItem {
     id: &'static str,
@@ -38,7 +183,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let collapsed = effective_sidebar_is_rail(layout, self.sidebar_collapsed);
-        let menu = SidebarMenu::new()
+        let menu = AccessibleSidebarMenu::new()
             .child(self.sidebar_menu_item(
                 "Issues",
                 self.issues.len(),
@@ -265,48 +410,86 @@ impl Dashboard {
         selected: bool,
         section: Section,
         cx: &mut Context<Self>,
-    ) -> SidebarMenuItem {
+    ) -> AccessibleSidebarMenuItem {
         let icon = match section {
             Section::Issues => IconName::LayoutDashboard,
             Section::Updates => IconName::Bell,
             Section::Team => IconName::CircleUser,
             Section::Settings => IconName::Settings2,
         };
-        SidebarMenuItem::new(label)
-            .icon(icon)
-            .active(selected)
-            .when(count > 0, |this| {
-                this.suffix(move |_, _| div().text_xs().child(count.to_string()))
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
+        let accessibility_id = match section {
+            Section::Issues => "nav-issues",
+            Section::Updates => "nav-updates",
+            Section::Team => "nav-team",
+            Section::Settings => "nav-settings",
+        };
+        let accessible_label = match section {
+            Section::Issues => format!("Issues · {count} issues"),
+            Section::Updates => format!("Local updates · {count} unread"),
+            Section::Team => format!("Team tracker · {count} in-progress tickets"),
+            Section::Settings => "Settings".to_owned(),
+        };
+        AccessibleSidebarMenuItem::new(
+            SidebarMenuItem::new(label)
+                .icon(icon)
+                .active(selected)
+                .when(count > 0, |this| {
+                    this.suffix(move |_, _| div().text_xs().child(count.to_string()))
+                }),
+            accessibility_id,
+            accessible_label,
+            selected,
+            cx.listener(move |this, _, _, cx| {
                 this.activate_section(section, cx);
-            }))
+            }),
+        )
     }
 
-    fn settings_sidebar_menu_item(&self, cx: &mut Context<Self>) -> SidebarMenuItem {
-        SidebarMenuItem::new("Settings")
-            .icon(IconName::Settings2)
-            .active(self.section == Section::Settings)
-            .click_to_open(true)
-            .default_open(self.section == Section::Settings)
-            .children([
-                self.settings_category_menu_item("Appearance", SettingsCategory::Appearance, cx),
-                self.settings_category_menu_item("Issue scope", SettingsCategory::IssueScope, cx),
-                self.settings_category_menu_item("Team tracker", SettingsCategory::TeamTracker, cx),
-                self.settings_category_menu_item(
-                    "Desktop notifications",
-                    SettingsCategory::DesktopNotifications,
-                    cx,
-                ),
-                self.settings_category_menu_item(
-                    "Saved Jira login",
-                    SettingsCategory::SavedJiraLogin,
-                    cx,
-                ),
-            ])
-            .on_click(cx.listener(|this, _, _, cx| {
+    fn settings_sidebar_menu_item(&self, cx: &mut Context<Self>) -> AccessibleSidebarMenuItem {
+        AccessibleSidebarMenuItem::new(
+            SidebarMenuItem::new("Settings")
+                .icon(IconName::Settings2)
+                .active(self.section == Section::Settings)
+                .click_to_open(true)
+                .default_open(self.section == Section::Settings)
+                .children([
+                    self.settings_category_menu_item(
+                        "Appearance",
+                        SettingsCategory::Appearance,
+                        cx,
+                    ),
+                    self.settings_category_menu_item(
+                        "Issue scope",
+                        SettingsCategory::IssueScope,
+                        cx,
+                    ),
+                    self.settings_category_menu_item(
+                        "Team tracker",
+                        SettingsCategory::TeamTracker,
+                        cx,
+                    ),
+                    self.settings_category_menu_item(
+                        "Desktop notifications",
+                        SettingsCategory::DesktopNotifications,
+                        cx,
+                    ),
+                    self.settings_category_menu_item(
+                        "Saved Jira login",
+                        SettingsCategory::SavedJiraLogin,
+                        cx,
+                    ),
+                ])
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.activate_section(Section::Settings, cx);
+                })),
+            "nav-settings",
+            "Settings",
+            self.section == Section::Settings,
+            cx.listener(|this, _, _, cx| {
                 this.activate_section(Section::Settings, cx);
-            }))
+            }),
+        )
+        .component_handles_pointer(true)
     }
 
     fn settings_category_menu_item(

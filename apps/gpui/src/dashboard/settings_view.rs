@@ -111,10 +111,14 @@ impl Dashboard {
                 .map(|(index, preference)| {
                     let label = preference.label();
                     let id = format!("appearance-{}", label.to_lowercase());
+                    let debug_id = id.clone();
                     let dashboard = dashboard.clone();
                     div()
                         .id(id.clone())
-                        .debug_selector(move || id.clone())
+                        .debug_selector(move || debug_id.clone())
+                        .accessibility_id(id.clone())
+                        .role(gpui::accesskit::Role::Group)
+                        .aria_label(format!("{label} appearance"))
                         .child(
                             Toggle::new(format!("appearance-toggle-{}", label.to_lowercase()))
                                 .checked(checks[index])
