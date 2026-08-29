@@ -10,8 +10,11 @@ publish.workspace = true
 jira-application = { path = "../application" }
 jira-domain = { path = "../domain" }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 notify-rust.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications.workspace = true
 
 [dev-dependencies]
 futures-lite.workspace = true

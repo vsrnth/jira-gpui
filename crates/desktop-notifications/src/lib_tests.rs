@@ -303,6 +303,208 @@ fn retained_handles_are_fifo_bounded_and_live_until_eviction() {
     assert_eq!(drops.load(Ordering::SeqCst), MAX_RETAINED_HANDLES + 1);
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacTestHandle;
+
+#[cfg(target_os = "macos")]
+impl RetainedNotificationHandle for MacTestHandle {}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacTestBackend {
+    calls: Arc<AtomicUsize>,
+    result: Mutex<Option<Result<BackendNotification, BackendError>>>,
+}
+
+#[cfg(target_os = "macos")]
+impl NotificationBackend for MacTestBackend {
+    fn show<'a>(&'a self, _notification: notify_rust::Notification) -> BackendFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let mut result = self
+                .result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            result
+                .take()
+                .unwrap_or_else(|| panic!("macOS test backend called more than once"))
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacTestAuthorization {
+    request_calls: Arc<AtomicUsize>,
+    settings_calls: Arc<AtomicUsize>,
+    request_granted: bool,
+    authorized: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl MacAuthorization for MacTestAuthorization {
+    fn request<'a>(&'a self) -> MacAuthorizationFuture<'a> {
+        self.request_calls.fetch_add(1, Ordering::SeqCst);
+        let granted = self.request_granted;
+        Box::pin(async move { Ok(granted) })
+    }
+
+    fn is_authorized<'a>(&'a self) -> MacAuthorizationFuture<'a> {
+        self.settings_calls.fetch_add(1, Ordering::SeqCst);
+        let authorized = self.authorized;
+        Box::pin(async move { Ok(authorized) })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn successful_mac_backend_notification() -> BackendNotification {
+    BackendNotification {
+        handle: Box::new(MacTestHandle),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_test_port(
+    backend_result: Result<BackendNotification, BackendError>,
+    request_granted: bool,
+    authorized: bool,
+) -> (
+    FreedesktopNotificationPort,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let backend_calls = Arc::new(AtomicUsize::new(0));
+    let request_calls = Arc::new(AtomicUsize::new(0));
+    let settings_calls = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(MacTestBackend {
+        calls: backend_calls.clone(),
+        result: Mutex::new(Some(backend_result)),
+    });
+    let authorization = Arc::new(MacTestAuthorization {
+        request_calls: request_calls.clone(),
+        settings_calls: settings_calls.clone(),
+        request_granted,
+        authorized,
+    });
+    (
+        FreedesktopNotificationPort::with_backend(backend, authorization),
+        backend_calls,
+        request_calls,
+        settings_calls,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_test_path_requests_authorization_once_then_shows_once() {
+    let (port, backend_calls, request_calls, settings_calls) =
+        mac_test_port(Ok(successful_mac_backend_notification()), true, false);
+
+    let receipt = futures_lite::future::block_on(port.test_notification())
+        .expect("granted test notification should succeed");
+
+    assert_ne!(receipt.notification_id(), 0);
+    assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(request_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settings_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(port.retained_handle_count(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_test_path_denied_authorization_shows_zero() {
+    let (port, backend_calls, request_calls, settings_calls) =
+        mac_test_port(Ok(successful_mac_backend_notification()), false, false);
+
+    let error = futures_lite::future::block_on(port.test_notification())
+        .expect_err("denied test notification should fail");
+
+    assert_eq!(error.kind(), ErrorKind::Notification);
+    assert_eq!(error.message(), FAILURE_MESSAGE);
+    assert_eq!(backend_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(request_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settings_calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_automatic_authorized_delivery_shows_once_without_auth_request() {
+    let (port, backend_calls, request_calls, settings_calls) =
+        mac_test_port(Ok(successful_mac_backend_notification()), false, true);
+    let result = futures_lite::future::block_on(port.deliver(NotificationRequest {
+        event: event(UpdateKind::IssueUpdated),
+    }));
+
+    assert!(result.is_ok());
+    assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(request_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(settings_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(port.retained_handle_count(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_automatic_denied_delivery_shows_zero() {
+    let (port, backend_calls, request_calls, settings_calls) =
+        mac_test_port(Ok(successful_mac_backend_notification()), true, false);
+    let error = futures_lite::future::block_on(port.deliver(NotificationRequest {
+        event: event(UpdateKind::IssueUpdated),
+    }))
+    .expect_err("denied automatic notification should fail");
+
+    assert_eq!(error.kind(), ErrorKind::Notification);
+    assert_eq!(error.message(), FAILURE_MESSAGE);
+    assert_eq!(backend_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(request_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(settings_calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_automatic_backend_failure_is_redacted_and_not_retried() {
+    let (port, backend_calls, request_calls, settings_calls) =
+        mac_test_port(Err(BackendError), false, true);
+    let error = futures_lite::future::block_on(port.deliver(NotificationRequest {
+        event: event(UpdateKind::IssueAddedToView),
+    }))
+    .expect_err("backend failure should fail");
+
+    assert_eq!(error.kind(), ErrorKind::Notification);
+    assert_eq!(error.message(), FAILURE_MESSAGE);
+    assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(request_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(settings_calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_receipts_are_nonzero_and_wrap_without_zero() {
+    let counter = AtomicU32::new(u32::MAX);
+    assert_eq!(allocate_nonzero_receipt(&counter), u32::MAX);
+    assert_eq!(allocate_nonzero_receipt(&counter), 1);
+
+    let zero_counter = AtomicU32::new(0);
+    assert_eq!(allocate_nonzero_receipt(&zero_counter), 1);
+    assert_eq!(allocate_nonzero_receipt(&zero_counter), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_event_content_uses_only_issue_key_and_fixed_kind_label() {
+    let event = event(UpdateKind::CommentAdded {
+        comment_id: "comment-secret".into(),
+        author: Some(AccountId::new("author-secret").expect("valid account ID")),
+        excerpt: "summary-secret".into(),
+    });
+    let notification = event_notification(&event);
+
+    assert_eq!(notification.summary, "PROJ-1");
+    assert_eq!(notification.body, "Comment added");
+    assert!(!notification.body.contains("secret"));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn notification_builders_are_persistent_and_not_transient() {
@@ -323,7 +525,7 @@ fn notification_builders_are_persistent_and_not_transient() {
     );
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn non_linux_delivery_is_redacted_unavailable() {
     use jira_application::NotificationPort;
@@ -337,7 +539,7 @@ fn non_linux_delivery_is_redacted_unavailable() {
     assert_eq!(error.message(), FAILURE_MESSAGE);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn non_linux_test_notification_is_redacted_unavailable() {
     let port = FreedesktopNotificationPort::new();

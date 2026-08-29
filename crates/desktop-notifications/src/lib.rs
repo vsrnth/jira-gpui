@@ -1,6 +1,8 @@
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use std::collections::VecDeque;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     future::Future,
     pin::Pin,
@@ -11,7 +13,7 @@ use jira_application::{
     ApplicationError, ErrorKind, NotificationPort, NotificationRequest, PortFuture,
 };
 use jira_domain::UpdateEvent;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use jira_domain::UpdateKind;
 
 #[cfg(target_os = "linux")]
@@ -25,11 +27,14 @@ pub const TEST_NOTIFICATION_SUMMARY: &str = "Jira Desk notification test";
 pub const TEST_NOTIFICATION_BODY: &str =
     "If this appears, Jira Desk desktop notifications are working.";
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const MAX_RETAINED_HANDLES: usize = 32;
 
-/// A local receipt from the Freedesktop notification service. This is not a
-/// Jira or database identifier; it is the daemon-assigned notification ID.
+/// A local receipt for a notification accepted by the desktop service.
+///
+/// Linux receipts contain the daemon-assigned Freedesktop notification ID.
+/// macOS receipts are process-local correlation tokens; the operating system's
+/// string request ID is intentionally never exposed through this contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DesktopNotificationReceipt {
     notification_id: u32,
@@ -42,11 +47,11 @@ impl DesktopNotificationReceipt {
 }
 
 /// A private handle abstraction lets deterministic tests exercise retention
-/// without constructing a live D-Bus handle.
-#[cfg(target_os = "linux")]
+/// without constructing a live desktop-service handle.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 trait RetainedNotificationHandle: Send + std::fmt::Debug {}
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug)]
 struct NotifyRustHandle {
     // The handle is intentionally held for its Drop/lifetime behavior; callers
@@ -55,20 +60,20 @@ struct NotifyRustHandle {
     handle: notify_rust::NotificationHandle,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl RetainedNotificationHandle for NotifyRustHandle {}
 
 /// A strictly bounded FIFO retention queue. Retaining notification handles is
 /// required by some desktop environments to keep the D-Bus connection alive;
 /// evicting the oldest handle prevents an unbounded connection leak.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 #[derive(Debug)]
 struct BoundedRetention<T> {
     capacity: usize,
     items: VecDeque<T>,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 impl<T> BoundedRetention<T> {
     fn new(capacity: usize) -> Self {
         Self {
@@ -93,36 +98,38 @@ impl<T> BoundedRetention<T> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug)]
 struct BackendNotification {
+    #[cfg(target_os = "linux")]
     notification_id: u32,
     handle: Box<dyn RetainedNotificationHandle>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug)]
 struct BackendError;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 type BackendFuture<'a> =
     Pin<Box<dyn Future<Output = Result<BackendNotification, BackendError>> + Send + 'a>>;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 trait NotificationBackend: Send + Sync + std::fmt::Debug {
     fn show<'a>(&'a self, notification: notify_rust::Notification) -> BackendFuture<'a>;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Default)]
 struct NotifyRustBackend;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl NotificationBackend for NotifyRustBackend {
     fn show<'a>(&'a self, notification: notify_rust::Notification) -> BackendFuture<'a> {
         Box::pin(async move {
             let handle = notification.show_async().await.map_err(|_| BackendError)?;
             Ok(BackendNotification {
+                #[cfg(target_os = "linux")]
                 notification_id: handle.id(),
                 handle: Box::new(NotifyRustHandle { handle }),
             })
@@ -130,21 +137,68 @@ impl NotificationBackend for NotifyRustBackend {
     }
 }
 
-#[cfg_attr(not(target_os = "linux"), derive(Default))]
-#[derive(Debug, Clone)]
-pub struct FreedesktopNotificationPort {
-    #[cfg(target_os = "linux")]
-    retained_handles: Arc<Mutex<BoundedRetention<Box<dyn RetainedNotificationHandle>>>>,
-    #[cfg(target_os = "linux")]
-    backend: Arc<dyn NotificationBackend>,
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacAuthorizationError;
+
+#[cfg(target_os = "macos")]
+type MacAuthorizationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<bool, MacAuthorizationError>> + Send + 'a>>;
+
+#[cfg(target_os = "macos")]
+trait MacAuthorization: Send + Sync + std::fmt::Debug {
+    fn request<'a>(&'a self) -> MacAuthorizationFuture<'a>;
+    fn is_authorized<'a>(&'a self) -> MacAuthorizationFuture<'a>;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default)]
+struct NotifyRustAuthorization;
+
+#[cfg(target_os = "macos")]
+impl MacAuthorization for NotifyRustAuthorization {
+    fn request<'a>(&'a self) -> MacAuthorizationFuture<'a> {
+        Box::pin(async {
+            notify_rust::request_auth()
+                .await
+                .map_err(|_| MacAuthorizationError)
+        })
+    }
+
+    fn is_authorized<'a>(&'a self) -> MacAuthorizationFuture<'a> {
+        Box::pin(async {
+            let settings = notify_rust::get_notification_settings()
+                .await
+                .map_err(|_| MacAuthorizationError)?;
+            Ok(matches!(
+                settings.authorization_status,
+                mac_usernotifications::AuthorizationStatus::Authorized
+                    | mac_usernotifications::AuthorizationStatus::Provisional
+                    | mac_usernotifications::AuthorizationStatus::Ephemeral
+            ))
+        })
+    }
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), derive(Default))]
+#[derive(Debug, Clone)]
+pub struct FreedesktopNotificationPort {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    retained_handles: Arc<Mutex<BoundedRetention<Box<dyn RetainedNotificationHandle>>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    backend: Arc<dyn NotificationBackend>,
+    #[cfg(target_os = "macos")]
+    authorization: Arc<dyn MacAuthorization>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Default for FreedesktopNotificationPort {
     fn default() -> Self {
         Self {
             retained_handles: Arc::new(Mutex::new(BoundedRetention::new(MAX_RETAINED_HANDLES))),
             backend: Arc::new(NotifyRustBackend),
+            #[cfg(target_os = "macos")]
+            authorization: Arc::new(NotifyRustAuthorization),
         }
     }
 }
@@ -161,13 +215,13 @@ impl FreedesktopNotificationPort {
     }
 
     /// Send a fixed local diagnostic notification without contacting Jira or
-    /// mutating the local cache. The daemon ID is returned only after the
-    /// Freedesktop service accepts the request.
+    /// mutating the local cache. The receipt is returned only after the
+    /// desktop service accepts the request.
     pub fn test_notification<'a>(&'a self) -> PortFuture<'a, DesktopNotificationReceipt> {
         Box::pin(async move { self.send_test_notification().await })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn retain_handle(&self, handle: Box<dyn RetainedNotificationHandle>) {
         let mut retained_handles = match self.retained_handles.lock() {
             Ok(guard) => guard,
@@ -184,7 +238,19 @@ impl FreedesktopNotificationPort {
         }
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, target_os = "macos"))]
+    fn with_backend(
+        backend: Arc<dyn NotificationBackend>,
+        authorization: Arc<dyn MacAuthorization>,
+    ) -> Self {
+        Self {
+            retained_handles: Arc::new(Mutex::new(BoundedRetention::new(MAX_RETAINED_HANDLES))),
+            backend,
+            authorization,
+        }
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     fn retained_handle_count(&self) -> usize {
         let retained_handles = match self.retained_handles.lock() {
             Ok(guard) => guard,
@@ -205,7 +271,7 @@ fn notification_content(event: &UpdateEvent) -> (String, String) {
     (event.issue_key.to_string(), body)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn event_kind_label(kind: &UpdateKind) -> &'static str {
     match kind {
         UpdateKind::IssueAddedToView => "Issue added",
@@ -242,6 +308,17 @@ fn event_notification(event: &UpdateEvent) -> notify_rust::Notification {
     notification
 }
 
+#[cfg(target_os = "macos")]
+fn event_notification(event: &UpdateEvent) -> notify_rust::Notification {
+    let summary = event.issue_key.to_string();
+    let body = event_kind_label(&event.kind);
+    notify_rust::Notification::new()
+        .summary(&summary)
+        .body(body)
+        .timeout(notify_rust::Timeout::Never)
+        .finalize()
+}
+
 #[cfg(target_os = "linux")]
 fn test_notification() -> notify_rust::Notification {
     let mut notification = notify_rust::Notification::new();
@@ -257,6 +334,38 @@ fn test_notification() -> notify_rust::Notification {
     notification
 }
 
+#[cfg(target_os = "macos")]
+fn test_notification() -> notify_rust::Notification {
+    notify_rust::Notification::new()
+        .summary(TEST_NOTIFICATION_SUMMARY)
+        .body(TEST_NOTIFICATION_BODY)
+        .timeout(notify_rust::Timeout::Never)
+        .finalize()
+}
+
+#[cfg(target_os = "macos")]
+static NEXT_MAC_RECEIPT: AtomicU32 = AtomicU32::new(1);
+
+#[cfg(target_os = "macos")]
+fn allocate_nonzero_receipt(counter: &AtomicU32) -> u32 {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        let next = if current == u32::MAX {
+            1
+        } else if current == 0 {
+            2
+        } else {
+            current + 1
+        };
+        if counter
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return if current == 0 { 1 } else { current };
+        }
+    }
+}
+
 impl FreedesktopNotificationPort {
     async fn deliver_notification(&self, event: UpdateEvent) -> Result<(), ApplicationError> {
         #[cfg(target_os = "linux")]
@@ -270,7 +379,26 @@ impl FreedesktopNotificationPort {
             Ok(())
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            if !self
+                .authorization
+                .is_authorized()
+                .await
+                .map_err(|_| notification_error())?
+            {
+                return Err(notification_error());
+            }
+            let result = self
+                .backend
+                .show(event_notification(&event))
+                .await
+                .map_err(|_| notification_error())?;
+            self.retain_handle(result.handle);
+            Ok(())
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = (self, event);
             Err(notification_error())
@@ -292,7 +420,29 @@ impl FreedesktopNotificationPort {
             Ok(receipt)
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            if !self
+                .authorization
+                .request()
+                .await
+                .map_err(|_| notification_error())?
+            {
+                return Err(notification_error());
+            }
+            let result = self
+                .backend
+                .show(test_notification())
+                .await
+                .map_err(|_| notification_error())?;
+            let receipt = DesktopNotificationReceipt {
+                notification_id: allocate_nonzero_receipt(&NEXT_MAC_RECEIPT),
+            };
+            self.retain_handle(result.handle);
+            Ok(receipt)
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = self;
             Err(notification_error())
