@@ -4,7 +4,6 @@ use super::updates_view::update_filter_is_selected;
 use super::*;
 use crate::app_shell::AppearancePreference;
 use crate::presentation::{UpdateViewModel, normalized_issue_key};
-use crate::responsive::sidebar_width_for_viewport;
 use crate::sample_data::{sample_issues, sample_users};
 use gpui::VisualTestContext;
 use gpui_component::searchable_list::SearchableListDelegate as _;
@@ -1414,6 +1413,12 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.update(|window, cx| window.draw(cx).clear(cx));
 
+    let main_bounds = visual
+        .debug_bounds("dashboard-main")
+        .expect("dashboard main should be laid out");
+    let panes_bounds = visual
+        .debug_bounds("team-panes")
+        .expect("team panes should be laid out");
     let table_bounds = visual
         .debug_bounds("team-table")
         .expect("team table should be laid out");
@@ -1423,6 +1428,15 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
     assert!(
         table_bounds.size.height > px(300.),
         "team table body collapsed to header: {table_bounds:?}"
+    );
+    assert!(
+        panes_bounds.origin.x >= main_bounds.origin.x
+            && panes_bounds.origin.y >= main_bounds.origin.y
+            && panes_bounds.origin.x + panes_bounds.size.width
+                <= main_bounds.origin.x + main_bounds.size.width + px(1.)
+            && panes_bounds.origin.y + panes_bounds.size.height
+                <= main_bounds.origin.y + main_bounds.size.height + px(1.),
+        "team panes escape dashboard main: panes={panes_bounds:?}, main={main_bounds:?}"
     );
     assert!(
         detail_bounds.origin.y + detail_bounds.size.height <= px(900.) + px(1.),
@@ -1718,6 +1732,7 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.update(|window, cx| window.draw(cx).clear(cx));
 
     let pane = visual
         .debug_bounds("team-detail")
@@ -1725,6 +1740,10 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
     let details = visual
         .debug_bounds("issue-detail-details")
         .expect("native details surface should be laid out");
+    assert!(
+        (f32::from(pane.size.width) - TEAM_DETAIL_INITIAL_WIDTH).abs() <= 1.,
+        "team detail pane should retain its intended initial width: {pane:?}"
+    );
     assert!(
         details.origin.x >= pane.origin.x
             && details.origin.y >= pane.origin.y
@@ -2089,25 +2108,30 @@ fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
     ] {
         let mode = team_table_mode_for_width(width);
         for sidebar_collapsed in [false, true] {
-            let clamped = clamped_team_detail_width(
-                DETAIL_SIDEBAR_DEFAULT_WIDTH,
+            let constraints = team_pane_constraints(
+                TEAM_DETAIL_INITIAL_WIDTH,
                 width,
                 layout,
                 mode,
                 sidebar_collapsed,
             );
-            let content = width
-                - sidebar_width_for_viewport(layout, sidebar_collapsed, width)
-                - 2. * layout.list_padding();
-            let table_min = team_table_min_width(mode, layout);
-            assert!(clamped >= 0.);
-            assert!(clamped + TEAM_DETAIL_RESIZE_HANDLE_WIDTH + table_min <= content + 0.01);
-            assert!(clamped <= content / 2. + 0.01);
+            assert!(constraints.available_width >= 0.);
+            assert!(constraints.table_min_width >= 0.);
+            assert!(
+                constraints.table_min_width + constraints.detail_min_width
+                    <= constraints.available_width + 0.01
+            );
+            assert!(constraints.detail_min_width <= constraints.detail_max_width + 0.01);
+            assert!(constraints.detail_max_width <= constraints.available_width / 2. + 0.01);
+            assert!(
+                constraints.table_max_width + constraints.detail_min_width
+                    <= constraints.available_width + 0.01
+            );
             if width == 1_200. && !sidebar_collapsed {
-                assert_eq!(clamped, 356.);
+                assert_eq!(constraints.initial_detail_width, 364.);
             }
             if width == 1_370. {
-                assert_eq!(clamped, DETAIL_SIDEBAR_DEFAULT_WIDTH);
+                assert_eq!(constraints.initial_detail_width, TEAM_DETAIL_INITIAL_WIDTH);
             }
         }
     }

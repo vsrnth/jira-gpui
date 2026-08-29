@@ -477,15 +477,8 @@ impl Render for Dashboard {
         self.ensure_team_table(window, cx);
         let viewport_width = f32::from(window.viewport_size().width);
         let layout = layout_for_width(viewport_width);
-        let table_mode = team_table_mode_for_width(f32::from(window.viewport_size().width));
         if !layout.is_mobile() {
-            self.detail_sidebar_width = px(clamped_team_detail_width(
-                f32::from(self.detail_sidebar_width),
-                f32::from(window.viewport_size().width),
-                layout,
-                table_mode,
-                self.sidebar_collapsed,
-            ));
+            self.ensure_team_panes_state(cx);
         }
         let content = match self.section {
             Section::Issues => self.render_issues(layout, cx).into_any_element(),
@@ -493,7 +486,8 @@ impl Render for Dashboard {
             Section::Team => self
                 .render_team(
                     layout,
-                    team_table_mode_for_width(f32::from(window.viewport_size().width)),
+                    team_table_mode_for_width(viewport_width),
+                    viewport_width,
                     cx,
                 )
                 .into_any_element(),

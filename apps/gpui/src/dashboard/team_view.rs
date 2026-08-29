@@ -1,7 +1,7 @@
 use super::*;
 
 const DETAIL_SIDEBAR_MIN_WIDTH: f32 = 320.;
-pub(super) const TEAM_DETAIL_RESIZE_HANDLE_WIDTH: f32 = 8.;
+pub(super) const TEAM_DETAIL_INITIAL_WIDTH: f32 = 480.;
 pub(super) const TEAM_DENSE_TABLE_WIDTH: f32 = 596.;
 const TEAM_WIDE_TABLE_WIDTH: f32 = 1_190.;
 const TEAM_WIDE_TABLE_MIN_VIEWPORT: f32 = 1_920.;
@@ -31,29 +31,50 @@ pub(super) fn team_table_min_width(mode: TeamTableMode, layout: LayoutMode) -> f
     }
 }
 
-pub(super) fn clamped_team_detail_width(
-    requested: f32,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TeamPaneConstraints {
+    pub(super) available_width: f32,
+    pub(super) table_min_width: f32,
+    pub(super) table_max_width: f32,
+    pub(super) detail_min_width: f32,
+    pub(super) detail_max_width: f32,
+    pub(super) initial_detail_width: f32,
+}
+
+pub(super) fn team_pane_constraints(
+    requested_detail_width: f32,
     viewport_width: f32,
     layout: LayoutMode,
     table_mode: TeamTableMode,
     sidebar_collapsed: bool,
-) -> f32 {
-    let content_width = (viewport_width
+) -> TeamPaneConstraints {
+    let available_width = (viewport_width
         - crate::responsive::sidebar_width_for_viewport(layout, sidebar_collapsed, viewport_width)
         - 2. * layout.list_padding())
     .max(0.);
     let table_min_width = team_table_min_width(table_mode, layout);
-    let max_width = ((content_width - TEAM_DETAIL_RESIZE_HANDLE_WIDTH - table_min_width).max(0.))
-        .min(content_width / 2.);
-    let min_width = DETAIL_SIDEBAR_MIN_WIDTH.min(max_width);
-    requested.clamp(min_width, max_width)
-}
+    // A desktop viewport normally has room for both minimums. Bound the
+    // native panel floor at very small or transitional viewports so a
+    // malformed min..max range can never reach gpui-component.
+    let bounded_table_min_width = table_min_width.min(available_width);
+    let detail_max_width = (available_width - bounded_table_min_width)
+        .max(0.)
+        .min(available_width / 2.);
+    let detail_min_width = DETAIL_SIDEBAR_MIN_WIDTH
+        .min(available_width)
+        .min(detail_max_width);
+    let table_max_width = (available_width - detail_min_width)
+        .max(bounded_table_min_width)
+        .min(available_width);
+    let initial_detail_width = requested_detail_width.clamp(detail_min_width, detail_max_width);
 
-struct DetailSidebarResize;
-
-impl Render for DetailSidebarResize {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
+    TeamPaneConstraints {
+        available_width,
+        table_min_width: bounded_table_min_width,
+        table_max_width,
+        detail_min_width,
+        detail_max_width,
+        initial_detail_width,
     }
 }
 
@@ -62,6 +83,7 @@ impl Dashboard {
         &self,
         layout: LayoutMode,
         table_mode: TeamTableMode,
+        viewport_width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mobile = layout.is_mobile();
@@ -142,6 +164,7 @@ impl Dashboard {
             .child(
                 h_flex()
                     .h_full()
+                    .w_full()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
@@ -167,6 +190,7 @@ impl Dashboard {
                             )
                             .into_any_element()
                     } else {
+                        let team_table =
                         if matches!(table_mode, TeamTableMode::Cards) {
                             v_flex()
                                 .id("team-table")
@@ -380,58 +404,74 @@ impl Dashboard {
                                     )
                                 })
                                 .into_any_element()
-                        }
-                    })
-                    .when(!mobile, |this| {
-                        this.child(
+                        };
+                        if mobile {
+                            team_table
+                        } else {
+                            let constraints = team_pane_constraints(
+                                TEAM_DETAIL_INITIAL_WIDTH,
+                                viewport_width,
+                                layout,
+                                table_mode,
+                                self.sidebar_collapsed,
+                            );
+                            let state = self
+                                .team_panes_state
+                                .as_ref()
+                                .expect("team panes state should be initialized for desktop");
+                            // gpui-component's resizable API requires native pixel ranges;
+                            // the surrounding dashboard layout remains rem-based.
                             div()
-                                .id("team-detail-resize-handle")
+                                .id("team-panes")
+                                .debug_selector(|| "team-panes".to_owned())
                                 .h_full()
-                                .w_2()
-                                .flex_shrink_0()
-                                .cursor(gpui::CursorStyle::ResizeColumn)
-                                .hover(|style| style.bg(cx.theme().muted))
-                                .on_drag(DetailSidebarResize, |_, _, _, cx| {
-                                    cx.new(|_| DetailSidebarResize)
-                                }),
-                        )
-                        .child(
-                            v_flex()
-                                .id("team-detail")
-                                .h_full()
+                                .w_full()
                                 .flex_1()
                                 .min_h_0()
                                 .min_w_0()
-                                .debug_selector(|| "team-detail".to_owned())
-                                .w(self.detail_sidebar_width)
-                                .flex_shrink_0()
-                                .p_4()
-                                .gap_2()
-                                .overflow_x_hidden()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .child(self.issue_detail(layout, cx)),
-                        )
-                    })
-                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<DetailSidebarResize>, window, cx| {
-                        let viewport_width = f32::from(window.viewport_size().width);
-                        let layout = layout_for_width(viewport_width);
-                        let table_mode = team_table_mode_for_width(viewport_width);
-                        let container_right = event.bounds.right();
-                        let requested = container_right - event.event.position.x;
-                        let clamped = clamped_team_detail_width(
-                            f32::from(requested),
-                            viewport_width,
-                            layout,
-                            table_mode,
-                            this.sidebar_collapsed,
-                        );
-                        let clamped = px(clamped);
-                        if clamped != this.detail_sidebar_width {
-                            this.detail_sidebar_width = clamped;
-                            cx.notify();
+                                .child(
+                                    h_resizable("team-panes-group")
+                                        .with_state(state)
+                                        .child(
+                                            resizable_panel()
+                                                .size(px(
+                                                    constraints.available_width
+                                                        - constraints.initial_detail_width,
+                                                ))
+                                                .size_range(
+                                                    px(constraints.table_min_width)
+                                                        ..px(constraints.table_max_width),
+                                                )
+                                                .child(team_table),
+                                        )
+                                        .child(
+                                            resizable_panel()
+                                                .size(px(constraints.initial_detail_width))
+                                                .size_range(
+                                                    px(constraints.detail_min_width)
+                                                        ..px(constraints.detail_max_width),
+                                                )
+                                                .flex_none()
+                                                .child(
+                                                    v_flex()
+                                                        .id("team-detail")
+                                                        .h_full()
+                                                        .w_full()
+                                                        .min_h_0()
+                                                        .min_w_0()
+                                                        .debug_selector(|| "team-detail".to_owned())
+                                                        .p_4()
+                                                        .gap_2()
+                                                        .overflow_x_hidden()
+                                                        .border_1()
+                                                        .border_color(cx.theme().border)
+                                                        .child(self.issue_detail(layout, cx)),
+                                                ),
+                                        ),
+                                )
+                                .into_any_element()
                         }
-                    })),
+                    })
             )
     }
 }

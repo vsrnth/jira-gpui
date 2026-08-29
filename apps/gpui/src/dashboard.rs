@@ -5,13 +5,14 @@ use time::UtcOffset;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems,
+    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, rems,
 };
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, Theme, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, StyledExt as _, Theme,
+    WindowExt as _,
     button::Button,
     button::ButtonVariants as _,
     combobox::{Combobox, ComboboxEvent, ComboboxState},
@@ -84,8 +85,8 @@ mod updates_view;
 #[cfg(test)]
 use crate::presentation::issue_views_for_filter;
 #[cfg(test)]
-use team_view::{TEAM_DETAIL_RESIZE_HANDLE_WIDTH, team_table_min_width};
-use team_view::{TeamTableMode, clamped_team_detail_width, team_table_mode_for_width};
+use team_view::{TEAM_DETAIL_INITIAL_WIDTH, team_pane_constraints};
+use team_view::{TeamTableMode, team_table_mode_for_width};
 
 #[cfg(test)]
 use crate::presentation::FeedbackCertainty;
@@ -123,8 +124,6 @@ fn safe_detail_error(error: &ApplicationError) -> OutcomeCopy {
 fn safe_lookup_error(error: &ApplicationError) -> OutcomeCopy {
     read_error_copy(ReadSurface::Lookup, error.kind())
 }
-
-const DETAIL_SIDEBAR_DEFAULT_WIDTH: f32 = 480.;
 
 fn is_activation_key(event: &KeyDownEvent) -> bool {
     !event.is_held
@@ -758,6 +757,8 @@ pub struct Dashboard {
     team_feedback: TeamFeedback,
     team_task: Option<gpui::Task<()>>,
     team_age_task: Option<gpui::Task<()>>,
+    team_panes_state: Option<Entity<ResizableState>>,
+    team_panes_subscription: Option<Subscription>,
     /// Fixture dashboards use a fixed clock; live dashboards resolve the clock at refresh time.
     team_clock: Option<jira_domain::Timestamp>,
     /// Fixture dashboards render all timestamps in UTC; live dashboards retain local time.
@@ -788,7 +789,6 @@ pub struct Dashboard {
     search_input: Option<Entity<InputState>>,
     search_subscriptions: Vec<Subscription>,
     detail_state: DetailState,
-    detail_sidebar_width: Pixels,
     detail_epoch: RequestEpoch<RequestSource, IssueId>,
     detail_task: Option<gpui::Task<()>>,
     selected_image_states: RichImageRenderStates,
@@ -825,6 +825,16 @@ pub struct Dashboard {
 impl EventEmitter<DashboardEvent> for Dashboard {}
 
 impl Dashboard {
+    fn ensure_team_panes_state(&mut self, cx: &mut Context<Self>) {
+        if self.team_panes_state.is_some() {
+            return;
+        }
+
+        let state = cx.new(|_| ResizableState::default());
+        self.team_panes_subscription = Some(cx.observe(&state, |_, _, cx| cx.notify()));
+        self.team_panes_state = Some(state);
+    }
+
     #[cfg(any(test, feature = "ui-lab"))]
     pub(crate) fn initialize_appearance_preference(&mut self, preference: AppearancePreference) {
         self.appearance_preference = preference;
@@ -969,6 +979,8 @@ impl Dashboard {
             team_feedback: TeamFeedback::Idle,
             team_task: None,
             team_age_task: None,
+            team_panes_state: None,
+            team_panes_subscription: None,
             team_clock: Some(time::macros::datetime!(2026-08-18 00:00 UTC)),
             timestamp_offset: Some(UtcOffset::UTC),
             team_automatic_polling_paused: false,
@@ -997,7 +1009,6 @@ impl Dashboard {
             search_input: None,
             search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
-            detail_sidebar_width: px(DETAIL_SIDEBAR_DEFAULT_WIDTH),
             detail_epoch: RequestEpoch::default(),
             detail_task: None,
             selected_image_states: RichImageRenderStates::with_context(
@@ -1080,6 +1091,8 @@ impl Dashboard {
             team_feedback: TeamFeedback::Idle,
             team_task: None,
             team_age_task: None,
+            team_panes_state: None,
+            team_panes_subscription: None,
             team_clock: None,
             timestamp_offset: None,
             team_automatic_polling_paused: false,
@@ -1110,7 +1123,6 @@ impl Dashboard {
             search_input: None,
             search_subscriptions: Vec::new(),
             detail_state: DetailState::Empty,
-            detail_sidebar_width: px(DETAIL_SIDEBAR_DEFAULT_WIDTH),
             detail_epoch: RequestEpoch::default(),
             detail_task: None,
             selected_image_states: RichImageRenderStates::with_context(
