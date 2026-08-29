@@ -119,25 +119,37 @@ pub(super) fn render_table(
     budget: &mut RenderBudget,
 ) -> AnyElement {
     let mut rows = Vec::new();
-    for row in table.rows.iter().take(MAX_RENDER_CHILDREN) {
+    for (row_index, row) in table.rows.iter().take(MAX_RENDER_CHILDREN).enumerate() {
         if !budget.enter(depth.saturating_add(1)) {
             break;
         }
         let mut cells = Vec::new();
-        for cell in row.cells.iter().take(MAX_RENDER_CHILDREN) {
+        for (column_index, cell) in row.cells.iter().take(MAX_RENDER_CHILDREN).enumerate() {
             if !budget.enter(depth.saturating_add(2)) {
                 break;
             }
-            cells.push(render_table_cell(cell, context, depth, budget));
+            cells.push(render_table_cell(
+                cell,
+                row_index,
+                column_index,
+                context,
+                depth,
+                budget,
+            ));
         }
         if row.cells.len() > MAX_RENDER_CHILDREN {
             budget.omitted = true;
         }
         rows.push(
             h_flex()
+                .id(format!("rich-text-table-row-{row_index}"))
+                .debug_selector(move || format!("rich-text-table-row-{row_index}"))
+                .accessibility_id(format!("rich-text-table-row-{row_index}"))
+                .role(gpui::accesskit::Role::Row)
                 .min_w_0()
                 .w_full()
                 .gap_1()
+                .items_stretch()
                 .children(cells)
                 .into_any_element(),
         );
@@ -152,7 +164,7 @@ pub(super) fn render_table(
         .id("rich-text-table")
         .debug_selector(|| "rich-text-table".to_owned())
         .accessibility_id("rich-text-table")
-        .role(gpui::accesskit::Role::Group)
+        .role(gpui::accesskit::Role::Table)
         .aria_label("Rich text table")
         .min_w_0()
         .w_full()
@@ -163,11 +175,23 @@ pub(super) fn render_table(
 
 fn render_table_cell(
     cell: &RichTableCell,
+    row_index: usize,
+    column_index: usize,
     context: &RenderContext<'_>,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
+    let cell_id = format!("rich-text-table-cell-{row_index}-{column_index}");
+    let debug_cell_id = cell_id.clone();
     let mut element = v_flex()
+        .id(cell_id.clone())
+        .debug_selector(move || debug_cell_id.clone())
+        .accessibility_id(cell_id)
+        .role(if cell.header {
+            gpui::accesskit::Role::ColumnHeader
+        } else {
+            gpui::accesskit::Role::Cell
+        })
         .min_w_0()
         .flex_1()
         .gap_1()
@@ -332,24 +356,50 @@ mod tests {
         cx.update(gpui_component::init);
         let document = RichTextDocument::new(
             vec![RichBlock::Table(RichTable {
-                rows: vec![RichTableRow {
-                    cells: vec![
-                        RichTableCell {
-                            header: true,
-                            content: vec![RichBlock::Paragraph(vec![RichInline::Text {
-                                text: "Given".to_owned(),
-                                marks: Vec::new(),
-                            }])],
-                        },
-                        RichTableCell {
-                            header: false,
-                            content: vec![RichBlock::Paragraph(vec![RichInline::Text {
-                                text: "Then".to_owned(),
-                                marks: Vec::new(),
-                            }])],
-                        },
-                    ],
-                }],
+                rows: vec![
+                    RichTableRow {
+                        cells: vec![
+                            RichTableCell {
+                                header: true,
+                                content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                                    text: "Given".to_owned(),
+                                    marks: Vec::new(),
+                                }])],
+                            },
+                            RichTableCell {
+                                header: false,
+                                content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                                    text: "Then".to_owned(),
+                                    marks: Vec::new(),
+                                }])],
+                            },
+                        ],
+                    },
+                    RichTableRow {
+                        cells: vec![
+                            RichTableCell {
+                                header: false,
+                                content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                                    text: "Status".to_owned(),
+                                    marks: Vec::new(),
+                                }])],
+                            },
+                            RichTableCell {
+                                header: false,
+                                content: vec![
+                                    RichBlock::Paragraph(vec![RichInline::Text {
+                                        text: "Ready".to_owned(),
+                                        marks: Vec::new(),
+                                    }]),
+                                    RichBlock::Paragraph(vec![RichInline::Text {
+                                        text: "Cache is preloaded".to_owned(),
+                                        marks: Vec::new(),
+                                    }]),
+                                ],
+                            },
+                        ],
+                    },
+                ],
             })],
             false,
         );
@@ -366,5 +416,23 @@ mod tests {
         assert!(table.size.width > gpui::px(0.));
         assert!(table.size.height > gpui::px(0.));
         assert!(table.size.height < gpui::px(240.));
+
+        let short_cell = visual
+            .debug_bounds("rich-text-table-cell-1-0")
+            .expect("short table cell should expose stable geometry");
+        let multiline_cell = visual
+            .debug_bounds("rich-text-table-cell-1-1")
+            .expect("multiline table cell should expose stable geometry");
+        assert!(
+            (f32::from(short_cell.origin.y) - f32::from(multiline_cell.origin.y)).abs() <= 2.,
+            "table cells should share a top edge: short={short_cell:?}, multiline={multiline_cell:?}"
+        );
+        assert!(
+            (f32::from(short_cell.origin.y + short_cell.size.height)
+                - f32::from(multiline_cell.origin.y + multiline_cell.size.height))
+            .abs()
+                <= 2.,
+            "table cells should share a bottom edge: short={short_cell:?}, multiline={multiline_cell:?}"
+        );
     }
 }

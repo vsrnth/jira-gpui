@@ -977,7 +977,7 @@ impl Dashboard {
                         },
                         RichTableCell {
                             header: false,
-                            content: vec![text("Ready")],
+                            content: vec![text("Ready"), text("Cache is preloaded")],
                         },
                     ],
                 },

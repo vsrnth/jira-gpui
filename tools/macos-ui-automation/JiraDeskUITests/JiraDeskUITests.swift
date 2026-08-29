@@ -87,6 +87,24 @@ final class JiraDeskUITests: XCTestCase {
             "rich-text-horizontal-rule"
         )
         _ = try require(app.descendants(matching: .any)["rich-text-table"], "rich-text-table")
+        let shortCell = try require(
+            app.descendants(matching: .any)["rich-text-table-cell-1-0"],
+            "rich-text-table-cell-1-0"
+        )
+        let multilineCell = try require(
+            app.descendants(matching: .any)["rich-text-table-cell-1-1"],
+            "rich-text-table-cell-1-1"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(shortCell.frame.minY - multilineCell.frame.minY),
+            2.0,
+            "uneven table cells should share a top edge"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(shortCell.frame.maxY - multilineCell.frame.maxY),
+            2.0,
+            "uneven table cells should share a bottom edge"
+        )
         _ = try require(app.descendants(matching: .any)["rich-image-fixture-image"], "rich-image-fixture-image")
 
         let loading = app.descendants(matching: .any).matching(
