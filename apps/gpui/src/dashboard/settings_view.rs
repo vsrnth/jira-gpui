@@ -174,7 +174,7 @@ impl Dashboard {
                 this.child(
                     Textarea::new(&input)
                         .w_full()
-                        .h(px(120.))
+                        .h(gpui::rems(7.5))
                         .aria_label("JQL scope")
                         .disabled(!live || self.operation_in_progress),
                 )
@@ -290,7 +290,7 @@ impl Dashboard {
                 this.child(
                     Textarea::new(&input)
                         .w_full()
-                        .h(px(if layout.is_mobile() { 110. } else { 120. }))
+                        .h(gpui::rems(if layout.is_mobile() { 6.875 } else { 7.5 }))
                         .aria_label("Team tracker members")
                         .disabled(!live || task_running || self.operation_in_progress),
                 )
@@ -573,6 +573,8 @@ impl Dashboard {
 
         let settings = Settings::new("jira-desk-settings")
             .with_group_variant(GroupBoxVariant::Outline)
+            // Settings stores its pane width as Pixels, so zero is the only
+            // value that can express the intentionally hidden internal pane.
             .sidebar_width(px(0.))
             .sidebar_size_range(px(0.)..px(0.))
             .pages(vec![
