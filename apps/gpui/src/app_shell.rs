@@ -21,7 +21,10 @@ use gpui_component::{
 
 use jira_http::JiraBaseUrl;
 
-use crate::config::{LiveSession, StartupSelection, live_session_from_manual_configuration};
+use crate::config::{
+    LiveSession, StartupSelection, live_session_from_manual_configuration,
+    normalize_manual_base_url,
+};
 use crate::credential_store::{
     CredentialStoreError, SavedCredentials, load_saved_credentials, save_credentials,
 };
@@ -75,6 +78,7 @@ const REMEMBER_CREDENTIALS_DEFAULT: bool = true;
 const REMEMBER_CREDENTIALS_LABEL: &str = "Remember securely in system keyring";
 const CHECKING_KEYRING_STATUS: &str = "Checking system keyring…";
 const VERIFYING_SCOPED_TOKEN_STATUS: &str = "Resolving Jira site and verifying scoped token…";
+const JIRA_SITE_LABEL: &str = "Jira site";
 const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
 const SCOPED_TOKEN_PLACEHOLDER: &str = "Paste your scoped Jira API token";
 const SCOPED_TOKEN_SCOPES: &str =
@@ -117,7 +121,7 @@ impl ConnectionReadiness {
 fn connection_readiness(base_url: &str, email: &str, api_token: &str) -> ConnectionReadiness {
     let api_token = api_token.trim();
     ConnectionReadiness {
-        base_url: JiraBaseUrl::parse(base_url).is_ok(),
+        base_url: JiraBaseUrl::parse(normalize_manual_base_url(base_url)).is_ok(),
         email: is_plausible_email(email),
         api_token: !api_token.is_empty()
             && api_token
@@ -137,7 +141,7 @@ fn should_show_validation_guidance(
 fn validation_guidance(readiness: ConnectionReadiness) -> Option<String> {
     let mut guidance = Vec::new();
     if !readiness.base_url {
-        guidance.push("Enter an https:// URL ending in .atlassian.net with no path, port, query, or fragment.");
+        guidance.push("Enter a Jira site name (for example, your-team) or an https:// URL ending in .atlassian.net with no path, port, query, or fragment.");
     }
     if !readiness.email {
         guidance.push("Enter a valid Atlassian account email.");
@@ -219,8 +223,7 @@ impl AppShell {
         Theme::sync_system_appearance(Some(window), cx);
         let diagnostics = DiagnosticsSink::from_environment();
         diagnostics.session_started();
-        let base_url =
-            cx.new(|cx| InputState::new(window, cx).placeholder("https://your-team.atlassian.net"));
+        let base_url = cx.new(|cx| InputState::new(window, cx).placeholder("your-team"));
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
         let api_token = Self::new_api_token(window, cx);
 
@@ -287,8 +290,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let base_url =
-            cx.new(|cx| InputState::new(window, cx).placeholder("https://your-team.atlassian.net"));
+        let base_url = cx.new(|cx| InputState::new(window, cx).placeholder("your-team"));
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
         let api_token = Self::new_api_token(window, cx);
         let appearance_preference = match theme {
@@ -448,7 +450,7 @@ impl AppShell {
         if self.connecting {
             return;
         }
-        let base_url = self.base_url.read(cx).unmask_value().to_string();
+        let base_url = normalize_manual_base_url(&self.base_url.read(cx).unmask_value());
         let email = self.email.read(cx).unmask_value().to_string();
         let api_token = self.api_token.read(cx).unmask_value().to_string();
         if !connection_readiness(&base_url, &email, &api_token).is_ready() {
@@ -687,8 +689,8 @@ impl AppShell {
                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Required")),
                             )
                             .child(Self::labeled_input(
-                                "Jira URL",
-                                "Atlassian Cloud URL, including https://. Cloud ID is discovered automatically.",
+                                JIRA_SITE_LABEL,
+                                "Enter your Jira site name (for example, your-team) or a full HTTPS Atlassian Cloud URL. Cloud ID is discovered automatically.",
                                 &self.base_url,
                                 cx.theme().muted_foreground,
                             ))
@@ -825,9 +827,9 @@ impl Render for AppShell {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, KEYRING_STORAGE_COPY,
-        REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL, SCOPED_TOKEN_LABEL,
-        SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
+        AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, JIRA_SITE_LABEL,
+        KEYRING_STORAGE_COPY, REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL,
+        SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
         VERIFYING_SCOPED_TOKEN_STATUS, WRITE_SAFETY_COPY, connection_failure_copy,
         connection_readiness, is_submit_event, notification_width_for_viewport,
         save_credentials_warning, saved_login_warning, should_check_saved_credentials,
@@ -869,6 +871,17 @@ mod tests {
             )
             .is_ready()
         );
+        assert!(
+            connection_readiness(" Example-Team ", "person@example.com", "token-value").is_ready()
+        );
+        assert!(
+            connection_readiness(
+                " Example-Team.ATLASSIAN.NET ",
+                "person@example.com",
+                "token-value",
+            )
+            .is_ready()
+        );
     }
 
     #[test]
@@ -882,6 +895,13 @@ mod tests {
             .is_ready()
         );
         for invalid_url in [
+            "example team",
+            "-example-team",
+            "example-team-",
+            "example.team",
+            "example.atlassian.com",
+            "example.atlassian.net/path",
+            "http://example-team.atlassian.net",
             "https://jira.example.com",
             "https://jira.example.atlassian.net/tenant",
             "https://jira.example.atlassian.net:8443",
@@ -989,6 +1009,7 @@ mod tests {
 
     #[test]
     fn onboarding_uses_scoped_token_copy_and_statuses() {
+        assert_eq!(JIRA_SITE_LABEL, "Jira site");
         assert_eq!(SCOPED_TOKEN_LABEL, "Scoped API token");
         assert_eq!(SCOPED_TOKEN_PLACEHOLDER, "Paste your scoped Jira API token");
         assert!(SCOPED_TOKEN_SCOPES.contains("read:jira-user"));

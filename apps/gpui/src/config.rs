@@ -274,7 +274,7 @@ fn build_live_session<F>(
 where
     F: FnOnce() -> Result<Arc<SqliteStore>, StartupError>,
 {
-    let (base_url, email, api_token) = normalize_manual_inputs(&base_url, &email, &api_token);
+    let (base_url, email, api_token) = trim_inputs(&base_url, &email, &api_token);
 
     // The environment URL is a validated site label only. Authenticated
     // requests are always addressed by the Cloud-ID gateway below.
@@ -308,10 +308,53 @@ fn normalize_manual_inputs(
     api_token: &str,
 ) -> (String, String, String) {
     (
+        normalize_manual_base_url(base_url),
+        email.trim().to_owned(),
+        api_token.trim().to_owned(),
+    )
+}
+
+fn trim_inputs(base_url: &str, email: &str, api_token: &str) -> (String, String, String) {
+    (
         base_url.trim().to_owned(),
         email.trim().to_owned(),
         api_token.trim().to_owned(),
     )
+}
+
+/// Normalizes the site-name shorthand accepted by interactive onboarding.
+///
+/// Full URLs are only trimmed here; `JiraBaseUrl` remains the authority that validates them.
+/// Invalid values are returned unchanged (apart from trimming), so malformed input cannot be
+/// turned into a different valid-looking URL.
+pub(crate) fn normalize_manual_base_url(value: &str) -> String {
+    let value = value.trim();
+    if is_valid_site_label(value) {
+        return format!(
+            "https://{value}.atlassian.net",
+            value = value.to_ascii_lowercase()
+        );
+    }
+
+    let lowercase = value.to_ascii_lowercase();
+    let Some(label) = lowercase.strip_suffix(".atlassian.net") else {
+        return value.to_owned();
+    };
+    if is_valid_site_label(label) {
+        format!("https://{lowercase}")
+    } else {
+        value.to_owned()
+    }
+}
+
+fn is_valid_site_label(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
 }
 
 fn credentials_from_values(
@@ -539,6 +582,52 @@ mod tests {
         assert_eq!(base_url, "https://example.atlassian.net/");
         assert_eq!(email, "developer@example.com");
         assert_eq!(api_token, "api-token");
+    }
+
+    #[test]
+    fn manual_base_url_normalizes_site_name_shorthand() {
+        assert_eq!(
+            normalize_manual_base_url("  My-Team  "),
+            "https://my-team.atlassian.net"
+        );
+        assert_eq!(
+            normalize_manual_base_url("  My-Team.ATLASSIAN.NET  "),
+            "https://my-team.atlassian.net"
+        );
+        assert_eq!(
+            normalize_manual_base_url(" https://My-Team.atlassian.net/ "),
+            "https://My-Team.atlassian.net/"
+        );
+    }
+
+    #[test]
+    fn manual_base_url_does_not_synthesize_invalid_values() {
+        for value in [
+            "",
+            "my team",
+            "-my-team",
+            "my-team-",
+            "my.team",
+            "my.atlassian.com",
+            "my.atlassian.net/path",
+            "my.atlassian.net:443",
+            "user:pass@my.atlassian.net",
+            "my.atlassian.net?query",
+            "my.atlassian.net#fragment",
+            "http://my-team.atlassian.net",
+        ] {
+            assert_eq!(normalize_manual_base_url(value), value, "{value}");
+        }
+    }
+
+    #[test]
+    fn manual_site_label_bounds_are_enforced() {
+        let long_label = "a".repeat(64);
+        assert_eq!(normalize_manual_base_url(&long_label), long_label);
+        assert_eq!(
+            normalize_manual_base_url(&"a".repeat(63)),
+            format!("https://{}.atlassian.net", "a".repeat(63))
+        );
     }
 
     #[test]
