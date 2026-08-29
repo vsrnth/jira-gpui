@@ -22,8 +22,9 @@ impl Dashboard {
                 v_flex()
                     .id("updates-header")
                     .debug_selector(|| "updates-header".to_owned())
-                    .px(px(if mobile { 12. } else { 20. }))
-                    .py(px(8.))
+                    .when(mobile, |this| this.px_3())
+                    .when(!mobile, |this| this.px_5())
+                    .py_2()
                     .flex_shrink_0()
                     .min_w_0()
                     .border_b_1()
@@ -129,8 +130,8 @@ impl Dashboard {
                     .child(
                         v_flex()
                             .w_full()
-                            .max_w(px(1120.))
-                            .p(px(layout.list_padding()))
+                            .max_w(gpui::rems(70.))
+                            .p(gpui::rems(layout.list_padding() / 16.))
                             .gap_3()
                             .children(visible_groups.into_iter().map(|index| {
                                 self.update_group_card(
@@ -215,7 +216,6 @@ impl Dashboard {
                 .min_w_0()
                 .gap_3()
                 .p_2()
-                .cursor_pointer()
                 .hover(|style| style.bg(cx.theme().list_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
