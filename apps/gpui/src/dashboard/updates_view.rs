@@ -45,15 +45,6 @@ impl Dashboard {
                                             .font_semibold()
                                             .child("Change ledger"),
                                     )
-                                    .child(
-                                        div()
-                                            .px_1()
-                                            .rounded_full()
-                                            .bg(cx.theme().secondary)
-                                            .text_xs()
-                                            .text_color(cx.theme().secondary_foreground)
-                                            .child(format!("{unread} unread")),
-                                    ),
                             )
                             .child(
                                 Button::new("mark-all-read")
