@@ -7,8 +7,12 @@ use super::{
     HeadingSize, MAX_RENDER_CHILDREN, RenderBudget, RenderContext, RichBlock, RichListItem,
     heading_size, omitted_element, panel_accent, presentation_placeholder_label,
 };
-use gpui::{AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, rems};
+use gpui::{
+    AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, rems,
+};
 use gpui_component::{StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
+use jira_domain::{HORIZONTAL_RULE_LABEL, RichTable, RichTableCell};
 
 pub(super) fn render_block(
     block: &RichBlock,
@@ -85,7 +89,19 @@ pub(super) fn render_block(
                 .children(render_blocks(content, context, depth, budget))
                 .into_any_element()
         }
+        RichBlock::Table(table) => render_table(table, context, depth, budget),
         RichBlock::Image(image) => render_image(image, context, budget),
+        RichBlock::Placeholder { label } if label == HORIZONTAL_RULE_LABEL => div()
+            .id("rich-text-horizontal-rule")
+            .debug_selector(|| "rich-text-horizontal-rule".to_owned())
+            .accessibility_id("rich-text-horizontal-rule")
+            .role(gpui::accesskit::Role::Group)
+            .aria_label("Horizontal rule")
+            .w_full()
+            .h(rems(0.0625))
+            .my_2()
+            .bg(context.palette.border)
+            .into_any_element(),
         RichBlock::Placeholder { label } => div()
             .min_w_0()
             .text_sm()
@@ -94,6 +110,84 @@ pub(super) fn render_block(
             .child(budget.text(presentation_placeholder_label(label)))
             .into_any_element(),
     }
+}
+
+pub(super) fn render_table(
+    table: &RichTable,
+    context: &RenderContext<'_>,
+    depth: usize,
+    budget: &mut RenderBudget,
+) -> AnyElement {
+    let mut rows = Vec::new();
+    for row in table.rows.iter().take(MAX_RENDER_CHILDREN) {
+        if !budget.enter(depth.saturating_add(1)) {
+            break;
+        }
+        let mut cells = Vec::new();
+        for cell in row.cells.iter().take(MAX_RENDER_CHILDREN) {
+            if !budget.enter(depth.saturating_add(2)) {
+                break;
+            }
+            cells.push(render_table_cell(cell, context, depth, budget));
+        }
+        if row.cells.len() > MAX_RENDER_CHILDREN {
+            budget.omitted = true;
+        }
+        rows.push(
+            h_flex()
+                .min_w_0()
+                .w_full()
+                .gap_1()
+                .children(cells)
+                .into_any_element(),
+        );
+        if budget.omitted {
+            break;
+        }
+    }
+    if table.rows.len() > MAX_RENDER_CHILDREN {
+        budget.omitted = true;
+    }
+    v_flex()
+        .id("rich-text-table")
+        .debug_selector(|| "rich-text-table".to_owned())
+        .accessibility_id("rich-text-table")
+        .role(gpui::accesskit::Role::Group)
+        .aria_label("Rich text table")
+        .min_w_0()
+        .w_full()
+        .gap_1()
+        .children(rows)
+        .into_any_element()
+}
+
+fn render_table_cell(
+    cell: &RichTableCell,
+    context: &RenderContext<'_>,
+    depth: usize,
+    budget: &mut RenderBudget,
+) -> AnyElement {
+    let mut element = v_flex()
+        .min_w_0()
+        .flex_1()
+        .gap_1()
+        .p_2()
+        .border_1()
+        .border_color(context.palette.border)
+        .text_sm();
+    if cell.header {
+        element = element
+            .font_semibold()
+            .bg(context.palette.code_surface.opacity(0.12));
+    }
+    element
+        .children(render_blocks(
+            &cell.content,
+            context,
+            depth.saturating_add(1),
+            budget,
+        ))
+        .into_any_element()
 }
 
 fn render_blocks(
@@ -166,4 +260,111 @@ fn render_list(
         budget.omitted = true;
     }
     v_flex().min_w_0().gap_2().children(rows).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::ImageSource;
+    use crate::rich_text_view::{RichImageRenderStates, RichTextPalette};
+    use gpui::{Context, Render, VisualTestContext, Window};
+    use jira_domain::{RichInline, RichTable, RichTableCell, RichTableRow, RichTextDocument};
+
+    struct RichTextFixture {
+        document: RichTextDocument,
+    }
+
+    impl Render for RichTextFixture {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl gpui::IntoElement {
+            super::super::render_rich_text(
+                &self.document,
+                RichTextPalette::default(),
+                &RichImageRenderStates::default(),
+                0,
+                ImageSource::ResolvedAdf,
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn horizontal_rule_renders_as_a_bounded_divider(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let document = RichTextDocument::new(
+            vec![
+                RichBlock::Heading {
+                    level: 2,
+                    content: vec![RichInline::Text {
+                        text: "Blocked by".to_owned(),
+                        marks: Vec::new(),
+                    }],
+                },
+                RichBlock::Paragraph(vec![RichInline::Text {
+                    text: "This issue is waiting on another ticket.".to_owned(),
+                    marks: Vec::new(),
+                }]),
+                RichBlock::horizontal_rule(),
+            ],
+            false,
+        );
+        assert!(document.blocks[2].is_horizontal_rule());
+
+        let window = cx.open_window(gpui::size(gpui::px(480.), gpui::px(240.)), |_, _| {
+            RichTextFixture { document }
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let divider = visual
+            .debug_bounds("rich-text-horizontal-rule")
+            .expect("horizontal rule should render as a divider");
+        assert!(divider.size.width > gpui::px(0.));
+        assert!(divider.size.height > gpui::px(0.));
+        assert!(divider.size.height <= gpui::px(4.));
+    }
+
+    #[gpui::test]
+    fn table_renders_as_a_bounded_themed_grid(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let document = RichTextDocument::new(
+            vec![RichBlock::Table(RichTable {
+                rows: vec![RichTableRow {
+                    cells: vec![
+                        RichTableCell {
+                            header: true,
+                            content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                                text: "Given".to_owned(),
+                                marks: Vec::new(),
+                            }])],
+                        },
+                        RichTableCell {
+                            header: false,
+                            content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                                text: "Then".to_owned(),
+                                marks: Vec::new(),
+                            }])],
+                        },
+                    ],
+                }],
+            })],
+            false,
+        );
+        let window = cx.open_window(gpui::size(gpui::px(480.), gpui::px(240.)), |_, _| {
+            RichTextFixture { document }
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let table = visual
+            .debug_bounds("rich-text-table")
+            .expect("table should render as a grid");
+        assert!(table.size.width > gpui::px(0.));
+        assert!(table.size.height > gpui::px(0.));
+        assert!(table.size.height < gpui::px(240.));
+    }
 }

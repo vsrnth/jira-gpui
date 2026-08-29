@@ -18,8 +18,8 @@ pub use issue_detail::{
     AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,
 };
 pub use rich_text::{
-    PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
-    RichTextDocument,
+    HORIZONTAL_RULE_LABEL, PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline,
+    RichListItem, RichMark, RichTable, RichTableCell, RichTableRow, RichTextDocument,
 };
 pub use update_event::{
     ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,

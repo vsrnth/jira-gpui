@@ -3,7 +3,9 @@ use crate::adf::{
     MAX_ADF_NODES, MAX_LINK_HREF_BYTES, UNAVAILABLE_IMAGE, UNSUPPORTED_CONTENT, adf_to_plain_text,
     attachment_id_from_inline_card_url, count_file_media_references_inner, parse_adf,
 };
-use jira_domain::{PanelKind, RichBlock, RichInline, RichMark, RichTextDocument};
+use jira_domain::{
+    HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichInline, RichMark, RichTable, RichTextDocument,
+};
 
 #[test]
 fn maps_bulk_changelog_with_bounded_items_and_rejects_bad_timestamps() {
@@ -952,7 +954,7 @@ fn maps_supported_rich_text_and_safe_placeholders() {
                 {"type":"paragraph", "content":[{"type":"text","text":"careful"}]}
             ]},
             {"type":"mediaSingle", "content":[{"type":"media", "attrs":{"id":"private"}}]},
-            {"type":"table", "content":[]}
+            {"type":"emoji", "attrs":{"shortName":":wave:"}}
         ]
     });
 
@@ -981,6 +983,177 @@ fn maps_supported_rich_text_and_safe_placeholders() {
     assert!(plain.contains("@Asha"));
     assert!(!plain.contains("712020:secret"));
     assert!(!plain.contains("javascript:"));
+}
+
+#[test]
+fn maps_heading_paragraph_and_rule_without_unsupported_content() {
+    let document = serde_json::json!({
+        "type": "doc", "version": 1, "content": [
+            {"type":"heading", "attrs":{"level":2}, "content":[
+                {"type":"text", "text":"Blocked by"}
+            ]},
+            {"type":"paragraph", "content":[
+                {"type":"text", "text":"This issue is waiting on another ticket."}
+            ]},
+            {"type":"rule"}
+        ]
+    });
+
+    let parsed = parse_adf(&document).expect("valid ADF");
+    assert!(!parsed.truncated);
+    assert!(matches!(
+        parsed.blocks[2],
+        RichBlock::Placeholder { ref label } if label == HORIZONTAL_RULE_LABEL
+    ));
+    assert_eq!(
+        parsed.plain_text(),
+        "Blocked by\nThis issue is waiting on another ticket."
+    );
+    assert!(!parsed.plain_text().contains(UNSUPPORTED_CONTENT));
+}
+
+#[test]
+fn maps_acceptance_and_regression_tables_without_unsupported_content() {
+    let document = serde_json::json!({
+        "type": "doc", "version": 1, "content": [
+            {"type":"heading", "attrs":{"level":2}, "content":[
+                {"type":"text", "text":"Acceptance criteria"}
+            ]},
+            {"type":"table", "attrs":{"layout":"default"}, "content":[
+                {"type":"tableRow", "content":[
+                    {"type":"tableHeader", "content":[{"type":"paragraph", "content":[
+                        {"type":"text", "text":"Given"}
+                    ]}]},
+                    {"type":"tableHeader", "content":[{"type":"paragraph", "content":[
+                        {"type":"text", "text":"Then"}
+                    ]}]}
+                ]},
+                {"type":"tableRow", "content":[
+                    {"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                        {"type":"text", "text":"A Jira issue is open"}
+                    ]}]},
+                    {"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                        {"type":"text", "text":"The detail view is visible"}
+                    ]}]}
+                ]}
+            ]},
+            {"type":"heading", "attrs":{"level":2}, "content":[
+                {"type":"text", "text":"Regression"}
+            ]},
+            {"type":"table", "content":[
+                {"type":"tableRow", "content":[
+                    {"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                        {"type":"text", "text":"Refresh"}
+                    ]}]},
+                    {"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                        {"type":"text", "text":"No unsupported content"}
+                    ]}]}
+                ]}
+            ]}
+        ]
+    });
+
+    let parsed = parse_adf(&document).expect("valid ADF");
+    assert!(!parsed.truncated);
+    assert!(matches!(
+        &parsed.blocks[1],
+        RichBlock::Table(RichTable { rows }) if rows.len() == 2
+    ));
+    assert!(matches!(
+        &parsed.blocks[3],
+        RichBlock::Table(RichTable { rows }) if rows.len() == 1
+    ));
+    let plain = parsed.plain_text();
+    assert!(plain.contains("Acceptance criteria"));
+    assert!(plain.contains("The detail view is visible"));
+    assert!(plain.contains("Regression"));
+    assert!(plain.contains("No unsupported content"));
+    assert!(!plain.contains(UNSUPPORTED_CONTENT));
+}
+
+#[test]
+fn oversized_table_rows_and_cells_are_bounded_and_marked_truncated() {
+    let rows = (0..65)
+        .map(|_| {
+            serde_json::json!({"type":"tableRow", "content":[
+                {"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                    {"type":"text", "text":"bounded"}
+                ]}]}
+            ]})
+        })
+        .collect::<Vec<_>>();
+    let document = serde_json::json!({
+        "type":"doc", "version":1, "content":[
+            {"type":"table", "content":rows}
+        ]
+    });
+    let parsed = parse_adf(&document).expect("valid root");
+    assert!(parsed.truncated);
+    let RichBlock::Table(table) = &parsed.blocks[0] else {
+        panic!("expected table payload")
+    };
+    assert_eq!(table.rows.len(), 64);
+
+    let cells = (0..33)
+        .map(|_| {
+            serde_json::json!({"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                {"type":"text", "text":"bounded"}
+            ]}]})
+        })
+        .collect::<Vec<_>>();
+    let document = serde_json::json!({
+        "type":"doc", "version":1, "content":[
+            {"type":"table", "content":[{"type":"tableRow", "content":cells}]}
+        ]
+    });
+    let parsed = parse_adf(&document).expect("valid root");
+    assert!(parsed.truncated);
+    let RichBlock::Table(table) = &parsed.blocks[0] else {
+        panic!("expected table payload")
+    };
+    assert_eq!(table.rows[0].cells.len(), 32);
+}
+
+#[test]
+fn malformed_table_shapes_are_explicit_and_bounded() {
+    let malformed_tables = [
+        serde_json::json!({"type":"table", "content": []}),
+        serde_json::json!({"type":"table", "content":[null]}),
+        serde_json::json!({"type":"table", "content":[{"type":"tableRow", "content":[]}]}),
+        serde_json::json!({"type":"table", "content":[{"type":"tableRow", "content":[null]}]}),
+        serde_json::json!({"type":"table", "content":[{"type":"tableRow", "content":[{"type":"tableCell", "content":[]}]}]}),
+    ];
+
+    for table in malformed_tables {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[table]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert!(parsed.truncated);
+        assert!(matches!(
+            parsed.blocks.as_slice(),
+            [RichBlock::Placeholder { label }] if label == UNSUPPORTED_CONTENT
+        ));
+    }
+}
+
+#[test]
+fn malformed_rule_shapes_remain_bounded_placeholders() {
+    for rule in [
+        serde_json::json!({"type":"rule", "content": []}),
+        serde_json::json!({"type":"rule", "attrs": {"style":"unsafe"}}),
+        serde_json::json!({"type":"rule", "attrs": "invalid"}),
+    ] {
+        let document = serde_json::json!({
+            "type": "doc", "version": 1, "content": [rule]
+        });
+        let parsed = parse_adf(&document).expect("valid root");
+        assert!(parsed.truncated);
+        assert!(matches!(
+            parsed.blocks.as_slice(),
+            [RichBlock::Placeholder { label }] if label == UNSUPPORTED_CONTENT
+        ));
+    }
 }
 
 #[test]

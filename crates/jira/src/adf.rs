@@ -1,6 +1,6 @@
 use jira_domain::{
     AccountId, AttachmentMetadata, PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline,
-    RichListItem, RichMark, RichTextDocument,
+    RichListItem, RichMark, RichTable, RichTableCell, RichTableRow, RichTextDocument,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -14,6 +14,8 @@ pub(super) const MAX_LINK_TITLE_BYTES: usize = 512;
 const MAX_MEDIA_INLINE_ID_BYTES: usize = 255;
 const MAX_MEDIA_ALT_BYTES: usize = 512;
 const MAX_MEDIA_DIMENSION: u32 = 10_000;
+const MAX_TABLE_ROWS: usize = 64;
+const MAX_TABLE_CELLS: usize = 32;
 pub(super) const UNSUPPORTED_CONTENT: &str = "[unsupported Jira content]";
 pub(super) const UNAVAILABLE_IMAGE: &str = "[Jira image unavailable]";
 
@@ -277,8 +279,13 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
                 label: UNSUPPORTED_CONTENT.to_owned(),
             },
         },
-        "rule" | "table" | "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date"
-        | "status" | "expand" | "nestedExpand" => RichBlock::Placeholder {
+        "rule" if object.get("content").is_none() && object.get("attrs").is_none() => {
+            RichBlock::horizontal_rule()
+        }
+        "rule" => malformed_block(state),
+        "table" => parse_table_block(object, depth, state),
+        "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date" | "status" | "expand"
+        | "nestedExpand" => RichBlock::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         },
         "inlineCard" => match parse_inline_attachment_card(object, state) {
@@ -295,6 +302,118 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
         },
     };
     Some(block)
+}
+
+fn parse_table_block(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> RichBlock {
+    if object.get("attrs").is_some_and(|attrs| !attrs.is_object()) {
+        return malformed_block(state);
+    }
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        return malformed_block(state);
+    };
+    if content.is_empty() {
+        return malformed_block(state);
+    }
+    if content.len() > MAX_TABLE_ROWS {
+        state.truncated = true;
+    }
+    let mut rows = Vec::new();
+    for value in content.iter().take(MAX_TABLE_ROWS) {
+        let Some(row) = parse_table_row(value, depth + 1, state) else {
+            return malformed_block(state);
+        };
+        rows.push(row);
+    }
+    RichBlock::Table(RichTable { rows })
+}
+
+fn parse_table_row(
+    value: &Value,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Option<RichTableRow> {
+    if depth > MAX_ADF_DEPTH || !state.visit() {
+        state.truncated = true;
+        return None;
+    }
+    let Some(object) = value.as_object() else {
+        state.truncated = true;
+        return None;
+    };
+    if !matches!(object.get("type").and_then(Value::as_str), Some("tableRow"))
+        || object.get("attrs").is_some_and(|attrs| !attrs.is_object())
+    {
+        state.truncated = true;
+        return None;
+    }
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        state.truncated = true;
+        return None;
+    };
+    if content.is_empty() {
+        state.truncated = true;
+        return None;
+    }
+    if content.len() > MAX_TABLE_CELLS {
+        state.truncated = true;
+    }
+    let mut cells = Vec::new();
+    for value in content.iter().take(MAX_TABLE_CELLS) {
+        let cell = parse_table_cell(value, depth + 1, state)?;
+        cells.push(cell);
+    }
+    Some(RichTableRow { cells })
+}
+
+fn parse_table_cell(
+    value: &Value,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Option<RichTableCell> {
+    if depth > MAX_ADF_DEPTH || !state.visit() {
+        state.truncated = true;
+        return None;
+    }
+    let Some(object) = value.as_object() else {
+        state.truncated = true;
+        return None;
+    };
+    let header = match object.get("type").and_then(Value::as_str) {
+        Some("tableHeader") => true,
+        Some("tableCell") => false,
+        _ => {
+            state.truncated = true;
+            return None;
+        }
+    };
+    if object.get("attrs").is_some_and(|attrs| !attrs.is_object()) {
+        state.truncated = true;
+        return None;
+    }
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        state.truncated = true;
+        return None;
+    };
+    if content.is_empty() {
+        state.truncated = true;
+        return None;
+    }
+    let mut blocks = Vec::new();
+    for child in content {
+        let Some(block) = parse_block(child, depth + 1, state) else {
+            state.truncated = true;
+            return None;
+        };
+        blocks.push(block);
+    }
+    Some(RichTableCell {
+        header,
+        content: blocks,
+    })
 }
 
 fn malformed_block(state: &mut AdfParserState<'_>) -> RichBlock {
@@ -410,6 +529,13 @@ fn collect_resolved_image_ids(blocks: &[RichBlock], resolved_ids: &mut HashSet<S
             RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
                 for item in items {
                     collect_resolved_image_ids(&item.blocks, resolved_ids);
+                }
+            }
+            RichBlock::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_resolved_image_ids(&cell.content, resolved_ids);
+                    }
                 }
             }
             RichBlock::Paragraph(_)

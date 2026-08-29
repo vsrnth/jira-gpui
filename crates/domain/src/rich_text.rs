@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::AccountId;
 
+/// Stable semantic marker for an ADF horizontal rule.
+///
+/// This uses the existing placeholder wire shape so cached documents produced
+/// before the rule representation was introduced remain deserializable. The
+/// domain helpers keep the marker explicit to parsers, renderers, and plain
+/// text projection without carrying raw ADF data.
+pub const HORIZONTAL_RULE_LABEL: &str = "[horizontal rule]";
+
 /// A bounded, transport-neutral representation of the subset of Atlassian Document Format
 /// that Jira Desk can display safely. It intentionally contains no raw JSON or UI types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -71,6 +79,21 @@ impl RichTextDocument {
     }
 }
 
+impl RichBlock {
+    pub fn horizontal_rule() -> Self {
+        Self::Placeholder {
+            label: HORIZONTAL_RULE_LABEL.to_owned(),
+        }
+    }
+
+    pub fn is_horizontal_rule(&self) -> bool {
+        matches!(
+            self,
+            Self::Placeholder { label } if label == HORIZONTAL_RULE_LABEL
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RichBlock {
     Paragraph(Vec<RichInline>),
@@ -92,6 +115,7 @@ pub enum RichBlock {
         kind: PanelKind,
         content: Vec<RichBlock>,
     },
+    Table(RichTable),
     Image(RichImage),
     Placeholder {
         label: String,
@@ -128,6 +152,27 @@ pub struct RichAttachmentCard {
     pub mime_type: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+}
+
+/// Bounded semantic representation of a Jira ADF table.
+///
+/// The table, row, and cell types remain explicit so renderers never need to
+/// interpret ADF JSON or delimiter-encoded text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RichTable {
+    pub rows: Vec<RichTableRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RichTableRow {
+    pub cells: Vec<RichTableCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RichTableCell {
+    #[serde(default)]
+    pub header: bool,
+    pub content: Vec<RichBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +276,15 @@ impl PlainTextBuilder {
         self.truncate();
     }
 
+    fn trim_trailing_newlines(&mut self) {
+        if self.truncated {
+            return;
+        }
+        while self.output.ends_with('\n') {
+            self.output.pop();
+        }
+    }
+
     fn finish(self) -> String {
         normalize_plain_text(self.output)
     }
@@ -276,6 +330,7 @@ fn append_block_text(block: &RichBlock, output: &mut PlainTextBuilder, depth: us
                 append_block_text(child, output, depth + 1);
             }
         }
+        RichBlock::Table(table) => append_table_text(table, output, depth + 1),
         RichBlock::Image(image) => {
             output.push_str("[image: ");
             output.push_str(
@@ -287,6 +342,7 @@ fn append_block_text(block: &RichBlock, output: &mut PlainTextBuilder, depth: us
             );
             output.push_str("]\n");
         }
+        RichBlock::Placeholder { label } if label == HORIZONTAL_RULE_LABEL => {}
         RichBlock::Placeholder { label } => {
             output.push_str(label);
             output.push_str("\n");
@@ -326,6 +382,33 @@ fn append_inline_text(content: &[RichInline], output: &mut PlainTextBuilder, dep
     }
 }
 
+fn append_table_text(table: &RichTable, output: &mut PlainTextBuilder, depth: usize) {
+    if !output.visit(depth) {
+        return;
+    }
+    for row in &table.rows {
+        if !output.visit(depth + 1) {
+            return;
+        }
+        for (index, cell) in row.cells.iter().enumerate() {
+            if !output.visit(depth + 2) {
+                return;
+            }
+            if index > 0 {
+                output.trim_trailing_newlines();
+                output.push_str(" | ");
+            }
+            for block in &cell.content {
+                append_block_text(block, output, depth + 3);
+                if output.truncated {
+                    return;
+                }
+            }
+        }
+        output.push_str("\n");
+    }
+}
+
 fn normalize_plain_text(value: String) -> String {
     let mut normalized = String::with_capacity(value.len());
     for character in value.chars() {
@@ -355,6 +438,13 @@ fn block_mentions_account(block: &RichBlock, account_id: &AccountId) -> bool {
         RichBlock::BlockQuote(content) | RichBlock::Panel { content, .. } => content
             .iter()
             .any(|block| block_mentions_account(block, account_id)),
+        RichBlock::Table(table) => table.rows.iter().any(|row| {
+            row.cells.iter().any(|cell| {
+                cell.content
+                    .iter()
+                    .any(|block| block_mentions_account(block, account_id))
+            })
+        }),
         RichBlock::CodeBlock { .. } | RichBlock::Image(_) | RichBlock::Placeholder { .. } => false,
     }
 }
@@ -375,7 +465,10 @@ fn inline_mentions_account(content: &[RichInline], account_id: &AccountId) -> bo
 mod tests {
     use crate::AccountId;
 
-    use super::{PanelKind, RichBlock, RichImage, RichInline, RichListItem, RichTextDocument};
+    use super::{
+        HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichImage, RichInline, RichListItem,
+        RichTable, RichTableCell, RichTableRow, RichTextDocument,
+    };
 
     #[test]
     fn plain_text_is_bounded_for_deserialized_models() {
@@ -408,6 +501,58 @@ mod tests {
             true,
         );
         assert_eq!(document.plain_text(), "body\n[content truncated]");
+    }
+
+    #[test]
+    fn horizontal_rule_is_explicit_and_plain_text_neutral() {
+        let rule = RichBlock::horizontal_rule();
+        assert!(rule.is_horizontal_rule());
+        assert_eq!(
+            RichTextDocument::new(
+                vec![
+                    RichBlock::Paragraph(vec![RichInline::Text {
+                        text: "before".to_owned(),
+                        marks: Vec::new(),
+                    }]),
+                    rule,
+                    RichBlock::Paragraph(vec![RichInline::Text {
+                        text: "after".to_owned(),
+                        marks: Vec::new(),
+                    }]),
+                ],
+                false,
+            )
+            .plain_text(),
+            "before\nafter"
+        );
+        assert_eq!(HORIZONTAL_RULE_LABEL, "[horizontal rule]");
+    }
+
+    #[test]
+    fn table_projects_cell_text_without_raw_structure() {
+        let table = RichTable {
+            rows: vec![RichTableRow {
+                cells: vec![
+                    RichTableCell {
+                        header: true,
+                        content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                            text: "Criterion".to_owned(),
+                            marks: Vec::new(),
+                        }])],
+                    },
+                    RichTableCell {
+                        header: false,
+                        content: vec![RichBlock::Paragraph(vec![RichInline::Text {
+                            text: "Expected result".to_owned(),
+                            marks: Vec::new(),
+                        }])],
+                    },
+                ],
+            }],
+        };
+        let document = RichTextDocument::new(vec![RichBlock::Table(table)], false);
+
+        assert_eq!(document.plain_text(), "Criterion | Expected result");
     }
 
     #[test]

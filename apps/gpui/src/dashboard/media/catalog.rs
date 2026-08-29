@@ -71,6 +71,18 @@ fn collect_rich_images_from_block(
                 }
             }
         }
+        RichBlock::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for child in &cell.content {
+                        collect_rich_images_from_block(child, seen, images);
+                        if images.len() == MAX_RICH_IMAGES {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         RichBlock::Paragraph(_)
         | RichBlock::Heading { .. }
         | RichBlock::CodeBlock { .. }
@@ -190,6 +202,24 @@ fn collect_rich_images_from_block_with_context(
                     );
                     if images.len() == MAX_RICH_IMAGES {
                         return;
+                    }
+                }
+            }
+        }
+        RichBlock::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for child in &cell.content {
+                        collect_rich_images_from_block_with_context(
+                            child,
+                            seen,
+                            images,
+                            surface_ordinal,
+                            source,
+                        );
+                        if images.len() == MAX_RICH_IMAGES {
+                            return;
+                        }
                     }
                 }
             }
