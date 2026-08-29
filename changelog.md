@@ -14,6 +14,13 @@ branch; it is not a published release.
   (`a8a051b`).
 - Standalone ADF rules are represented as semantic horizontal-rule blocks and
   render as bounded dividers.
+- Rich-content rendering now keeps horizontal rules and tables semantic through
+  GPUI layout, including uneven-height stretched rows and native table, row,
+  and cell geometry (`cf0884b`).
+- Jira ADF inline and block smart cards for canonical
+  `https://<site>.atlassian.net/browse/<KEY>` links render as issue keys without
+  retaining or exposing URLs. Noncanonical URLs and mixed smart-card
+  attributes are rejected (`8320412`).
 - Jira issue-type semantics now cover common Jira and JSM labels and aliases,
   including story, task and sub-task variants, bug/defect, epic, initiative,
   spike, improvement/new feature, incident/problem, change, and service
@@ -43,6 +50,8 @@ branch; it is not a published release.
 
 - ADF table parsing is bounded by row, cell, and depth limits, and malformed
   structures remain represented as safe placeholders.
+- Smart-card parsing accepts only canonical Atlassian browse links with
+  matching attributes; rejected links never become rendered URL content.
 - Workspace labels only expose a validated site slug or hostname fallback;
   credentials, paths, queries, and fragments are not displayed.
 
@@ -52,6 +61,10 @@ branch; it is not a published release.
 - Added exact-path mapping tests for the three dedicated Lucide icons and
   asset-source tests covering loading and built-in asset delegation.
 - Added rich-text table projection and horizontal-rule rendering coverage.
+- Added local semantic verification for stretched uneven-height ADF tables,
+  table/row/cell geometry, and canonical smart-card issue-key rendering. The
+  fixture-only macOS artifact is
+  `target/ui-automation/adf-cards-value-escalated-20260829`.
 - Added local GPUI geometry coverage for update-card unread-dot alignment.
 - Extended the local-only macOS fixture suite to six deterministic scenarios
   (`onboarding`, `issues`, `rich-content`, `updates`, `team`, and `settings`);
