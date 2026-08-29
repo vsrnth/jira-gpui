@@ -121,6 +121,8 @@ impl Dashboard {
                     .id("update-list")
                     .debug_selector(|| "update-list".to_owned())
                     .accessibility_id("update-list")
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label("Local Jira activity")
                     .flex_1()
                     .overflow_y_scrollbar()
                     .overflow_x_hidden()
