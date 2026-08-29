@@ -1,5 +1,8 @@
 use super::*;
-use gpui_component::{Sizable as _, Size, description_list::DescriptionList, select::Select};
+use gpui::rems;
+use gpui_component::{
+    Sizable as _, Size, description_list::DescriptionList, list::List, popover::Popover,
+};
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
     div()
@@ -154,7 +157,7 @@ impl Dashboard {
                 .min_h_0()
                 .items_center()
                 .justify_center()
-                .p(px(layout.detail_padding()))
+                .p(rems(layout.detail_padding() / 16.0))
                 .child(
                     status_surface
                         .debug_selector(|| "issue-detail-status".to_owned())
@@ -235,8 +238,8 @@ impl Dashboard {
             .flex_1()
             .min_w_0()
             .overflow_y_scrollbar()
-            .p(px(layout.detail_padding()))
-            .gap(px(if layout.is_mobile() { 16. } else { 20. }))
+            .p(rems(layout.detail_padding() / 16.0))
+            .gap(rems(if layout.is_mobile() { 1. } else { 1.25 }))
             .child(
                 v_flex()
                     .debug_selector(|| "issue-detail-header".to_owned())
@@ -321,7 +324,7 @@ impl Dashboard {
                             .with_size(Size::Small)
                             .columns(1)
                             .bordered(false)
-                            .label_width(px(if layout.is_rail() { 108. } else { 132. }))
+                            .label_width(rems(if layout.is_rail() { 6.75 } else { 8.25 }))
                             .item(
                                 "Assignee",
                                 detail_metadata_value(assignee, "issue-detail-assignee"),
@@ -703,79 +706,91 @@ impl Dashboard {
         );
         let ready = issue.is_some_and(|issue| {
             matches!(
-                self.status_select_state,
-                StatusSelectReadState::Ready { ref issue_id } if issue_id == &issue.id
+                self.status_transition_state,
+                StatusTransitionReadState::Ready { ref issue_id } if issue_id == &issue.id
             )
         });
-        let select_disabled = !editable || !ready || self.status_select_items.len() <= 1;
-        let status_feedback = match &self.status_select_state {
-            StatusSelectReadState::Error { issue_id, copy }
+        let trigger_disabled = !editable || !ready || self.status_transition_items.is_empty();
+        let status_feedback = match &self.status_transition_state {
+            StatusTransitionReadState::Error { issue_id, copy }
                 if issue.map(|issue| &issue.id) == Some(issue_id) =>
             {
-                Some((copy.message().to_owned(), true))
+                let retry = Button::new("retry-status-transitions")
+                    .ghost()
+                    .compact()
+                    .label("Retry")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reload_status_transitions(cx);
+                    }));
+                Some(
+                    h_flex()
+                        .id("issue-status-feedback")
+                        .debug_selector(|| "issue-status-feedback".to_owned())
+                        .role(gpui::accesskit::Role::Alert)
+                        .min_w_0()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(div().min_w_0().child(copy.message().to_owned()))
+                        .child(retry)
+                        .into_any_element(),
+                )
             }
             _ => None,
         };
-        let status_aria_label = match &self.status_select_state {
-            StatusSelectReadState::Loading { issue_id, .. }
+        let status_aria_label = match &self.status_transition_state {
+            StatusTransitionReadState::Loading { issue_id, .. }
                 if issue.map(|issue| &issue.id) == Some(issue_id) =>
             {
                 "Issue status · loading available transitions".to_owned()
             }
-            StatusSelectReadState::Error { issue_id, copy }
+            StatusTransitionReadState::Error { issue_id, copy }
                 if issue.map(|issue| &issue.id) == Some(issue_id) =>
             {
                 format!("Issue status · transitions unavailable: {}", copy.message())
             }
-            StatusSelectReadState::Ready { issue_id }
+            StatusTransitionReadState::Ready { issue_id }
                 if issue.map(|issue| &issue.id) == Some(issue_id)
-                    && self.status_select_items.len() <= 1 =>
+                    && self.status_transition_items.is_empty() =>
             {
                 "Issue status · no status changes are currently available".to_owned()
             }
             _ if editable => "Change issue status".to_owned(),
             _ => "Issue status · editing unavailable in this view".to_owned(),
         };
-        let Some(state) = self.status_select.clone() else {
-            return Button::new("issue-status-control")
-                .secondary()
-                .label(status)
-                .disabled(true)
-                .into_any_element();
-        };
-        let status_select = Select::new(&state)
-            .with_size(Size::Small)
-            .disabled(select_disabled);
+        let trigger = Button::new("issue-status-trigger")
+            .secondary()
+            .dropdown_caret(true)
+            .label(status)
+            .disabled(trigger_disabled)
+            .tooltip(status_aria_label.clone());
+        let status_control = Popover::new("issue-status-popover")
+            .anchor(Anchor::TopLeft)
+            .open(self.status_popover_open)
+            .on_open_change(cx.listener(|this, open, _, cx| {
+                this.status_popover_open = *open;
+                cx.notify();
+            }))
+            .trigger(trigger)
+            .child(
+                div()
+                    .id("issue-status-transition-list")
+                    .debug_selector(|| "issue-status-transition-list".to_owned())
+                    .w_72()
+                    .h(status_transition_list_height(
+                        self.status_transition_items.len(),
+                    ))
+                    .child(List::new(
+                        self.status_list.as_ref().expect("status list initialized"),
+                    )),
+            );
         v_flex()
             .id("issue-status-control")
             .debug_selector(|| "issue-status-control".to_owned())
             .min_w_0()
             .aria_label(status_aria_label)
-            .child(
-                div()
-                    .debug_selector(|| "issue-status-select".to_owned())
-                    .min_w_0()
-                    .child(status_select),
-            )
-            .when_some(status_feedback, |this, (message, is_error)| {
-                this.child(
-                    div()
-                        .id("issue-status-feedback")
-                        .debug_selector(|| "issue-status-feedback".to_owned())
-                        .role(if is_error {
-                            gpui::accesskit::Role::Alert
-                        } else {
-                            gpui::accesskit::Role::Status
-                        })
-                        .text_xs()
-                        .text_color(if is_error {
-                            cx.theme().danger
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .child(message),
-                )
-            })
+            .child(status_control)
+            .when_some(status_feedback, |this, feedback| this.child(feedback))
             .into_any_element()
     }
 
@@ -1009,7 +1024,7 @@ impl Dashboard {
                                                 this.begin_assignee_chooser(window, cx)
                                             }
                                             IssueEditOperation::Transition => {
-                                                this.reload_status_select(cx)
+                                                this.reload_status_transitions(cx)
                                             }
                                         },
                                     )),

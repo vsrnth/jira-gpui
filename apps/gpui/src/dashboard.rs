@@ -5,9 +5,9 @@ use time::UtcOffset;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
+    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems,
 };
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{
@@ -22,7 +22,6 @@ use gpui_component::{
     resizable_panel,
     scroll::ScrollableElement as _,
     searchable_list::{SearchableListItem, SearchableVec},
-    select::{SelectEvent, SelectState},
     spinner::Spinner,
     v_flex,
 };
@@ -446,44 +445,7 @@ impl SearchableListItem for StatusOption {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum StatusSelectOption {
-    Current(String),
-    Transition(IssueTransition),
-}
-
-impl SearchableListItem for StatusSelectOption {
-    type Value = Self;
-
-    fn title(&self) -> gpui::SharedString {
-        match self {
-            Self::Current(status) => status.clone().into(),
-            Self::Transition(transition) => transition_option_label(transition).to_owned().into(),
-        }
-    }
-
-    fn value(&self) -> &Self::Value {
-        self
-    }
-
-    fn disabled(&self) -> bool {
-        matches!(self, Self::Current(_))
-    }
-
-    fn render(&self, _: &mut gpui::Window, _: &mut gpui::App) -> impl gpui::IntoElement {
-        let selector = match self {
-            Self::Current(_) => "issue-status-current".to_owned(),
-            Self::Transition(transition) => format!("status-transition-{}", transition.id),
-        };
-        div()
-            .debug_selector(move || selector.clone())
-            .min_w_0()
-            .truncate()
-            .child(self.title())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum StatusSelectReadState {
+enum StatusTransitionReadState {
     Idle,
     Loading {
         issue_id: IssueId,
@@ -496,6 +458,85 @@ enum StatusSelectReadState {
         issue_id: IssueId,
         copy: OutcomeCopy,
     },
+}
+
+struct StatusTransitionListDelegate {
+    transitions: Vec<IssueTransition>,
+    selected: Option<gpui_component::IndexPath>,
+}
+
+const STATUS_TRANSITION_ROW_HEIGHT_REMS: f32 = 2.5;
+const STATUS_TRANSITION_LIST_MAX_HEIGHT_REMS: f32 = 12.5;
+
+fn status_transition_list_height(count: usize) -> gpui::Rems {
+    rems(
+        (count.max(1) as f32 * STATUS_TRANSITION_ROW_HEIGHT_REMS)
+            .min(STATUS_TRANSITION_LIST_MAX_HEIGHT_REMS),
+    )
+}
+
+impl gpui_component::list::ListDelegate for StatusTransitionListDelegate {
+    type Item = gpui_component::list::ListItem;
+
+    fn items_count(&self, _: usize, _: &gpui::App) -> usize {
+        self.transitions.len()
+    }
+
+    fn render_item(
+        &mut self,
+        ix: gpui_component::IndexPath,
+        _: &mut gpui::Window,
+        _: &mut Context<gpui_component::list::ListState<Self>>,
+    ) -> Option<Self::Item> {
+        let transition = self.transitions.get(ix.row)?.clone();
+        let target = transition_option_label(&transition).to_owned();
+        let action = transition.name.trim().to_owned();
+        let has_distinguishing_action = !action.is_empty() && action != target;
+        let selector = format!("status-transition-{}", transition.id);
+        Some(
+            gpui_component::list::ListItem::new(selector.clone())
+                .selected(self.selected == Some(ix))
+                .child(
+                    div()
+                        .debug_selector(move || selector.clone())
+                        .min_w_0()
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(div().min_w_0().truncate().child(target))
+                                .when(has_distinguishing_action, |this| {
+                                    this.child(div().min_w_0().truncate().text_xs().child(action))
+                                }),
+                        ),
+                ),
+        )
+    }
+
+    fn set_selected_index(
+        &mut self,
+        ix: Option<gpui_component::IndexPath>,
+        _: &mut gpui::Window,
+        cx: &mut Context<gpui_component::list::ListState<Self>>,
+    ) {
+        self.selected = ix;
+        cx.notify();
+    }
+
+    fn confirm(
+        &mut self,
+        _: bool,
+        _: &mut gpui::Window,
+        _: &mut Context<gpui_component::list::ListState<Self>>,
+    ) {
+    }
+
+    fn cancel(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut Context<gpui_component::list::ListState<Self>>,
+    ) {
+    }
 }
 
 fn status_filter_trigger_label(selection: IssueStatusSelection) -> String {
@@ -731,17 +772,18 @@ pub struct Dashboard {
     status_filter: IssueStatusFilter,
     status_combobox: Option<Entity<ComboboxState<SearchableVec<StatusOption>>>>,
     status_subscriptions: Vec<Subscription>,
-    status_select: Option<Entity<SelectState<SearchableVec<StatusSelectOption>>>>,
-    status_select_subscriptions: Vec<Subscription>,
-    status_select_items: Vec<StatusSelectOption>,
-    status_select_items_revision: u64,
-    status_select_applied_revision: u64,
-    status_select_state: StatusSelectReadState,
-    status_select_generation: u64,
-    status_select_task: Option<gpui::Task<()>>,
-    status_select_cancellation: Option<CancellationToken>,
+    status_list: Option<Entity<gpui_component::list::ListState<StatusTransitionListDelegate>>>,
+    status_list_subscriptions: Vec<Subscription>,
+    status_transition_items: Vec<IssueTransition>,
+    status_transition_items_revision: u64,
+    status_transition_items_applied_revision: u64,
+    status_popover_open: bool,
+    status_transition_state: StatusTransitionReadState,
+    status_transition_generation: u64,
+    status_transition_task: Option<gpui::Task<()>>,
+    status_transition_cancellation: Option<CancellationToken>,
     #[cfg(test)]
-    status_select_reads_suppressed: bool,
+    status_transition_reads_suppressed: bool,
     search_query: String,
     search_input: Option<Entity<InputState>>,
     search_subscriptions: Vec<Subscription>,
@@ -939,17 +981,18 @@ impl Dashboard {
             status_filter: IssueStatusFilter::All,
             status_combobox: None,
             status_subscriptions: Vec::new(),
-            status_select: None,
-            status_select_subscriptions: Vec::new(),
-            status_select_items: Vec::new(),
-            status_select_items_revision: 0,
-            status_select_applied_revision: 0,
-            status_select_state: StatusSelectReadState::Idle,
-            status_select_generation: 0,
-            status_select_task: None,
-            status_select_cancellation: None,
+            status_list: None,
+            status_list_subscriptions: Vec::new(),
+            status_transition_items: Vec::new(),
+            status_transition_items_revision: 0,
+            status_transition_items_applied_revision: 0,
+            status_popover_open: false,
+            status_transition_state: StatusTransitionReadState::Idle,
+            status_transition_generation: 0,
+            status_transition_task: None,
+            status_transition_cancellation: None,
             #[cfg(test)]
-            status_select_reads_suppressed: false,
+            status_transition_reads_suppressed: false,
             search_query: String::new(),
             search_input: None,
             search_subscriptions: Vec::new(),
@@ -1051,17 +1094,18 @@ impl Dashboard {
             status_filter: IssueStatusFilter::All,
             status_combobox: None,
             status_subscriptions: Vec::new(),
-            status_select: None,
-            status_select_subscriptions: Vec::new(),
-            status_select_items: Vec::new(),
-            status_select_items_revision: 0,
-            status_select_applied_revision: 0,
-            status_select_state: StatusSelectReadState::Idle,
-            status_select_generation: 0,
-            status_select_task: None,
-            status_select_cancellation: None,
+            status_list: None,
+            status_list_subscriptions: Vec::new(),
+            status_transition_items: Vec::new(),
+            status_transition_items_revision: 0,
+            status_transition_items_applied_revision: 0,
+            status_popover_open: false,
+            status_transition_state: StatusTransitionReadState::Idle,
+            status_transition_generation: 0,
+            status_transition_task: None,
+            status_transition_cancellation: None,
             #[cfg(test)]
-            status_select_reads_suppressed: false,
+            status_transition_reads_suppressed: false,
             search_query: String::new(),
             search_input: None,
             search_subscriptions: Vec::new(),
@@ -1416,6 +1460,7 @@ impl Dashboard {
     }
 
     fn clear_remote_lookup(&mut self) {
+        self.status_popover_open = false;
         self.invalidate_attachment_download();
         self.remote_image_states.clear();
         self.remote_lookup_epoch.invalidate();
@@ -1664,7 +1709,7 @@ impl Dashboard {
             self.selected_issue_core = None;
         }
         self.selected_issue = Some(issue_id.clone());
-        self.invalidate_status_select();
+        self.invalidate_status_transition();
 
         let Some(workspace) = self.workspace.clone() else {
             self.detail_epoch.finish(&ticket);
@@ -1672,7 +1717,7 @@ impl Dashboard {
             cx.notify();
             return;
         };
-        self.reload_status_select(cx);
+        self.reload_status_transitions(cx);
 
         let cancellation = ticket.cancellation().clone();
         let cached_detail = self
@@ -2398,7 +2443,7 @@ impl Dashboard {
         self.apply_live_issues(issues, true, cx);
         self.update_groups = update_groups;
         if self.selected_issue.is_some() {
-            self.reload_status_select(cx);
+            self.reload_status_transitions(cx);
         }
     }
 
@@ -2771,7 +2816,7 @@ impl Dashboard {
 
     fn ensure_status_combobox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.status_combobox.is_some() {
-            self.ensure_status_select(window, cx);
+            self.ensure_status_list(window, cx);
             return;
         }
 
@@ -2798,96 +2843,77 @@ impl Dashboard {
             },
         ));
         self.status_combobox = Some(state);
-        self.ensure_status_select(window, cx);
+        self.ensure_status_list(window, cx);
     }
 
-    fn status_select_items(
-        status: String,
-        transitions: Vec<IssueTransition>,
-    ) -> Vec<StatusSelectOption> {
-        std::iter::once(StatusSelectOption::Current(status))
-            .chain(transitions.into_iter().map(StatusSelectOption::Transition))
-            .collect()
+    fn set_status_transition_items(&mut self, transitions: Vec<IssueTransition>) {
+        self.status_transition_items = transitions;
+        self.status_transition_items_revision =
+            self.status_transition_items_revision.wrapping_add(1);
     }
 
-    fn set_status_select_items(&mut self, items: Vec<StatusSelectOption>) {
-        self.status_select_items = items;
-        self.status_select_items_revision = self.status_select_items_revision.wrapping_add(1);
-    }
-
-    fn ensure_status_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.status_select_items.is_empty()
-            && let Some(issue) = self.selected_issue_view()
-        {
-            self.set_status_select_items(Self::status_select_items(
-                issue.status.clone(),
-                Vec::new(),
-            ));
-        }
-        if self.status_select.is_none() {
+    fn ensure_status_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.status_list.is_none() {
             let state = cx.new(|cx| {
-                SelectState::new(
-                    SearchableVec::new(self.status_select_items.clone()),
-                    (!self.status_select_items.is_empty())
-                        .then(|| gpui_component::IndexPath::new(0)),
+                gpui_component::list::ListState::new(
+                    StatusTransitionListDelegate {
+                        transitions: self.status_transition_items.clone(),
+                        selected: None,
+                    },
                     window,
                     cx,
                 )
                 .searchable(false)
             });
-            self.status_select_subscriptions.push(cx.subscribe_in(
+            self.status_list_subscriptions.push(cx.subscribe_in(
                 &state,
                 window,
-                |this,
-                 _state,
-                 event: &SelectEvent<SearchableVec<StatusSelectOption>>,
-                 window,
-                 cx| {
-                    let SelectEvent::Confirm(Some(StatusSelectOption::Transition(transition))) =
-                        event
-                    else {
-                        return;
-                    };
-                    this.choose_transition_from_select(transition.clone(), window, cx);
+                |this, state, event: &gpui_component::list::ListEvent, window, cx| match event {
+                    gpui_component::list::ListEvent::Confirm(ix) => {
+                        let transition = state.read(cx).delegate().transitions.get(ix.row).cloned();
+                        if let Some(transition) = transition {
+                            this.choose_transition_from_list(transition, window, cx);
+                        }
+                    }
+                    gpui_component::list::ListEvent::Cancel => {
+                        this.status_popover_open = false;
+                        cx.notify();
+                    }
+                    gpui_component::list::ListEvent::Select(_) => {}
                 },
             ));
-            self.status_select = Some(state);
-            self.status_select_applied_revision = self.status_select_items_revision;
-        } else if self.status_select_applied_revision != self.status_select_items_revision {
-            if let Some(state) = self.status_select.clone() {
-                let items = SearchableVec::new(self.status_select_items.clone());
+            self.status_list = Some(state);
+            self.status_transition_items_applied_revision = self.status_transition_items_revision;
+        } else if self.status_transition_items_applied_revision
+            != self.status_transition_items_revision
+        {
+            if let Some(state) = self.status_list.clone() {
+                let transitions = self.status_transition_items.clone();
                 state.update(cx, |state, cx| {
-                    state.set_items(items, window, cx);
-                    state.set_selected_index(
-                        (!self.status_select_items.is_empty())
-                            .then(|| gpui_component::IndexPath::new(0)),
-                        window,
-                        cx,
-                    );
+                    state.delegate_mut().transitions = transitions;
+                    state.delegate_mut().selected = None;
+                    cx.notify();
                 });
             }
-            self.status_select_applied_revision = self.status_select_items_revision;
+            self.status_transition_items_applied_revision = self.status_transition_items_revision;
         }
     }
 
-    fn invalidate_status_select(&mut self) {
-        if let Some(cancellation) = self.status_select_cancellation.take() {
+    fn invalidate_status_transition(&mut self) {
+        self.status_popover_open = false;
+        if let Some(cancellation) = self.status_transition_cancellation.take() {
             cancellation.cancel();
         }
-        self.status_select_task.take();
-        self.status_select_generation = self.status_select_generation.wrapping_add(1);
-        self.status_select_state = StatusSelectReadState::Idle;
-        let current = self
-            .selected_issue_view()
-            .map(|issue| Self::status_select_items(issue.status.clone(), Vec::new()))
-            .unwrap_or_default();
-        self.set_status_select_items(current);
+        self.status_transition_task.take();
+        self.status_transition_generation = self.status_transition_generation.wrapping_add(1);
+        self.status_transition_state = StatusTransitionReadState::Idle;
+        self.set_status_transition_items(Vec::new());
     }
 
-    fn reload_status_select(&mut self, cx: &mut Context<Self>) {
-        self.invalidate_status_select();
+    fn reload_status_transitions(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_status_transition();
         #[cfg(test)]
-        if self.status_select_reads_suppressed {
+        if self.status_transition_reads_suppressed {
             return;
         }
         let Some(issue) = self.selected_issue_view() else {
@@ -2897,13 +2923,13 @@ impl Dashboard {
             return;
         };
         let issue_id = issue.id.clone();
-        let generation = self.status_select_generation;
-        self.status_select_state = StatusSelectReadState::Loading {
+        let generation = self.status_transition_generation;
+        self.status_transition_state = StatusTransitionReadState::Loading {
             issue_id: issue_id.clone(),
             generation,
         };
         let cancellation = CancellationToken::new();
-        self.status_select_cancellation = Some(cancellation.clone());
+        self.status_transition_cancellation = Some(cancellation.clone());
         let task = cx.spawn(async move |this, cx| {
             let result = workspace
                 .available_transitions(IssueLocator::Id(issue_id.clone()), &cancellation)
@@ -2911,8 +2937,8 @@ impl Dashboard {
             let _ = this.update(cx, |this, cx| {
                 if this.selected_issue.as_ref() != Some(&issue_id)
                     || !matches!(
-                        this.status_select_state,
-                        StatusSelectReadState::Loading {
+                        this.status_transition_state,
+                        StatusTransitionReadState::Loading {
                             issue_id: ref current,
                             generation: current_generation,
                         } if current == &issue_id && current_generation == generation
@@ -2920,21 +2946,16 @@ impl Dashboard {
                 {
                     return;
                 }
-                this.status_select_cancellation = None;
-                this.status_select_task = None;
+                this.status_transition_cancellation = None;
+                this.status_transition_task = None;
                 match result {
                     Ok(transitions) => {
-                        this.set_status_select_items(Self::status_select_items(
-                            this.selected_issue_view()
-                                .filter(|issue| issue.id == issue_id)
-                                .map(|issue| issue.status.clone())
-                                .unwrap_or_else(|| "Unknown".to_owned()),
-                            transitions,
-                        ));
-                        this.status_select_state = StatusSelectReadState::Ready { issue_id };
+                        this.set_status_transition_items(transitions);
+                        this.status_transition_state =
+                            StatusTransitionReadState::Ready { issue_id };
                     }
                     Err(error) => {
-                        this.status_select_state = StatusSelectReadState::Error {
+                        this.status_transition_state = StatusTransitionReadState::Error {
                             issue_id,
                             copy: issue_edit_error_message(
                                 error.kind(),
@@ -2946,10 +2967,10 @@ impl Dashboard {
                 cx.notify();
             });
         });
-        self.status_select_task = Some(task);
+        self.status_transition_task = Some(task);
     }
 
-    fn choose_transition_from_select(
+    fn choose_transition_from_list(
         &mut self,
         transition: IssueTransition,
         window: &mut Window,
@@ -2962,8 +2983,8 @@ impl Dashboard {
             return;
         };
         if !matches!(
-            self.status_select_state,
-            StatusSelectReadState::Ready { ref issue_id } if issue_id == &issue.id
+            self.status_transition_state,
+            StatusTransitionReadState::Ready { ref issue_id } if issue_id == &issue.id
         ) {
             return;
         }
@@ -2972,11 +2993,13 @@ impl Dashboard {
             issue.key.clone(),
             transition,
         );
-        if let Some(state) = self.status_select.clone() {
+        if let Some(state) = self.status_list.clone() {
             state.update(cx, |state, cx| {
-                state.set_selected_index(Some(gpui_component::IndexPath::new(0)), window, cx);
+                state.set_selected_index(None, window, cx);
+                cx.notify();
             });
         }
+        self.status_popover_open = false;
         cx.notify();
     }
 

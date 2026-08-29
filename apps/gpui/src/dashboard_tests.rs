@@ -249,7 +249,9 @@ fn status_control_disables_during_confirmation() {
 }
 
 #[gpui::test]
-fn native_status_select_is_bounded_and_selection_only_confirms(cx: &mut gpui::TestAppContext) {
+fn native_status_popover_list_is_bounded_and_selection_only_confirms(
+    cx: &mut gpui::TestAppContext,
+) {
     cx.update(gpui_component::init);
     let site_id = JiraSiteId::new("site").expect("site");
     let calls = Arc::new(Mutex::new(EditCalls::default()));
@@ -282,13 +284,9 @@ fn native_status_select_is_bounded_and_selection_only_confirms(cx: &mut gpui::Te
     let mut dashboard = Dashboard::from_sample_data();
     let issue_id = dashboard.selected_issue.clone().expect("selected issue");
     dashboard.workspace = Some(workspace);
-    let status = dashboard
-        .selected_issue_view()
-        .expect("selected issue view")
-        .status;
-    dashboard.status_select_items = Dashboard::status_select_items(status, transitions.clone());
-    dashboard.status_select_items_revision = 1;
-    dashboard.status_select_state = StatusSelectReadState::Ready {
+    dashboard.status_transition_items = transitions.clone();
+    dashboard.status_transition_items_revision = 1;
+    dashboard.status_transition_state = StatusTransitionReadState::Ready {
         issue_id: issue_id.clone(),
     };
     let window = cx.open_window(gpui::size(px(1_200.), px(900.)), |_, _| dashboard);
@@ -300,36 +298,57 @@ fn native_status_select_is_bounded_and_selection_only_confirms(cx: &mut gpui::Te
     let control = visual
         .debug_bounds("issue-status-control")
         .expect("status control should be laid out");
-    let select = visual
-        .debug_bounds("issue-status-select")
-        .expect("native status Select should be laid out");
-    assert!(select.size.width > px(0.) && select.size.height > px(0.));
+    assert!(control.size.width > px(0.) && control.size.height > px(0.));
     assert!(
-        select.origin.x >= control.origin.x
-            && select.origin.y >= control.origin.y
-            && select.origin.x + select.size.width
-                <= control.origin.x + control.size.width + px(1.)
-            && select.origin.y + select.size.height
-                <= control.origin.y + control.size.height + px(1.)
+        control.origin.x >= px(0.)
+            && control.origin.y >= px(0.)
+            && control.origin.x + control.size.width <= px(1_200.) + px(1.)
+            && control.origin.y + control.size.height <= px(900.) + px(1.)
     );
+
+    visual.simulate_click(
+        gpui::point(
+            control.origin.x + control.size.width / 2.,
+            control.origin.y + control.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let list = visual
+        .debug_bounds("issue-status-transition-list")
+        .expect("native transition list should open from the status trigger");
+    assert!(
+        list.size.width > px(0.)
+            && list.size.height > px(0.)
+            && list.origin.x >= px(0.)
+            && list.origin.y >= px(0.)
+            && list.origin.x + list.size.width <= px(1_200.) + px(1.)
+            && list.origin.y + list.size.height <= px(900.) + px(1.)
+    );
+    let option = visual
+        .debug_bounds("status-transition-31")
+        .expect("native transition action should be visible");
+    visual.simulate_click(
+        gpui::point(
+            option.origin.x + option.size.width / 2.,
+            option.origin.y + option.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
     let status_state = dashboard_entity.read_with(&visual, |dashboard, _| {
-        dashboard.status_select_state.clone()
+        dashboard.status_transition_state.clone()
     });
     assert!(
-        matches!(status_state, StatusSelectReadState::Ready { .. }),
+        matches!(status_state, StatusTransitionReadState::Ready { .. }),
         "unexpected status state: {status_state:?}"
     );
 
-    let transition = transitions[0].clone();
-    visual.update(|window, cx| {
-        dashboard_entity.update(cx, |dashboard, cx| {
-            dashboard.choose_transition_from_select(transition, window, cx);
-            assert!(matches!(
-                dashboard.issue_edit_flow.state(),
-                IssueEditState::ConfirmingTransition { .. }
-            ));
-        });
-    });
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| matches!(
+        dashboard.issue_edit_flow.state(),
+        IssueEditState::ConfirmingTransition { .. }
+    )));
     assert!(
         calls
             .lock()
@@ -337,6 +356,7 @@ fn native_status_select_is_bounded_and_selection_only_confirms(cx: &mut gpui::Te
             .transition_writes
             .is_empty()
     );
+    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| { dashboard.status_popover_open }));
 }
 
 #[test]
@@ -1000,8 +1020,8 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
     let issue_id = issue.id.clone();
     let mut dashboard = Dashboard::from_sample_data();
     // This test isolates cached detail rendering; the native status lookup is
-    // covered by the dedicated status-select fixture below.
-    dashboard.status_select_reads_suppressed = true;
+    // covered by the dedicated status-popover fixture below.
+    dashboard.status_transition_reads_suppressed = true;
     dashboard.workspace = Some(Arc::new(workspace));
     let cached_description = "Persisted detail description";
     dashboard
