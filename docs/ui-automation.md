@@ -15,11 +15,18 @@ cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
 cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
   --scenario settings --output target/ui-lab/settings-dark.png \
   --theme dark
+
+cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
+  --scenario onboarding-dialog --output target/ui-lab/onboarding-dialog-light.png \
+  --size 960x700 --theme light
 ```
 
 Use `--help` for all options and `--list` for the supported semantic scenarios:
-`onboarding`, `issues`, `updates`, `team`, and `settings`. `--size` is a
-logical window size; the command reports the physical PNG dimensions returned
+`onboarding`, `onboarding-dialog`, `issues`, `updates`, `team`, and `settings`.
+`onboarding-dialog` renders the same disconnected fixture with the production
+Connect Jira `Dialog` opened through GPUI. It is a single-capture scenario and
+is intentionally excluded from the five-case capture matrix below. `--size` is
+a logical window size; the command reports the physical PNG dimensions returned
 by the renderer. The output directory is created when needed.
 
 ## Capture matrix

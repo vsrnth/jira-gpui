@@ -17,8 +17,11 @@ const DEFAULT_SIZE: UiLabSize = UiLabSize {
 };
 
 #[cfg(feature = "ui-lab")]
+const SCENARIO_LIST: &str = "onboarding, onboarding-dialog, issues, updates, team, settings";
+
+#[cfg(feature = "ui-lab")]
 fn usage() -> &'static str {
-    "Usage: cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- [MODE] [OPTIONS]\n\nSingle capture (backward compatible):\n  --scenario NAME       onboarding | issues | updates | team | settings\n  --output PNG          Destination PNG path\n  --size WIDTHxHEIGHT   Logical window size (default: 1280x900)\n  --theme light|dark    Theme (default: light)\n\nMatrix and review modes (mutually exclusive):\n  --matrix --output-dir DIR\n                        Capture the five built-in cases and matrix-manifest.json\n  --compare --actual-dir DIR --baseline-dir DIR --diff-dir DIR --report FILE\n                        Compare every known case (strict 0 threshold and 0 percent by default)\n  --accept-baselines --actual-dir DIR --baseline-dir DIR --confirm-reviewed\n                        Explicitly publish a complete candidate matrix; never automatic\n  --pixel-threshold N   Ignore channel deltas up to N (compare only, 0..255)\n  --max-diff-percent P  Allow at most P percent changed pixels (compare only, 0..100)\n\nOther:\n  --list                List scenarios and themes\n  -h, --help            Show this help\n\nThis lab is fixture-backed and macOS-only. It never loads credentials, keychain\nstate, Jira, persistence, notifications, or write ports."
+    "Usage: cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- [MODE] [OPTIONS]\n\nSingle capture (backward compatible):\n  --scenario NAME       onboarding | onboarding-dialog | issues | updates | team | settings\n  --output PNG          Destination PNG path\n  --size WIDTHxHEIGHT   Logical window size (default: 1280x900)\n  --theme light|dark    Theme (default: light)\n\nMatrix and review modes (mutually exclusive):\n  --matrix --output-dir DIR\n                        Capture the five built-in cases and matrix-manifest.json\n  --compare --actual-dir DIR --baseline-dir DIR --diff-dir DIR --report FILE\n                        Compare every known case (strict 0 threshold and 0 percent by default)\n  --accept-baselines --actual-dir DIR --baseline-dir DIR --confirm-reviewed\n                        Explicitly publish a complete candidate matrix; never automatic\n  --pixel-threshold N   Ignore channel deltas up to N (compare only, 0..255)\n  --max-diff-percent P  Allow at most P percent changed pixels (compare only, 0..100)\n\nOther:\n  --list                List scenarios and themes\n  -h, --help            Show this help\n\nThis lab is fixture-backed and macOS-only. It never loads credentials, keychain\nstate, Jira, persistence, notifications, or write ports."
 }
 
 #[cfg(feature = "ui-lab")]
@@ -124,9 +127,7 @@ where
                 {
                     bail!("--list cannot be combined with a mode or other options");
                 }
-                println!(
-                    "Scenarios: onboarding, issues, updates, team, settings\nThemes: light, dark"
-                );
+                println!("Scenarios: {SCENARIO_LIST}\nThemes: light, dark");
                 return Ok(None);
             }
             "--matrix" => select_mode(&mut mode, Mode::Matrix)?,
@@ -369,7 +370,7 @@ mod tests {
             "--theme",
             "dark",
         ])
-        .unwrap() else {
+        .expect("explicit capture parser input is valid") else {
             panic!("expected capture");
         };
         assert_eq!(request.scenario, UiLabScenario::Settings);
@@ -386,6 +387,33 @@ mod tests {
         };
         assert_eq!(request.size, DEFAULT_SIZE);
         assert_eq!(request.theme, UiLabTheme::Light);
+    }
+
+    #[test]
+    fn parser_accepts_the_production_onboarding_dialog_scenario() {
+        let Some(Command::Capture(request)) = parse_args([
+            "--scenario",
+            "onboarding-dialog",
+            "--output",
+            "onboarding-dialog.png",
+        ])
+        .expect("onboarding-dialog parser input is valid") else {
+            panic!("expected capture");
+        };
+        assert_eq!(request.scenario, UiLabScenario::OnboardingDialog);
+    }
+
+    #[test]
+    fn help_lists_the_dialog_scenario() {
+        assert!(super::usage().contains("onboarding | onboarding-dialog | issues"));
+    }
+
+    #[test]
+    fn list_includes_the_dialog_scenario() {
+        assert_eq!(
+            super::SCENARIO_LIST,
+            "onboarding, onboarding-dialog, issues, updates, team, settings"
+        );
     }
 
     #[test]

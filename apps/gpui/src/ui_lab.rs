@@ -32,6 +32,8 @@ use crate::{
 pub enum UiLabScenario {
     /// The deterministic first-run connection surface.
     Onboarding,
+    /// The first-run connection surface with its production dialog open.
+    OnboardingDialog,
     /// The issues list and selected issue detail surface.
     Issues,
     /// The local update ledger surface.
@@ -47,6 +49,7 @@ impl UiLabScenario {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Onboarding => "onboarding",
+            Self::OnboardingDialog => "onboarding-dialog",
             Self::Issues => "issues",
             Self::Updates => "updates",
             Self::Team => "team",
@@ -58,12 +61,13 @@ impl UiLabScenario {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "onboarding" => Ok(Self::Onboarding),
+            "onboarding-dialog" => Ok(Self::OnboardingDialog),
             "issues" => Ok(Self::Issues),
             "updates" => Ok(Self::Updates),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, issues, updates, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-dialog, issues, updates, team, settings"
             ),
         }
     }
@@ -218,7 +222,7 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
                 cx.new(|_| dashboard)
             };
             let dashboard = match request.scenario {
-                UiLabScenario::Onboarding => None,
+                UiLabScenario::Onboarding | UiLabScenario::OnboardingDialog => None,
                 UiLabScenario::Issues => Some(fixture_dashboard(SampleSection::Issues)),
                 UiLabScenario::Updates => Some(fixture_dashboard(SampleSection::Updates)),
                 UiLabScenario::Team => Some(fixture_dashboard(SampleSection::Team)),
@@ -226,7 +230,19 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
             };
             let shell =
                 cx.new(|cx| AppShell::new_for_ui_lab(dashboard, request.theme.mode(), window, cx));
-            cx.new(|cx| Root::new(shell, window, cx))
+            let root = cx.new(|cx| Root::new(shell.clone(), window, cx));
+            if request.scenario == UiLabScenario::OnboardingDialog {
+                // The dialog layer is owned by the production Root. Defer until this root has
+                // been installed as the window root, then update the AppShell entity to invoke
+                // its production dialog-opening path. This keeps the lab free of coordinate or
+                // OS-level automation and exercises the same dialog users see in the app.
+                window.defer(cx, move |window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        shell.open_connection_dialog_for_ui_lab(window, cx);
+                    });
+                });
+            }
+            root
         })?;
 
         // Fixture views do not start async work. Running the deterministic executor once still
@@ -292,6 +308,7 @@ mod tests {
     fn scenario_parser_accepts_only_named_semantic_scenarios() {
         for (value, expected) in [
             ("onboarding", UiLabScenario::Onboarding),
+            ("onboarding-dialog", UiLabScenario::OnboardingDialog),
             ("issues", UiLabScenario::Issues),
             ("updates", UiLabScenario::Updates),
             ("team", UiLabScenario::Team),
@@ -301,6 +318,15 @@ mod tests {
             assert_eq!(expected.as_str(), value);
         }
         assert!(UiLabScenario::parse("serialized-state").is_err());
+    }
+
+    #[test]
+    fn onboarding_dialog_is_single_capture_only() {
+        assert!(
+            super::matrix::built_in_matrix()
+                .iter()
+                .all(|case| case.scenario != UiLabScenario::OnboardingDialog)
+        );
     }
 
     #[test]
