@@ -13,6 +13,8 @@ pub enum UiAutomationScenario {
     Onboarding,
     /// The local Jira issue list and detail view.
     Issues,
+    /// Rich issue content with a preloaded image fixture.
+    RichContent,
     /// The local change ledger.
     Updates,
     /// The local team tracker.
@@ -27,6 +29,7 @@ impl UiAutomationScenario {
         match self {
             Self::Onboarding => "onboarding",
             Self::Issues => "issues",
+            Self::RichContent => "rich-content",
             Self::Updates => "updates",
             Self::Team => "team",
             Self::Settings => "settings",
@@ -38,11 +41,12 @@ impl UiAutomationScenario {
         match value {
             "onboarding" => Ok(Self::Onboarding),
             "issues" => Ok(Self::Issues),
+            "rich-content" => Ok(Self::RichContent),
             "updates" => Ok(Self::Updates),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, issues, updates, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, issues, rich-content, updates, team, settings"
             ),
         }
     }
@@ -58,9 +62,9 @@ pub enum Command {
 }
 
 /// Text printed by `--help`.
-pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | issues | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
+pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | issues | rich-content | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
 
-const SCENARIOS: &str = "onboarding, issues, updates, team, settings";
+const SCENARIOS: &str = "onboarding, issues, rich-content, updates, team, settings";
 
 fn next_value(args: &mut impl Iterator<Item = String>) -> Result<String> {
     let value = args
@@ -118,25 +122,23 @@ where
 
 #[cfg(target_os = "macos")]
 fn launch(scenario: UiAutomationScenario) -> Result<()> {
+    use crate::{
+        AppAssets, AppShell,
+        app_shell::AppearancePreference,
+        dashboard::{Dashboard, SampleSection},
+    };
     use gpui::{
         App, AppContext as _, Bounds, Pixels, Size, WindowBounds, WindowDecorations, WindowOptions,
         px, size,
     };
     use gpui_component::{Root, Theme, ThemeMode, TitleBar};
-    use gpui_component_assets::Assets;
-
-    use crate::{
-        AppShell,
-        app_shell::AppearancePreference,
-        dashboard::{Dashboard, SampleSection},
-    };
 
     const WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
     const APP_ID: &str = "dev.jiradesk.JiraDesk.UIAutomation";
     const WINDOW_TITLE: &str = "Jira Desk UI Automation";
 
     gpui_platform::application()
-        .with_assets(Assets)
+        .with_assets(AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             // Do not synchronize with the host system appearance: the fixture must be stable.
@@ -167,18 +169,29 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                     window.activate_window();
                     window.set_window_title(WINDOW_TITLE);
 
-                    let dashboard = match scenario {
-                        UiAutomationScenario::Onboarding => None,
-                        UiAutomationScenario::Issues => Some(SampleSection::Issues),
-                        UiAutomationScenario::Updates => Some(SampleSection::Updates),
-                        UiAutomationScenario::Team => Some(SampleSection::Team),
-                        UiAutomationScenario::Settings => Some(SampleSection::Settings),
-                    }
-                    .map(|section| {
-                        let mut dashboard = Dashboard::from_sample_data_for_section(section);
+                    let fixture_dashboard = |mut dashboard: Dashboard| {
                         dashboard.initialize_appearance_preference(AppearancePreference::Light);
                         cx.new(|_| dashboard)
-                    });
+                    };
+                    let dashboard = match scenario {
+                        UiAutomationScenario::Onboarding => None,
+                        UiAutomationScenario::Issues => Some(
+                            Dashboard::from_sample_data_for_section(SampleSection::Issues),
+                        ),
+                        UiAutomationScenario::RichContent => {
+                            Some(Dashboard::from_ui_automation_rich_content())
+                        }
+                        UiAutomationScenario::Updates => Some(
+                            Dashboard::from_sample_data_for_section(SampleSection::Updates),
+                        ),
+                        UiAutomationScenario::Team => {
+                            Some(Dashboard::from_sample_data_for_section(SampleSection::Team))
+                        }
+                        UiAutomationScenario::Settings => Some(
+                            Dashboard::from_sample_data_for_section(SampleSection::Settings),
+                        ),
+                    }
+                    .map(fixture_dashboard);
                     let shell = cx.new(|cx| {
                         AppShell::new_for_ui_lab(dashboard, ThemeMode::Light, window, cx)
                     });
@@ -209,6 +222,7 @@ mod tests {
         for (name, scenario) in [
             ("onboarding", UiAutomationScenario::Onboarding),
             ("issues", UiAutomationScenario::Issues),
+            ("rich-content", UiAutomationScenario::RichContent),
             ("updates", UiAutomationScenario::Updates),
             ("team", UiAutomationScenario::Team),
             ("settings", UiAutomationScenario::Settings),

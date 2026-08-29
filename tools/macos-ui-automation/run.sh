@@ -10,7 +10,7 @@ trap stop_suite INT TERM HUP
 usage() {
     printf '%s\n' \
         'Usage: tools/macos-ui-automation/run.sh [--scenario NAME | --suite | --list | --self-test] [--artifact-dir ABSOLUTE_DIR]' \
-        'Scenarios: onboarding, issues, updates, team, settings' >&2
+        'Scenarios: onboarding, issues, rich-content, updates, team, settings' >&2
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -64,13 +64,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-scenarios='onboarding issues updates team settings'
+scenarios='onboarding issues rich-content updates team settings'
 if [ "$list" -eq 1 ]; then
     if [ -n "$scenario" ] || [ "$suite" -eq 1 ] || [ "$self_test" -eq 1 ] || [ -n "$artifact_dir" ]; then
         usage
         exit 2
     fi
-    printf '%s\n' onboarding issues updates team settings
+    printf '%s\n' onboarding issues rich-content updates team settings
     exit 0
 fi
 if [ "$self_test" -eq 1 ] && { [ -n "$scenario" ] || [ "$suite" -eq 1 ]; }; then
@@ -140,6 +140,7 @@ method_for_scenario() {
     case "$1" in
         onboarding) printf '%s\n' testOnboarding ;;
         issues) printf '%s\n' testIssues ;;
+        rich-content) printf '%s\n' testRichContent ;;
         updates) printf '%s\n' testUpdates ;;
         team) printf '%s\n' testTeam ;;
         settings) printf '%s\n' testSettings ;;
@@ -197,7 +198,7 @@ run_one() {
 
 if [ "$suite" -eq 1 ]; then
     failures=0
-    for name in onboarding issues updates team settings; do
+    for name in onboarding issues rich-content updates team settings; do
         if ! run_one "$name"; then
             failures=$((failures + 1))
         fi

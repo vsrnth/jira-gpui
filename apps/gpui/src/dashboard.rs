@@ -930,6 +930,92 @@ impl Dashboard {
         dashboard
     }
 
+    /// Builds the rich-content fixture used exclusively by the local macOS accessibility tests.
+    /// It starts from the ordinary deterministic issue fixture, then preloads one valid image so
+    /// the test can prove that a selected cached image paints without a loading spinner.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn from_ui_automation_rich_content() -> Self {
+        use jira_domain::{
+            RichBlock, RichImage, RichInline, RichTable, RichTableCell, RichTableRow,
+            RichTextDocument,
+        };
+
+        let mut dashboard = Self::from_sample_data();
+        let image = RichImage {
+            attachment_id: "fixture-image".to_owned(),
+            filename: "cached-fixture.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            alt_text: Some("Cached fixture image".to_owned()),
+            width: Some(1),
+            height: Some(1),
+        };
+        let text = |value: &str| {
+            RichBlock::Paragraph(vec![RichInline::Text {
+                text: value.to_owned(),
+                marks: Vec::new(),
+            }])
+        };
+        let table = RichTable {
+            rows: vec![
+                RichTableRow {
+                    cells: vec![
+                        RichTableCell {
+                            header: true,
+                            content: vec![text("Fixture field")],
+                        },
+                        RichTableCell {
+                            header: true,
+                            content: vec![text("Value")],
+                        },
+                    ],
+                },
+                RichTableRow {
+                    cells: vec![
+                        RichTableCell {
+                            header: false,
+                            content: vec![text("Status")],
+                        },
+                        RichTableCell {
+                            header: false,
+                            content: vec![text("Ready")],
+                        },
+                    ],
+                },
+            ],
+        };
+        let issue = dashboard
+            .domain_issues
+            .first_mut()
+            .expect("sample issue fixture");
+        issue.description_text = Some("Rich content fixture".to_owned());
+        issue.rich_description = Some(RichTextDocument::new(
+            vec![
+                text("Rich content fixture"),
+                RichBlock::horizontal_rule(),
+                RichBlock::Table(table),
+                RichBlock::Image(image.clone()),
+            ],
+            false,
+        ));
+        dashboard.selected_image_states.insert(
+            image.attachment_id,
+            crate::rich_text_view::RichImageRenderState::Ready(Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                // A valid 1×1 RGBA PNG. Keeping it inline makes this fixture hermetic.
+                vec![
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
+                    0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+                    0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44,
+                    0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00,
+                    0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+                    0x44, 0xae, 0x42, 0x60, 0x82,
+                ],
+            ))),
+        );
+        dashboard.site_label = "sample".to_owned();
+        dashboard
+    }
+
     #[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
     fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink, section: Section) -> Self {
         let domain_issues = sample_issues();
@@ -985,7 +1071,7 @@ impl Dashboard {
             team_clock: Some(time::macros::datetime!(2026-08-18 00:00 UTC)),
             timestamp_offset: Some(UtcOffset::UTC),
             team_automatic_polling_paused: false,
-            site_label: "sample.atlassian.net".to_owned(),
+            site_label: "sample".to_owned(),
             mode_label: "Local preview mode".to_owned(),
             operation_in_progress: false,
             polling_task: None,

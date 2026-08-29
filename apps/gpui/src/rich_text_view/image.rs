@@ -21,6 +21,7 @@ pub(super) fn render_image(
     budget.image_ordinal = budget.image_ordinal.saturating_add(1);
     let name = bounded_image_name(rich_image_name(image));
     let accessible_label = budget.text(&format!("Image: {name}"));
+    let accessibility_id = format!("rich-image-{}", image.attachment_id);
     let mut frame = v_flex()
         .min_w_0()
         .max_w_full()
@@ -35,6 +36,8 @@ pub(super) fn render_image(
             "rich-image",
             render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal()),
         ))
+        .accessibility_id(accessibility_id)
+        .role(gpui::accesskit::Role::Image)
         .aria_label(accessible_label);
 
     let diagnostic_context = context.image_states.context_for(

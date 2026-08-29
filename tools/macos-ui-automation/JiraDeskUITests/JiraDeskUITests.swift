@@ -52,7 +52,19 @@ final class JiraDeskUITests: XCTestCase {
 
     func testIssues() throws {
         try launchFixture(scenario: "issues")
+        let storyRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184")
+        XCTAssertTrue(storyRow.title.contains("(Story)"), "known Story row should retain its issue-type identity")
         let row = try require(app.descendants(matching: .any)["issue-row-DESK-179"], "issue-row-DESK-179")
+        XCTAssertTrue(row.title.contains("(Task)"), "known Task row should retain its issue-type identity")
+        let workspaceHeader = try require(
+            app.descendants(matching: .any)["sidebar-workspace-header"],
+            "sidebar-workspace-header"
+        )
+        let workspaceIdentity = workspaceHeader.label.isEmpty ? workspaceHeader.title : workspaceHeader.label
+        XCTAssertTrue(
+            workspaceIdentity == "sample" || workspaceIdentity.hasPrefix("sample ·"),
+            "fixture workspace should expose the normalized site slug in its identity"
+        )
         row.click()
         let detail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail")
         let detailExpectation = XCTNSPredicateExpectation(
@@ -68,9 +80,44 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertTrue(XCTWaiter.wait(for: [detailExpectation], timeout: 8) == .completed)
     }
 
+    func testRichContent() throws {
+        try launchFixture(scenario: "rich-content")
+        _ = try require(
+            app.descendants(matching: .any)["rich-text-horizontal-rule"],
+            "rich-text-horizontal-rule"
+        )
+        _ = try require(app.descendants(matching: .any)["rich-text-table"], "rich-text-table")
+        _ = try require(app.descendants(matching: .any)["rich-image-fixture-image"], "rich-image-fixture-image")
+
+        let loading = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Loading image…")
+        ).firstMatch
+        XCTAssertFalse(loading.exists, "preloaded fixture image must not regress to a loading spinner")
+        let unsupported = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Some Jira content isn't supported yet.")
+        ).firstMatch
+        XCTAssertFalse(unsupported.exists, "valid rich content must not show the unsupported sentinel")
+    }
+
     func testSettings() throws {
         try launchFixture(scenario: "settings")
-        _ = try require(app.descendants(matching: .any)["nav-settings"], "nav-settings")
+        let sidebarMenu = try require(app.descendants(matching: .any)["nav-settings"], "nav-settings")
+
+        let sidebar = try require(app.descendants(matching: .any)["dashboard-sidebar"], "dashboard-sidebar")
+        let settingsIdentity = sidebarMenu.label.isEmpty ? sidebarMenu.title : sidebarMenu.label
+        XCTAssertEqual(settingsIdentity, "Settings")
+        let settingsFrame = sidebarMenu.frame
+        XCTAssertTrue(sidebar.frame.contains(settingsFrame), "expanded Settings navigation must remain inside the sidebar bounds")
+        XCTAssertGreaterThanOrEqual(
+            settingsFrame.width,
+            200,
+            "expanded Settings submenu needs enough width for Desktop notifications"
+        )
+        XCTAssertGreaterThanOrEqual(
+            settingsFrame.height,
+            180,
+            "expanded Settings submenu needs enough height for Desktop notifications"
+        )
 
         _ = try require(app.descendants(matching: .any)["appearance-dark"], "appearance-dark")
         let darkToggle = try require(app.checkBoxes["Use Dark appearance"], "Use Dark appearance")
@@ -94,6 +141,10 @@ final class JiraDeskUITests: XCTestCase {
             object: darkToggle
         )
         XCTAssertTrue(XCTWaiter.wait(for: [darkExpectation], timeout: 8) == .completed)
+
+        let toggle = try require(app.descendants(matching: .any)["sidebar-toggle"], "sidebar-toggle")
+        toggle.click()
+        XCTAssertFalse(sidebarMenu.frame.width > 100, "collapsed sidebar should use the icon-only rail")
     }
 
     func testUpdates() throws {
@@ -101,6 +152,11 @@ final class JiraDeskUITests: XCTestCase {
         let updates = try require(app.descendants(matching: .any)["nav-updates"], "nav-updates")
         updates.click()
         _ = try require(app.descendants(matching: .any)["update-list"], "update-list")
+        let dot = try require(app.descendants(matching: .any)["update-unread-dot-0"], "update-unread-dot-0")
+        let metadata = try require(app.descendants(matching: .any)["update-metadata-0"], "update-metadata-0")
+        let dotCenter = CGPoint(x: dot.frame.midX, y: dot.frame.midY)
+        let metadataCenter = CGPoint(x: metadata.frame.midX, y: metadata.frame.midY)
+        XCTAssertLessThanOrEqual(abs(dotCenter.y - metadataCenter.y), 2.0, "unread dot should align with first metadata line")
     }
 
     func testTeam() throws {

@@ -21,8 +21,11 @@ cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
   --size 960x700 --theme light
 ```
 
-Use `--help` for all options and `--list` for the supported semantic scenarios:
+Use `--help` for all options and `--list` for the UI capture scenarios:
 `onboarding`, `onboarding-dialog`, `issues`, `updates`, `team`, and `settings`.
+The `rich-content` scenario is available to the local macOS XCUITest fixture
+host, not to the offscreen UI capture lab, so it is intentionally absent from
+the capture list and five-case visual matrix below.
 `onboarding-dialog` renders the same disconnected fixture with the production
 Connect Jira `Dialog` opened through GPUI. It is a single-capture scenario and
 is intentionally excluded from the five-case capture matrix below. `--size` is
@@ -173,6 +176,7 @@ Run the complete local smoke suite, or one scenario:
 tools/macos-ui-automation/run.sh --suite
 tools/macos-ui-automation/run.sh --scenario onboarding
 tools/macos-ui-automation/run.sh --scenario issues
+tools/macos-ui-automation/run.sh --scenario rich-content
 tools/macos-ui-automation/run.sh --scenario settings
 ```
 
@@ -204,8 +208,9 @@ owns the launched process and terminates it during test teardown.
 
 ### Scenarios and artifacts
 
-The fixture host accepts exactly `onboarding`, `issues`, `updates`, `team`, and
-`settings`. The XCUITest target performs bounded semantic waits and read-only actions:
+The fixture host accepts exactly `onboarding`, `issues`, `rich-content`, `updates`,
+`team`, and `settings`. The XCUITest target performs bounded semantic waits and
+read-only actions:
 
 - `onboarding` opens the connection dialog, selects each field by its exact
   accessibility ID, clicks it for editor focus, and enters the synthetic site
@@ -217,16 +222,40 @@ The fixture host accepts exactly `onboarding`, `issues`, `updates`, `team`, and
   it, and cancels the dialog. XCTest diagnostics may display the synthetic
   site/email values in local logs or attachments; they are never sent to Jira.
 - `issues` selects the deterministic fixture row `issue-row-DESK-179` and
-  bounded-waits for the `issue-detail` accessible title/label to become exactly
-  `Issue detail for DESK-179`.
+  verifies Story/Task type identity, the normalized `sample` workspace label,
+  and bounded-waits for the `issue-detail` accessible title/label to become
+  exactly `Issue detail for DESK-179`.
+- `rich-content` opens a fixture with a horizontal rule, a valid table, and a
+  preloaded PNG image. It requires the semantic rule/table/image IDs, asserts
+  that no image spinner or unsupported-content sentinel is present, and never
+  accesses Jira or persistent storage.
 - `settings` starts on the fixture's Settings/Appearance screen, activates the
-  nested `Use Dark appearance` CheckBox, and bounded-waits for its selected/value
-  state. The stable `appearance-dark` wrapper is also required. The navigation
-  container is only required to exist because its
-  expanded children make a direct container click ambiguous.
-- `updates` and `team` navigate to their read-only surfaces and verify the
-  `update-list` and `team-table` containers. Content existence is the stable
-  assertion; the AX bridge's immediate selected state is not used.
+  verifies that the full `Desktop notifications` label stays within the
+  expanded sidebar, activates the nested `Use Dark appearance` CheckBox, and
+  then confirms collapsed mode hides expanded labels.
+- `updates` navigates to its read-only surface and compares the accessibility
+  frames of `update-unread-dot-0` and `update-metadata-0` with a bounded
+  vertical tolerance. `team` verifies the `team-table` container.
+
+### Latest validated run
+
+The complete six-scenario local suite passed on 2026-08-29. Its artifacts are
+retained under `target/ui-automation/final-20260829`:
+
+- `onboarding` verified the disconnected credential form without entering or
+  reading a token.
+- `issues` verified real issue-row type identity and the normalized workspace
+  identity, plus the stable `Issue detail for DESK-179` label.
+- `rich-content` verified a ready image, horizontal rule, and table with no
+  loading spinner or unsupported-content fallback.
+- `updates` verified the unread dot against the native metadata midline with a
+  tolerance of at most 2 points.
+- `team` verified the Team Tracker surface identity.
+- `settings` verified the expanded Sidebar and a submenu bounded to 200x180
+  points, then verified collapsed navigation hides expanded labels.
+
+The corresponding five-case offscreen visual candidates were reviewed and are
+retained under `target/ui-lab/candidate-20260829-regressions`.
 
 The tests deliberately do not activate status transitions, assignee changes,
 comments, saved-login deletion, notification tests, attachment downloads, or
