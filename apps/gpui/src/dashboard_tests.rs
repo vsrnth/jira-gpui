@@ -572,7 +572,9 @@ fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::Te
 }
 
 #[gpui::test]
-fn sidebar_navigation_replaces_branding_and_keeps_toggle_reachable(cx: &mut gpui::TestAppContext) {
+fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
+    cx: &mut gpui::TestAppContext,
+) {
     cx.update(gpui_component::init);
     let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
@@ -589,19 +591,48 @@ fn sidebar_navigation_replaces_branding_and_keeps_toggle_reachable(cx: &mut gpui
         .debug_bounds("sidebar-navigation")
         .expect("sidebar navigation should be laid out");
     assert!(navigation.origin.y >= sidebar.origin.y);
-    assert!(navigation.origin.y < sidebar.origin.y + px(48.));
+    assert!(navigation.origin.y + navigation.size.height <= sidebar.origin.y + sidebar.size.height);
     assert!(
         visual.debug_bounds("sidebar-branding").is_none(),
         "the removed branding block must not reserve a layout region"
     );
+    let workspace_header = visual
+        .debug_bounds("sidebar-workspace-header")
+        .expect("expanded sidebar should expose workspace header");
+    let workspace_icon = visual
+        .debug_bounds("sidebar-workspace-icon")
+        .expect("expanded sidebar should expose workspace icon");
+    assert!(workspace_header.origin.y >= navigation.origin.y);
+    assert!(
+        workspace_header.origin.y + workspace_header.size.height
+            <= sidebar.origin.y + sidebar.size.height
+    );
+    assert!(workspace_icon.size.width > px(0.) && workspace_icon.size.height > px(0.));
     let toggle = visual
         .debug_bounds("sidebar-toggle")
         .expect("expanded sidebar should expose its toggle in navigation");
-    assert!(toggle.origin.y < px(60.));
+    assert!(toggle.origin.y >= workspace_header.origin.y);
+    assert!(toggle.origin.y + toggle.size.height <= navigation.origin.y + navigation.size.height);
+
+    let status = visual
+        .debug_bounds("sidebar-sync-status")
+        .expect("expanded sidebar should expose sync status");
+    let refresh = visual
+        .debug_bounds("sidebar-refresh")
+        .expect("expanded sidebar should expose refresh action");
+    let profile = visual
+        .debug_bounds("sidebar-profile")
+        .expect("expanded sidebar should expose account footer");
+    assert!(status.size.width > px(0.) && status.size.height > px(0.));
+    assert!(status.origin.y < refresh.origin.y);
+    assert!(refresh.origin.y < profile.origin.y);
+    assert!(profile.origin.x >= sidebar.origin.x);
+    assert!(profile.origin.x + profile.size.width <= sidebar.origin.x + sidebar.size.width);
+    assert!(visual.debug_bounds("sidebar-profile-label").is_some());
 
     visual.simulate_click(
         gpui::point(
-            toggle.origin.x + toggle.size.width / 2.,
+            toggle.origin.x + toggle.size.width - px(16.),
             toggle.origin.y + toggle.size.height / 2.,
         ),
         Default::default(),
@@ -612,6 +643,12 @@ fn sidebar_navigation_replaces_branding_and_keeps_toggle_reachable(cx: &mut gpui
         visual.debug_bounds("sidebar-toggle").is_some(),
         "collapsed standard sidebar must retain an expand toggle"
     );
+    assert!(visual.debug_bounds("sidebar-workspace-header").is_some());
+    assert!(visual.debug_bounds("sidebar-workspace-icon").is_some());
+    assert!(visual.debug_bounds("sidebar-profile").is_some());
+    assert!(visual.debug_bounds("sidebar-profile-label").is_none());
+    assert!(visual.debug_bounds("sidebar-workspace-site").is_none());
+    assert!(visual.debug_bounds("sidebar-workspace-mode").is_none());
 }
 
 #[gpui::test]

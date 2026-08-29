@@ -2,7 +2,10 @@ use super::*;
 use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
 use gpui_component::{
     Sizable as _,
-    sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem, SidebarToggleButton},
+    sidebar::{
+        Sidebar, SidebarCollapsible, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem,
+        SidebarToggleButton,
+    },
     tooltip::Tooltip,
 };
 
@@ -55,46 +58,144 @@ impl Dashboard {
             ))
             .child(self.settings_sidebar_menu_item(cx));
 
-        let header = layout.supports_manual_sidebar_collapse().then(|| {
-            h_flex()
+        let workspace = h_flex()
+            .id("sidebar-workspace-header")
+            .debug_selector(|| "sidebar-workspace-header".to_owned())
+            .accessibility_id("sidebar-workspace-header")
+            .aria_label(format!("{} · {}", self.site_label, self.mode_label))
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("sidebar-workspace-icon")
+                    .debug_selector(|| "sidebar-workspace-icon".to_owned())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().sidebar_primary)
+                    .text_color(cx.theme().sidebar_primary_foreground)
+                    .when(collapsed, |this| {
+                        this.size_4()
+                            .bg(cx.theme().transparent)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .when(!collapsed, |this| this.size_8())
+                    .child(Icon::new(IconName::GalleryVerticalEnd)),
+            )
+            .when(!collapsed, |this| {
+                this.child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("sidebar-workspace-site")
+                                .debug_selector(|| "sidebar-workspace-site".to_owned())
+                                .text_sm()
+                                .font_semibold()
+                                .truncate()
+                                .child(self.site_label.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("sidebar-workspace-mode")
+                                .debug_selector(|| "sidebar-workspace-mode".to_owned())
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(self.mode_label.clone()),
+                        ),
+                )
+            });
+
+        let header = if collapsed {
+            v_flex()
                 .id("sidebar-navigation")
                 .debug_selector(|| "sidebar-navigation".to_owned())
                 .w_full()
-                .justify_end()
-                .child(
-                    div()
-                        .id("sidebar-toggle")
-                        .debug_selector(|| "sidebar-toggle".to_owned())
-                        .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.toggle_sidebar(layout, cx);
-                            }),
-                        )),
-                )
-        });
-
-        let footer = if collapsed {
-            v_flex()
-                .id("sidebar-footer-content")
-                .w_full()
-                .items_center()
-                .border_t_1()
-                .border_color(cx.theme().sidebar_border)
-                .when(self.refresh_visible(), |this| {
-                    this.child(self.render_refresh_action("sidebar-refresh", true, false, cx))
+                .min_w_0()
+                .gap_1()
+                .child(SidebarHeader::new().child(workspace))
+                .when(layout.supports_manual_sidebar_collapse(), |this| {
+                    this.child(
+                        h_flex()
+                            .id("sidebar-toggle")
+                            .debug_selector(|| "sidebar-toggle".to_owned())
+                            .accessibility_id("sidebar-toggle")
+                            .w_full()
+                            .justify_end()
+                            .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.toggle_sidebar(layout, cx);
+                                }),
+                            )),
+                    )
                 })
                 .into_any_element()
         } else {
             v_flex()
-                .id("sidebar-footer-content")
+                .id("sidebar-navigation")
+                .debug_selector(|| "sidebar-navigation".to_owned())
                 .w_full()
                 .min_w_0()
-                .min_h_0()
-                .gap_1()
-                .max_h(gpui::rems(11.))
-                .border_t_1()
-                .border_color(cx.theme().sidebar_border)
                 .child(
+                    SidebarHeader::new().child(
+                        workspace.child(
+                            h_flex()
+                                .id("sidebar-toggle")
+                                .debug_selector(|| "sidebar-toggle".to_owned())
+                                .accessibility_id("sidebar-toggle")
+                                .flex_shrink_0()
+                                .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.toggle_sidebar(layout, cx);
+                                    }),
+                                )),
+                        ),
+                    ),
+                )
+                .into_any_element()
+        };
+
+        let profile_label = self.sidebar_profile_label();
+        let profile = SidebarFooter::new().child(
+            h_flex()
+                .id("sidebar-profile")
+                .debug_selector(|| "sidebar-profile".to_owned())
+                .accessibility_id("sidebar-profile")
+                .aria_label(profile_label.clone())
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(IconName::CircleUser).size_4())
+                .when(!collapsed, |this| {
+                    this.child(
+                        div()
+                            .id("sidebar-profile-label")
+                            .debug_selector(|| "sidebar-profile-label".to_owned())
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(profile_label.clone()),
+                    )
+                }),
+        );
+
+        let footer = v_flex()
+            .id("sidebar-footer-content")
+            .w_full()
+            .min_w_0()
+            .min_h_0()
+            .gap_1()
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border)
+            .when(!collapsed, |this| {
+                this.max_h(gpui::rems(11.)).min_h_0().child(
                     div()
                         .id("sidebar-sync-status")
                         .debug_selector(|| "sidebar-sync-status".to_owned())
@@ -102,34 +203,21 @@ impl Dashboard {
                         .w_full()
                         .min_w_0()
                         .aria_label(self.sync_message.clone())
+                        .h(gpui::rems(3.5))
                         .max_h(gpui::rems(4.5))
                         .min_h_0()
-                        .flex_shrink_0()
+                        .flex_shrink_1()
                         .overflow_y_scrollbar()
                         .whitespace_normal()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(self.sync_message.clone()),
                 )
-                .when(self.refresh_visible(), |this| {
-                    this.child(self.render_refresh_action("sidebar-refresh", false, true, cx))
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .truncate()
-                        .child(self.site_label.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .truncate()
-                        .child(self.mode_label.clone()),
-                )
-                .into_any_element()
-        };
+            })
+            .when(self.refresh_visible(), |this| {
+                this.child(self.render_refresh_action("sidebar-refresh", collapsed, !collapsed, cx))
+            })
+            .child(profile);
 
         div()
             .id("dashboard-sidebar-shell")
@@ -143,10 +231,24 @@ impl Dashboard {
                     .collapsible(SidebarCollapsible::Icon)
                     .collapsed(collapsed)
                     .w(gpui::rems(12.5))
-                    .when_some(header, |this, header| this.header(header))
+                    .header(header)
                     .child(menu)
                     .footer(footer),
             )
+    }
+
+    fn sidebar_profile_label(&self) -> String {
+        self.authenticated_account
+            .as_ref()
+            .and_then(|account| self.users.iter().find(|user| &user.account_id == account))
+            .map(|user| user.display_name.clone())
+            .unwrap_or_else(|| {
+                if self.workspace.is_some() {
+                    "Jira account".to_owned()
+                } else {
+                    "Preview data".to_owned()
+                }
+            })
     }
 
     fn sidebar_menu_item(
@@ -251,6 +353,7 @@ impl Dashboard {
         if icon_only {
             div()
                 .id(id)
+                .debug_selector(move || id.to_owned())
                 .accessibility_id(id)
                 .role(gpui::accesskit::Role::Button)
                 .aria_label(tooltip.clone())
@@ -286,6 +389,7 @@ impl Dashboard {
                 .into_any_element()
         } else {
             Button::new(id)
+                .debug_selector(move || id.to_owned())
                 .compact()
                 .when(sidebar_action, |this| {
                     this.ghost().w_full().justify_start().icon(IconName::Redo2)
