@@ -90,7 +90,7 @@ impl Dashboard {
         v_flex()
             .size_full()
             .min_w_0()
-            .p(px(layout.list_padding()))
+            .p(gpui::rems(layout.list_padding() / 16.))
             .gap_3()
             .child(
                 v_flex()
@@ -387,7 +387,7 @@ impl Dashboard {
                             div()
                                 .id("team-detail-resize-handle")
                                 .h_full()
-                                .w(px(8.))
+                                .w_2()
                                 .flex_shrink_0()
                                 .cursor(gpui::CursorStyle::ResizeColumn)
                                 .hover(|style| style.bg(cx.theme().muted))

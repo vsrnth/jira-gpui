@@ -326,30 +326,26 @@ impl TableDelegate for TeamTicketTableDelegate {
         let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) else {
             return Column::default();
         };
-        let width = column_widths(self.dense_columns)[col_ix];
+        // DataTable's Column contract stores measured widths as Pixels and
+        // resolves them before virtualization; it has no rem-aware width API.
+        let width = px(column_widths(self.dense_columns)[col_ix]);
         let sort = self.sort_for_column(column);
         match column {
             SortColumn::Key => Column::new("key", "Ticket")
-                .width(px(width))
+                .width(width)
                 .sort(sort)
                 .fixed_left(),
-            SortColumn::Summary => Column::new("summary", "Summary")
-                .width(px(width))
-                .sort(sort),
-            SortColumn::Assignee => Column::new("assignee", "Assignee")
-                .width(px(width))
-                .sort(sort),
-            SortColumn::Status => Column::new("status", "Status").width(px(width)).sort(sort),
+            SortColumn::Summary => Column::new("summary", "Summary").width(width).sort(sort),
+            SortColumn::Assignee => Column::new("assignee", "Assignee").width(width).sort(sort),
+            SortColumn::Status => Column::new("status", "Status").width(width).sort(sort),
             SortColumn::LatestUpdate => Column::new("latest_update", "Latest update")
-                .width(px(width))
+                .width(width)
                 .sort(sort),
             SortColumn::LastUpdated => Column::new("last_updated", "Updated")
-                .width(px(width))
+                .width(width)
                 .sort(sort),
-            SortColumn::Elapsed => Column::new("elapsed", "Age").width(px(width)).sort(sort),
-            SortColumn::Activity => Column::new("activity", "Activity")
-                .width(px(width))
-                .sort(sort),
+            SortColumn::Elapsed => Column::new("elapsed", "Age").width(width).sort(sort),
+            SortColumn::Activity => Column::new("activity", "Activity").width(width).sort(sort),
         }
     }
 
