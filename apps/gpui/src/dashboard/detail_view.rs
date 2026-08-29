@@ -19,6 +19,10 @@ pub(super) fn normalized_lookup_query(query: &str) -> String {
         .unwrap_or_else(|| query.trim().to_owned())
 }
 
+fn issue_detail_key_accessibility_id(key: &str) -> String {
+    format!("issue-detail-key-{key}")
+}
+
 impl Dashboard {
     fn rich_text_palette(&self, cx: &mut Context<Self>) -> RichTextPalette {
         RichTextPalette {
@@ -172,6 +176,8 @@ impl Dashboard {
         };
         let project = issue.project.clone();
         let key = issue.key.clone();
+        let detail_key_accessibility_id = issue_detail_key_accessibility_id(&key);
+        let detail_key_label = format!("Selected Jira issue {key}");
         let summary = issue.summary.clone();
         let issue_type = issue.issue_type.clone();
         let status = issue.status.clone();
@@ -267,7 +273,15 @@ impl Dashboard {
                                         Icon::new(issue_type_icon(&issue_type))
                                             .text_color(cx.theme().link),
                                     )
-                                    .child(div().min_w_0().truncate().child(key)),
+                                    .child(
+                                        div()
+                                            .id(detail_key_accessibility_id.clone())
+                                            .accessibility_id(detail_key_accessibility_id)
+                                            .role(gpui::accesskit::Role::TextRun)
+                                            .aria_label(detail_key_label)
+                                            .min_w_0()
+                                            .child(div().min_w_0().truncate().child(key)),
+                                    ),
                             ),
                     )
                     .child(
@@ -1205,5 +1219,22 @@ impl Dashboard {
             .text_xs()
             .child(label)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::issue_detail_key_accessibility_id;
+
+    #[test]
+    fn issue_detail_key_accessibility_id_is_stable_and_keyed() {
+        assert_eq!(
+            issue_detail_key_accessibility_id("DESK-179"),
+            "issue-detail-key-DESK-179"
+        );
+        assert_eq!(
+            issue_detail_key_accessibility_id("IX-2109"),
+            "issue-detail-key-IX-2109"
+        );
     }
 }
