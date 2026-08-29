@@ -69,6 +69,14 @@ trait AuthenticatedImageService {
         request: AttachmentImageRequest,
         cancellation: &'a CancellationToken,
     ) -> PortFuture<'a, AttachmentImage>;
+
+    fn cached_attachment_image<'a>(
+        &'a self,
+        _request: AttachmentImageRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Option<AttachmentImage>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
 }
 
 impl AuthenticatedImageService for LiveWorkspace {
@@ -79,6 +87,100 @@ impl AuthenticatedImageService for LiveWorkspace {
     ) -> PortFuture<'a, AttachmentImage> {
         Box::pin(self.fetch_attachment_image(request, cancellation))
     }
+
+    fn cached_attachment_image<'a>(
+        &'a self,
+        request: AttachmentImageRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, Option<AttachmentImage>> {
+        Box::pin(self.cached_attachment_image(request, cancellation))
+    }
+}
+
+/// Hydrate the bounded image catalog from durable cache only. Missing entries
+/// remain Loading so the ordinary authenticated fetch can fill them later.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fetch_cached_rich_image_states(
+    workspace: Arc<LiveWorkspace>,
+    site_id: JiraSiteId,
+    issue_id: IssueId,
+    images: Vec<(RichImage, usize, ImageSource)>,
+    cancellation: CancellationToken,
+    diagnostics: DiagnosticsSink,
+    flow: DiagnosticFlow,
+    load_token: u64,
+) -> Result<RichImageRenderStates, ()> {
+    fetch_cached_rich_image_states_with_loader(
+        workspace.as_ref(),
+        site_id,
+        issue_id,
+        images,
+        cancellation,
+        diagnostics,
+        flow,
+        load_token,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_cached_rich_image_states_with_loader<L: AuthenticatedImageService + ?Sized>(
+    loader: &L,
+    site_id: JiraSiteId,
+    issue_id: IssueId,
+    images: Vec<(RichImage, usize, ImageSource)>,
+    cancellation: CancellationToken,
+    diagnostics: DiagnosticsSink,
+    flow: DiagnosticFlow,
+    load_token: u64,
+) -> Result<RichImageRenderStates, ()> {
+    let mut states = super::catalog::loading_image_states(&images, &diagnostics, flow, load_token);
+    for (image, _, _) in &images {
+        if cancellation.is_cancelled() {
+            return Err(());
+        }
+        if policy::image_format_for_mime(&image.mime_type).is_none() {
+            continue;
+        }
+        let result = loader
+            .cached_attachment_image(
+                AttachmentImageRequest {
+                    site_id: site_id.clone(),
+                    issue_id: issue_id.clone(),
+                    attachment_id: image.attachment_id.clone(),
+                    width: policy::MAX_IMAGE_REQUEST_WIDTH,
+                    height: policy::MAX_IMAGE_REQUEST_HEIGHT,
+                    max_bytes: policy::MAX_IMAGE_REQUEST_BYTES,
+                },
+                &cancellation,
+            )
+            .await;
+        let Ok(Some(image_bytes)) = result else {
+            continue;
+        };
+        let preflight = policy::image_response_preflight(
+            &image.mime_type,
+            &image_bytes.mime_type,
+            &image_bytes.bytes,
+            0,
+        );
+        let Some(format) = policy::fetched_image_format(
+            &image.mime_type,
+            &image_bytes.mime_type,
+            &image_bytes.bytes,
+        )
+        .filter(|_| preflight == policy::MediaPreflight::Accepted) else {
+            continue;
+        };
+        states.insert(
+            image.attachment_id.clone(),
+            RichImageRenderState::Ready(Arc::new(Image::from_bytes(
+                gpui_image_format(format),
+                image_bytes.bytes,
+            ))),
+        );
+    }
+    Ok(states)
 }
 
 /// Sequentially load the catalog through the authenticated workspace service.
@@ -339,6 +441,8 @@ mod tests {
     struct FakeImageService {
         requests: Mutex<Vec<AttachmentImageRequest>>,
         responses: Mutex<VecDeque<Result<AttachmentImage, jira_application::ApplicationError>>>,
+        cached_responses:
+            Mutex<VecDeque<Result<Option<AttachmentImage>, jira_application::ApplicationError>>>,
         cancel_after_first: bool,
     }
 
@@ -350,6 +454,16 @@ mod tests {
             self.responses
                 .lock()
                 .expect("response lock")
+                .push_back(response);
+        }
+
+        fn push_cached_response(
+            &self,
+            response: Result<Option<AttachmentImage>, jira_application::ApplicationError>,
+        ) {
+            self.cached_responses
+                .lock()
+                .expect("cached response lock")
                 .push_back(response);
         }
 
@@ -389,6 +503,20 @@ mod tests {
                         "missing fake response",
                     ))
                 });
+            Box::pin(async move { response })
+        }
+
+        fn cached_attachment_image<'a>(
+            &'a self,
+            _request: AttachmentImageRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, Option<AttachmentImage>> {
+            let response = self
+                .cached_responses
+                .lock()
+                .expect("cached response lock")
+                .pop_front()
+                .unwrap_or(Ok(None));
             Box::pin(async move { response })
         }
     }
@@ -518,6 +646,28 @@ mod tests {
                 Some(RichImageRenderState::Ready(_))
             ));
         }
+    }
+
+    #[test]
+    fn cached_loader_hydrates_ready_state_without_using_authenticated_fetch() {
+        let fake = FakeImageService::default();
+        fake.push_cached_response(Ok(Some(png_image("cached", 16))));
+        let states = block_on(fetch_cached_rich_image_states_with_loader(
+            &fake,
+            JiraSiteId::new("site").expect("site"),
+            IssueId::new("issue").expect("issue"),
+            vec![(image("cached"), 0, ImageSource::ResolvedAdf)],
+            CancellationToken::new(),
+            DiagnosticsSink::disabled(),
+            DiagnosticFlow::SelectedDetail,
+            11,
+        ))
+        .expect("cached hydration");
+        assert_eq!(fake.call_count(), 0);
+        assert!(matches!(
+            states.get("cached"),
+            Some(RichImageRenderState::Ready(_))
+        ));
     }
 
     #[test]

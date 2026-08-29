@@ -20,7 +20,7 @@ pub(super) use download::{
     attachment_temp_token, cleanup_attachment_temp, inline_attachment_for_download,
     portal_download_directory, sanitized_attachment_filename, write_attachment_temp,
 };
-pub(super) use loader::fetch_rich_image_states;
+pub(super) use loader::{fetch_cached_rich_image_states, fetch_rich_image_states};
 
 pub(super) fn image_result_is_current(
     selected_issue: Option<&IssueId>,

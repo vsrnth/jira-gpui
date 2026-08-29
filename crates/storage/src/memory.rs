@@ -10,10 +10,12 @@ use std::{
 };
 
 use jira_application::{
-    ApplicationError, CachedAssignableUsers, CachedIssueTransitions, CommitOutcome, ErrorKind,
-    IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator, IssueTransition,
-    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, MAX_ISSUE_TRANSITIONS, PortFuture, SyncCommit, SyncState,
-    UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
+    ApplicationError, AttachmentImage, CachedAssignableUsers, CachedIssueTransitions,
+    CommitOutcome, ErrorKind, IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator,
+    IssueMediaCachePort, IssueTransition, MAX_ASSIGNABLE_USER_SEARCH_LIMIT,
+    MAX_CACHED_ATTACHMENT_IMAGE_BYTES, MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES,
+    MAX_CACHED_ATTACHMENT_IMAGE_TOTAL_BYTES, MAX_ISSUE_TRANSITIONS, PortFuture, SyncCommit,
+    SyncState, UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort, validate_cached_image,
 };
 use jira_domain::{
     EventId, Issue, IssueId, JiraSiteId, NotificationDelivery, Timestamp, UpdateEvent,
@@ -24,6 +26,12 @@ use time::OffsetDateTime;
 type IssueKey = (JiraSiteId, IssueId);
 type UserSetKey = (JiraSiteId, UserSetId);
 type EditCacheKey = (JiraSiteId, String, String);
+type MediaCacheKey = (JiraSiteId, IssueId, String);
+
+struct StoredMediaImage {
+    image: AttachmentImage,
+    order: u64,
+}
 
 #[derive(Default)]
 struct State {
@@ -34,6 +42,8 @@ struct State {
     user_sets: HashMap<UserSetKey, UserSet>,
     assignable_users: HashMap<EditCacheKey, CachedAssignableUsers>,
     issue_transitions: HashMap<EditCacheKey, CachedIssueTransitions>,
+    media_images: HashMap<MediaCacheKey, StoredMediaImage>,
+    next_media_order: u64,
     next_user_set_id: u64,
 }
 
@@ -506,6 +516,107 @@ impl IssueEditCachePort for InMemoryStore {
     }
 }
 
+impl IssueMediaCachePort for InMemoryStore {
+    fn cached_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        attachment_id: &'a str,
+    ) -> PortFuture<'a, Option<AttachmentImage>> {
+        Box::pin(async move {
+            let mut state = self.write_state()?;
+            let key = (site_id.clone(), issue_id.clone(), attachment_id.to_owned());
+            let Some(stored) = state.media_images.get(&key) else {
+                return Ok(None);
+            };
+            if validate_cached_image(
+                &stored.image,
+                attachment_id,
+                MAX_CACHED_ATTACHMENT_IMAGE_BYTES,
+            )
+            .is_err()
+            {
+                state.media_images.remove(&key);
+                return Ok(None);
+            }
+            Ok(Some(stored.image.clone()))
+        })
+    }
+
+    fn cache_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        image: &'a AttachmentImage,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            validate_cached_image(
+                image,
+                &image.attachment_id,
+                MAX_CACHED_ATTACHMENT_IMAGE_BYTES,
+            )?;
+            let mut state = self.write_state()?;
+            let key = (
+                site_id.clone(),
+                issue_id.clone(),
+                image.attachment_id.clone(),
+            );
+            state.media_images.remove(&key);
+            state.next_media_order = state.next_media_order.saturating_add(1);
+            while state.media_images.len() + 1 > MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES
+                || state
+                    .media_images
+                    .values()
+                    .map(|stored| stored.image.bytes.len())
+                    .sum::<usize>()
+                    .saturating_add(image.bytes.len())
+                    > MAX_CACHED_ATTACHMENT_IMAGE_TOTAL_BYTES
+            {
+                let Some(oldest) = state
+                    .media_images
+                    .iter()
+                    .min_by(|(left_key, left), (right_key, right)| {
+                        left.order
+                            .cmp(&right.order)
+                            .then_with(|| left_key.cmp(right_key))
+                    })
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                state.media_images.remove(&oldest);
+            }
+            if image.bytes.len() <= MAX_CACHED_ATTACHMENT_IMAGE_TOTAL_BYTES {
+                let order = state.next_media_order;
+                state.media_images.insert(
+                    key,
+                    StoredMediaImage {
+                        image: image.clone(),
+                        order,
+                    },
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn remove_cached_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        attachment_id: &'a str,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            self.write_state()?.media_images.remove(&(
+                site_id.clone(),
+                issue_id.clone(),
+                attachment_id.to_owned(),
+            ));
+            Ok(())
+        })
+    }
+}
+
 impl UserSetPort for InMemoryStore {
     fn list<'a>(&'a self, site_id: &'a JiraSiteId) -> PortFuture<'a, Vec<UserSet>> {
         Box::pin(async move {
@@ -570,13 +681,107 @@ fn storage_error(message: impl Into<String>) -> ApplicationError {
 #[cfg(test)]
 mod tests {
     use futures_lite::future::block_on;
-    use jira_application::{IssueCachePort, SyncCommit, SyncState};
-    use jira_domain::{JiraSiteId, UserSetId};
+    use jira_application::{
+        AttachmentImage, IssueCachePort, IssueMediaCachePort, SyncCommit, SyncState,
+    };
+    use jira_domain::{IssueId, JiraSiteId, UserSetId};
 
     use super::InMemoryStore;
 
     fn site_id() -> JiraSiteId {
         JiraSiteId::new("cloud-id").expect("valid site id")
+    }
+
+    #[test]
+    fn media_cache_isolated_and_invalid_entries_are_rejected() {
+        let store = InMemoryStore::new();
+        let site = site_id();
+        let issue = IssueId::new("issue").expect("issue");
+        let image = AttachmentImage {
+            attachment_id: "image".into(),
+            mime_type: "image/png".into(),
+            bytes: b"\x89PNG\r\n\x1a\nvalid".to_vec(),
+        };
+        block_on(store.cache_attachment_image(&site, &issue, &image)).expect("cache image");
+        assert!(
+            block_on(store.cached_attachment_image(&site, &issue, "image"))
+                .expect("read image")
+                .is_some()
+        );
+        assert!(
+            block_on(store.cached_attachment_image(
+                &JiraSiteId::new("other-site").expect("site"),
+                &issue,
+                "image"
+            ))
+            .expect("isolated read")
+            .is_none()
+        );
+        let invalid = AttachmentImage {
+            attachment_id: "invalid".into(),
+            mime_type: "image/png".into(),
+            bytes: b"not-an-image".to_vec(),
+        };
+        assert!(block_on(store.cache_attachment_image(&site, &issue, &invalid)).is_err());
+    }
+
+    #[test]
+    fn media_cache_evicts_oldest_entry_at_deterministic_entry_bound() {
+        let store = InMemoryStore::new();
+        let site = site_id();
+        let issue = IssueId::new("issue").expect("issue");
+        for index in 0..=jira_application::MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES {
+            let image = AttachmentImage {
+                attachment_id: format!("image-{index}"),
+                mime_type: "image/png".into(),
+                bytes: b"\x89PNG\r\n\x1a\nvalid".to_vec(),
+            };
+            block_on(store.cache_attachment_image(&site, &issue, &image)).expect("cache image");
+        }
+        assert!(
+            block_on(store.cached_attachment_image(&site, &issue, "image-0"))
+                .expect("oldest read")
+                .is_none()
+        );
+        assert!(
+            block_on(store.cached_attachment_image(
+                &site,
+                &issue,
+                &format!(
+                    "image-{}",
+                    jira_application::MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES
+                )
+            ))
+            .expect("newest read")
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn media_cache_evicts_oldest_entry_at_deterministic_aggregate_byte_bound() {
+        let store = InMemoryStore::new();
+        let site = site_id();
+        let issue = IssueId::new("issue").expect("issue");
+        let mut bytes = vec![0; jira_application::MAX_CACHED_ATTACHMENT_IMAGE_BYTES];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        for index in 0..5 {
+            let image = AttachmentImage {
+                attachment_id: format!("large-image-{index}"),
+                mime_type: "image/png".into(),
+                bytes: bytes.clone(),
+            };
+            block_on(store.cache_attachment_image(&site, &issue, &image)).expect("cache image");
+        }
+        assert!(
+            block_on(store.cached_attachment_image(&site, &issue, "large-image-0"))
+                .expect("oldest read")
+                .is_none()
+        );
+        assert!(
+            block_on(store.cached_attachment_image(&site, &issue, "large-image-4"))
+                .expect("newest read")
+                .is_some()
+        );
     }
 
     #[test]

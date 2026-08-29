@@ -5,11 +5,9 @@
 //! turns that safe projection into ordinary GPUI elements; links remain visibly
 //! styled but inert.
 
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, Hsla, Image, IntoElement as _, ParentElement as _, Styled as _, Window, div,
-};
+use gpui::{AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled as _, Window, div};
 use gpui_component::{StyledExt as _, v_flex};
 use jira_domain::{
     PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
@@ -17,9 +15,11 @@ use jira_domain::{
 };
 
 use crate::diagnostics::{
-    DecodeFallbackReason, DiagnosticEvent, DiagnosticFlow, DiagnosticsSink,
-    ImageSource as DiagnosticImageSource, ImageStateReason,
+    DecodeFallbackReason, DiagnosticEvent, ImageSource as DiagnosticImageSource, ImageStateReason,
 };
+
+mod state;
+pub(crate) use state::{RichImageRenderState, RichImageRenderStates};
 
 // Cached models can be deserialized without passing through the Jira ADF
 // parser. Keep rendering bounded independently of the domain projection's
@@ -40,126 +40,6 @@ const UNSUPPORTED_CONTENT_SENTINEL: &str = "[unsupported Jira content]";
 const UNSUPPORTED_CONTENT_LABEL: &str = "Some Jira content isn't supported yet.";
 const UNAVAILABLE_IMAGE_SENTINEL: &str = "[Jira image unavailable]";
 const UNAVAILABLE_IMAGE_LABEL: &str = "Image unavailable.";
-
-/// The application-owned state for a Jira attachment image.
-///
-/// The renderer only accepts already-authenticated, decoded in-memory images. It never
-/// turns attachment metadata into a URI or performs a fetch itself.
-#[derive(Clone)]
-pub(crate) enum RichImageRenderState {
-    Loading,
-    Ready(Arc<Image>),
-    Failed,
-}
-
-#[derive(Clone)]
-pub(crate) struct RichImageDiagnosticContext {
-    pub(crate) sink: DiagnosticsSink,
-    pub(crate) flow: DiagnosticFlow,
-    pub(crate) load_token: u64,
-    pub(crate) candidate_ordinal: usize,
-    pub(crate) surface_ordinal: usize,
-    pub(crate) source: DiagnosticImageSource,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct RichImageRenderStates {
-    states: HashMap<String, RichImageRenderState>,
-    contexts: HashMap<String, RichImageDiagnosticContext>,
-    default_context: Option<(DiagnosticsSink, DiagnosticFlow, u64)>,
-}
-
-impl RichImageRenderStates {
-    pub(crate) fn with_context(
-        sink: DiagnosticsSink,
-        flow: DiagnosticFlow,
-        load_token: u64,
-    ) -> Self {
-        Self {
-            default_context: Some((sink, flow, load_token)),
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn set_context(
-        &mut self,
-        sink: DiagnosticsSink,
-        flow: DiagnosticFlow,
-        load_token: u64,
-    ) {
-        self.states.clear();
-        self.contexts.clear();
-        self.default_context = Some((sink, flow, load_token));
-    }
-
-    pub(crate) fn insert(&mut self, key: String, state: RichImageRenderState) {
-        self.states.insert(key, state);
-    }
-
-    pub(crate) fn insert_with_context(
-        &mut self,
-        key: String,
-        state: RichImageRenderState,
-        candidate_ordinal: usize,
-        surface_ordinal: usize,
-        source: DiagnosticImageSource,
-    ) {
-        if let Some((sink, flow, load_token)) = &self.default_context {
-            self.contexts.insert(
-                key.clone(),
-                RichImageDiagnosticContext {
-                    sink: sink.clone(),
-                    flow: *flow,
-                    load_token: *load_token,
-                    candidate_ordinal,
-                    surface_ordinal,
-                    source,
-                },
-            );
-        }
-        self.states.insert(key, state);
-    }
-
-    pub(crate) fn get(&self, key: &str) -> Option<&RichImageRenderState> {
-        self.states.get(key)
-    }
-
-    pub(crate) fn context_for(
-        &self,
-        key: &str,
-        fallback_ordinal: usize,
-        fallback_surface_ordinal: usize,
-        fallback_source: DiagnosticImageSource,
-    ) -> Option<RichImageDiagnosticContext> {
-        self.contexts.get(key).cloned().or_else(|| {
-            self.default_context
-                .as_ref()
-                .map(|(sink, flow, load_token)| RichImageDiagnosticContext {
-                    sink: sink.clone(),
-                    flow: *flow,
-                    load_token: *load_token,
-                    candidate_ordinal: fallback_ordinal,
-                    surface_ordinal: fallback_surface_ordinal,
-                    source: fallback_source,
-                })
-        })
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.states.clear();
-        self.contexts.clear();
-    }
-}
-
-impl<const N: usize> From<[(String, RichImageRenderState); N]> for RichImageRenderStates {
-    fn from(entries: [(String, RichImageRenderState); N]) -> Self {
-        let mut states = Self::default();
-        for (key, state) in entries {
-            states.insert(key, state);
-        }
-        states
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RichTextPalette {

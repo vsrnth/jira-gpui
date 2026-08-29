@@ -7,9 +7,10 @@ use std::{
 
 use futures_channel::oneshot;
 use jira_application::{
-    ApplicationError, CachedAssignableUsers, CachedIssueTransitions, CommitOutcome, ErrorKind,
-    IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator, IssueTransition, PortFuture,
-    SyncCommit, SyncState, UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
+    ApplicationError, AttachmentImage, CachedAssignableUsers, CachedIssueTransitions,
+    CommitOutcome, ErrorKind, IssueCachePort, IssueEditCachePort, IssueListQuery, IssueLocator,
+    IssueMediaCachePort, IssueTransition, PortFuture, SyncCommit, SyncState, UpdateFeedPort,
+    UpdateFeedQuery, UserSetDraft, UserSetPort,
 };
 use jira_domain::{
     EventId, Issue, IssueId, JiraSiteId, NotificationDelivery, Timestamp, UpdateEvent, User,
@@ -19,6 +20,7 @@ use jira_domain::{
 mod codecs;
 mod edit_cache;
 mod issue_sync;
+mod media_cache;
 mod migrations;
 mod update_feed;
 mod user_sets;
@@ -404,6 +406,65 @@ impl IssueEditCachePort for SqliteStore {
             worker::Request::InvalidateIssueTransitions {
                 site_id: site_id.clone(),
                 locator: locator.clone(),
+                reply,
+            },
+            receiver,
+        )
+    }
+}
+
+impl IssueMediaCachePort for SqliteStore {
+    fn cached_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        attachment_id: &'a str,
+    ) -> PortFuture<'a, Option<AttachmentImage>> {
+        let (reply, receiver) = oneshot::channel();
+        worker::dispatch(
+            self.worker.sender.clone(),
+            worker::Request::CachedAttachmentImage {
+                site_id: site_id.clone(),
+                issue_id: issue_id.clone(),
+                attachment_id: attachment_id.to_owned(),
+                reply,
+            },
+            receiver,
+        )
+    }
+
+    fn cache_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        image: &'a AttachmentImage,
+    ) -> PortFuture<'a, ()> {
+        let (reply, receiver) = oneshot::channel();
+        worker::dispatch(
+            self.worker.sender.clone(),
+            worker::Request::CacheAttachmentImage {
+                site_id: site_id.clone(),
+                issue_id: issue_id.clone(),
+                image: image.clone(),
+                reply,
+            },
+            receiver,
+        )
+    }
+
+    fn remove_cached_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        attachment_id: &'a str,
+    ) -> PortFuture<'a, ()> {
+        let (reply, receiver) = oneshot::channel();
+        worker::dispatch(
+            self.worker.sender.clone(),
+            worker::Request::RemoveCachedAttachmentImage {
+                site_id: site_id.clone(),
+                issue_id: issue_id.clone(),
+                attachment_id: attachment_id.to_owned(),
                 reply,
             },
             receiver,

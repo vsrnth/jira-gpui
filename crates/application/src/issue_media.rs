@@ -3,7 +3,8 @@ use std::sync::Arc;
 use crate::{
     ApplicationError, AttachmentBodyClass, AttachmentContent, AttachmentDownloadRequest,
     AttachmentImage, AttachmentImageRequest, AttachmentMimeClass, AttachmentReadAttempt,
-    AttachmentReadDiagnostic, CancellationToken, ErrorKind, JiraAttachmentReadPort,
+    AttachmentReadDiagnostic, CancellationToken, ErrorKind, IssueMediaCachePort,
+    JiraAttachmentReadPort,
 };
 
 pub const DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -11,6 +12,9 @@ pub const DEFAULT_ATTACHMENT_IMAGE_WIDTH: usize = 1_600;
 pub const DEFAULT_ATTACHMENT_IMAGE_HEIGHT: usize = 1_200;
 pub const DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ATTACHMENT_ID_BYTES: usize = 255;
+pub const MAX_CACHED_ATTACHMENT_IMAGE_BYTES: usize = DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES;
+pub const MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES: usize = 1_024;
+pub const MAX_CACHED_ATTACHMENT_IMAGE_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 /// Bounds used by the application when requesting and accepting attachment thumbnails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,12 +38,29 @@ impl Default for IssueMediaConfig {
 #[derive(Clone)]
 pub struct IssueMediaService {
     jira: Arc<dyn JiraAttachmentReadPort>,
+    cache: Option<Arc<dyn IssueMediaCachePort>>,
     config: IssueMediaConfig,
 }
 
 impl IssueMediaService {
     pub fn new(jira: Arc<dyn JiraAttachmentReadPort>, config: IssueMediaConfig) -> Self {
-        Self { jira, config }
+        Self {
+            jira,
+            cache: None,
+            config,
+        }
+    }
+
+    pub fn new_with_cache(
+        jira: Arc<dyn JiraAttachmentReadPort>,
+        cache: Arc<dyn IssueMediaCachePort>,
+        config: IssueMediaConfig,
+    ) -> Self {
+        Self {
+            jira,
+            cache: Some(cache),
+            config,
+        }
     }
 
     pub async fn fetch(
@@ -51,6 +72,30 @@ impl IssueMediaService {
         validate_attachment_id(&request.attachment_id)?;
         cancellation.check()?;
         let requested_attachment_id = request.attachment_id.clone();
+
+        if let Some(cache) = &self.cache
+            && let Ok(Some(image)) = cache
+                .cached_attachment_image(
+                    &request.site_id,
+                    &request.issue_id,
+                    &request.attachment_id,
+                )
+                .await
+        {
+            if validate_cached_image(&image, &requested_attachment_id, self.config.max_bytes)
+                .is_ok()
+            {
+                cancellation.check()?;
+                return Ok(image);
+            }
+            let _ = cache
+                .remove_cached_attachment_image(
+                    &request.site_id,
+                    &request.issue_id,
+                    &request.attachment_id,
+                )
+                .await;
+        }
 
         let port_request = AttachmentImageRequest {
             width: self.config.width,
@@ -106,7 +151,49 @@ impl IssueMediaService {
         )?;
 
         cancellation.check()?;
+        if let Some(cache) = &self.cache {
+            // The cache is an optimization only. A full or unavailable local
+            // cache must never turn a valid Jira response into a UI failure.
+            let _ = cache
+                .cache_attachment_image(&port_request.site_id, &port_request.issue_id, &image)
+                .await;
+        }
         Ok(image)
+    }
+
+    /// Read one previously authenticated image without contacting Jira. This
+    /// is intentionally a cache-only operation so callers can hydrate UI
+    /// state before a detail refresh starts.
+    pub async fn cached(
+        &self,
+        request: AttachmentImageRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<AttachmentImage>, ApplicationError> {
+        self.validate_config()?;
+        validate_attachment_id(&request.attachment_id)?;
+        cancellation.check()?;
+        let Some(cache) = &self.cache else {
+            return Ok(None);
+        };
+        let result = cache
+            .cached_attachment_image(&request.site_id, &request.issue_id, &request.attachment_id)
+            .await;
+        let Ok(Some(image)) = result else {
+            return Ok(None);
+        };
+        if validate_cached_image(&image, &request.attachment_id, self.config.max_bytes).is_ok() {
+            cancellation.check()?;
+            Ok(Some(image))
+        } else {
+            let _ = cache
+                .remove_cached_attachment_image(
+                    &request.site_id,
+                    &request.issue_id,
+                    &request.attachment_id,
+                )
+                .await;
+            Ok(None)
+        }
     }
 
     pub async fn load(
@@ -275,6 +362,64 @@ fn validate_image(
         ));
     }
     Ok(())
+}
+
+/// Validate bytes before they enter the durable authenticated-media cache.
+/// This intentionally includes a signature check because cache contents are
+/// trusted by neither the storage adapter nor a future process invocation.
+pub fn validate_cached_image(
+    image: &AttachmentImage,
+    requested_attachment_id: &str,
+    max_bytes: usize,
+) -> Result<(), ApplicationError> {
+    if image.attachment_id != requested_attachment_id {
+        return Err(ApplicationError::invalid_input(
+            "cached image belongs to a different attachment",
+        ));
+    }
+    validate_attachment_id(&image.attachment_id)?;
+    if !is_allowed_image_mime(&image.mime_type) {
+        return Err(ApplicationError::invalid_input(
+            "cached image has an unsupported media type",
+        ));
+    }
+    if image.bytes.is_empty() || image.bytes.len() > max_bytes {
+        return Err(ApplicationError::invalid_input(
+            "cached image size is outside the configured bound",
+        ));
+    }
+    let signature = image_signature(&image.bytes);
+    if signature.is_none()
+        || (!image
+            .mime_type
+            .trim()
+            .eq_ignore_ascii_case("application/octet-stream")
+            && !mime_matches_signature(&image.mime_type, signature.expect("checked above")))
+    {
+        return Err(ApplicationError::invalid_input(
+            "cached image has an invalid signature",
+        ));
+    }
+    Ok(())
+}
+
+fn mime_matches_signature(mime_type: &str, signature: &str) -> bool {
+    let mime_type = mime_type.trim().to_ascii_lowercase();
+    (mime_type == signature) || (mime_type == "image/jpg" && signature == "image/jpeg")
+}
+
+fn image_signature(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 fn upstream(message: &'static str) -> ApplicationError {

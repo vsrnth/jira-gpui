@@ -1,9 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use jira_domain::{IssueId, JiraSiteId};
 
 use super::*;
-use crate::{AttachmentReadAttempt, AttachmentReadStage, PortFuture, test_support::block_on};
+use crate::{
+    AttachmentReadAttempt, AttachmentReadStage, IssueMediaCachePort, PortFuture,
+    test_support::block_on,
+};
 
 struct FakeJira {
     image: Mutex<Option<Result<AttachmentImage, ApplicationError>>>,
@@ -101,6 +107,59 @@ fn content(id: &str, mime: &str, bytes: &[u8]) -> AttachmentContent {
     }
 }
 
+struct FakeMediaCache {
+    image: Mutex<Option<AttachmentImage>>,
+    reads: AtomicUsize,
+    writes: AtomicUsize,
+    removals: AtomicUsize,
+}
+
+impl FakeMediaCache {
+    fn new(image: Option<AttachmentImage>) -> Arc<Self> {
+        Arc::new(Self {
+            image: Mutex::new(image),
+            reads: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
+            removals: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl IssueMediaCachePort for FakeMediaCache {
+    fn cached_attachment_image<'a>(
+        &'a self,
+        _site_id: &'a JiraSiteId,
+        _issue_id: &'a IssueId,
+        _attachment_id: &'a str,
+    ) -> PortFuture<'a, Option<AttachmentImage>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let image = self.image.lock().expect("cache image lock").clone();
+        Box::pin(async move { Ok(image) })
+    }
+
+    fn cache_attachment_image<'a>(
+        &'a self,
+        _site_id: &'a JiraSiteId,
+        _issue_id: &'a IssueId,
+        image: &'a AttachmentImage,
+    ) -> PortFuture<'a, ()> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        *self.image.lock().expect("cache image lock") = Some(image.clone());
+        Box::pin(async { Ok(()) })
+    }
+
+    fn remove_cached_attachment_image<'a>(
+        &'a self,
+        _site_id: &'a JiraSiteId,
+        _issue_id: &'a IssueId,
+        _attachment_id: &'a str,
+    ) -> PortFuture<'a, ()> {
+        self.removals.fetch_add(1, Ordering::SeqCst);
+        *self.image.lock().expect("cache image lock") = None;
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[test]
 fn defaults_bound_media_requests() {
     let config = IssueMediaConfig::default();
@@ -108,6 +167,40 @@ fn defaults_bound_media_requests() {
     assert_eq!(DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, 64 * 1024 * 1024);
     assert_eq!(config.width, 1_600);
     assert_eq!(config.height, 1_200);
+}
+
+#[test]
+fn valid_persistent_cache_hit_avoids_jira_and_is_returned_immediately() {
+    let jira = FakeJira::new(None, None);
+    let cache = FakeMediaCache::new(Some(image("att-1", "image/png", b"\x89PNG\r\n\x1a\nvalid")));
+    let service =
+        IssueMediaService::new_with_cache(jira.clone(), cache.clone(), IssueMediaConfig::default());
+    let loaded =
+        block_on(service.fetch(request("att-1"), &CancellationToken::new())).expect("cached image");
+    assert_eq!(loaded.attachment_id, "att-1");
+    assert_eq!(cache.reads.load(Ordering::SeqCst), 1);
+    assert!(
+        jira.image_request
+            .lock()
+            .expect("image request lock")
+            .is_none()
+    );
+}
+
+#[test]
+fn invalid_persistent_cache_entry_is_removed_then_replaced_by_jira_response() {
+    let jira = FakeJira::new(
+        Some(Ok(image("att-1", "image/png", b"\x89PNG\r\n\x1a\nvalid"))),
+        None,
+    );
+    let cache = FakeMediaCache::new(Some(image("att-1", "image/png", b"not-an-image")));
+    let service =
+        IssueMediaService::new_with_cache(jira.clone(), cache.clone(), IssueMediaConfig::default());
+    let loaded = block_on(service.fetch(request("att-1"), &CancellationToken::new()))
+        .expect("refreshed image");
+    assert_eq!(loaded.bytes, b"\x89PNG\r\n\x1a\nvalid");
+    assert_eq!(cache.removals.load(Ordering::SeqCst), 1);
+    assert_eq!(cache.writes.load(Ordering::SeqCst), 1);
 }
 
 #[test]

@@ -207,7 +207,11 @@ impl LiveWorkspace {
         let cache_port: Arc<dyn IssueCachePort> = cache.clone();
         let catalog = IssueCatalogService::new(jira.clone(), cache_port.clone());
         let detail = IssueDetailService::new(jira.clone(), IssueDetailConfig::default());
-        let media = IssueMediaService::new(jira.clone(), IssueMediaConfig::default());
+        let media = IssueMediaService::new_with_cache(
+            jira.clone(),
+            cache.clone() as Arc<dyn jira_application::IssueMediaCachePort>,
+            IssueMediaConfig::default(),
+        );
         let comments = CommentService::new(comment_writer);
         let edit_cache: Arc<dyn IssueEditCachePort> = cache.clone();
         let issue_editor =
@@ -433,6 +437,15 @@ impl LiveWorkspace {
         cancellation: &CancellationToken,
     ) -> Result<AttachmentImage, ApplicationError> {
         media::fetch_attachment_image(&self.media, request, cancellation).await
+    }
+
+    /// Read one persisted authenticated thumbnail without contacting Jira.
+    pub async fn cached_attachment_image(
+        &self,
+        request: AttachmentImageRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<AttachmentImage>, ApplicationError> {
+        media::cached_attachment_image(&self.media, request, cancellation).await
     }
 
     /// Fetch one bounded authenticated original attachment for an explicit download.

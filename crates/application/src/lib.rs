@@ -46,7 +46,8 @@ pub use issue_edit::{
 pub use issue_media::{
     DEFAULT_ATTACHMENT_IMAGE_HEIGHT, DEFAULT_ATTACHMENT_IMAGE_WIDTH,
     DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, IssueMediaConfig,
-    IssueMediaService,
+    IssueMediaService, MAX_CACHED_ATTACHMENT_IMAGE_BYTES, MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES,
+    MAX_CACHED_ATTACHMENT_IMAGE_TOTAL_BYTES, validate_cached_image,
 };
 pub use issue_pull::{IssuePullConfig, IssuePullOutcome, IssuePullRequest, IssuePullService};
 pub use issues::IssueCatalogService;

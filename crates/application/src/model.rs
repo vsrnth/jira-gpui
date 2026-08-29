@@ -219,8 +219,8 @@ pub struct AttachmentImageRequest {
     pub max_bytes: usize,
 }
 
-/// An image attachment read from Jira. The bytes are deliberately kept in memory only; callers
-/// decide how and when to cache or display them.
+/// An image attachment read from Jira. Callers may persist validated image
+/// bytes through the dedicated authenticated-media cache port or display them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttachmentImage {
     pub attachment_id: String,

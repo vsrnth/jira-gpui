@@ -14,6 +14,14 @@ pub(super) async fn fetch_attachment_image(
     service.fetch(request, cancellation).await
 }
 
+pub(super) async fn cached_attachment_image(
+    service: &IssueMediaService,
+    request: AttachmentImageRequest,
+    cancellation: &CancellationToken,
+) -> Result<Option<AttachmentImage>, ApplicationError> {
+    service.cached(request, cancellation).await
+}
+
 pub(super) async fn download_attachment(
     service: &IssueMediaService,
     request: AttachmentDownloadRequest,

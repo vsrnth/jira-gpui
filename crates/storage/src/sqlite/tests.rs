@@ -1,7 +1,8 @@
 use futures_lite::future::block_on;
 use jira_application::{
-    ErrorKind, IssueCachePort, IssueEditCachePort, IssueLocator, IssueTransition, SyncCommit,
-    SyncState, UpdateFeedPort, UpdateFeedQuery, UserSetDraft, UserSetPort,
+    AttachmentImage, ErrorKind, IssueCachePort, IssueEditCachePort, IssueLocator,
+    IssueMediaCachePort, IssueTransition, SyncCommit, SyncState, UpdateFeedPort, UpdateFeedQuery,
+    UserSetDraft, UserSetPort,
 };
 use jira_domain::{
     AccountId, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, Priority, Project,
@@ -73,7 +74,7 @@ fn migrations_enable_pragmas_and_reject_newer_schema() {
     let version: i32 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let foreign_keys: i32 = connection
         .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
         .expect("foreign keys");
@@ -123,7 +124,7 @@ fn migrations_enable_pragmas_and_reject_newer_schema() {
         "wal"
     );
     connection
-        .execute_batch("PRAGMA user_version = 5")
+        .execute_batch("PRAGMA user_version = 6")
         .expect("set newer version");
     drop(connection);
     assert!(SqliteStore::open(&path).is_err());
@@ -463,6 +464,157 @@ fn file_store_reopens_with_durable_snapshots_and_rolls_back_failures() {
     assert_eq!(
         block_on(reopened.get_issue(&site_id, &cached_issue.id)).expect("lookup"),
         Some(cached_issue)
+    );
+}
+
+#[test]
+fn attachment_image_cache_is_site_isolated_durable_and_rejects_corruption() {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("media-cache.sqlite");
+    let store = SqliteStore::open(&path).expect("open store");
+    let site_id = site("site-a");
+    let user_set_id = saved_set(&store, site_id.clone());
+    let cached_issue = issue(
+        site_id.clone(),
+        "100",
+        "Image issue",
+        datetime!(2026-01-03 00:00 UTC),
+    );
+    block_on(store.commit_sync(SyncCommit {
+        site_id: site_id.clone(),
+        user_set_id: user_set_id.clone(),
+        issues: vec![cached_issue],
+        update_events: Vec::new(),
+        replace_membership: true,
+        state: SyncState::new(site_id.clone(), user_set_id),
+    }))
+    .expect("commit issue");
+    let image = AttachmentImage {
+        attachment_id: "attachment-1".into(),
+        mime_type: "image/png".into(),
+        bytes: b"\x89PNG\r\n\x1a\nvalid".to_vec(),
+    };
+    let issue_id = IssueId::new("100").expect("issue");
+    block_on(store.cache_attachment_image(&site_id, &issue_id, &image)).expect("cache image");
+    assert_eq!(
+        block_on(store.cached_attachment_image(&site_id, &issue_id, "attachment-1"))
+            .expect("read image"),
+        Some(image.clone())
+    );
+    assert!(
+        block_on(store.cached_attachment_image(&site("site-b"), &issue_id, "attachment-1"))
+            .expect("isolated read")
+            .is_none()
+    );
+    drop(store);
+    let reopened = SqliteStore::open(&path).expect("reopen store");
+    assert!(
+        block_on(reopened.cached_attachment_image(&site_id, &issue_id, "attachment-1"))
+            .expect("durable read")
+            .is_some()
+    );
+    let connection = rusqlite::Connection::open(&path).expect("raw connection");
+    connection
+        .execute(
+            "UPDATE issue_media_cache SET bytes = ?1 WHERE site_id = ?2 AND issue_id = ?3 AND attachment_id = ?4",
+            rusqlite::params![b"corrupt".as_slice(), site_id.as_str(), issue_id.as_str(), "attachment-1"],
+        )
+        .expect("corrupt fixture");
+    assert!(
+        block_on(reopened.cached_attachment_image(&site_id, &issue_id, "attachment-1"))
+            .expect("corruption read")
+            .is_none()
+    );
+}
+
+#[test]
+fn attachment_image_cache_evicts_oldest_entry_at_deterministic_entry_bound() {
+    let store = SqliteStore::in_memory().expect("open store");
+    let site_id = site("site-a");
+    let user_set_id = saved_set(&store, site_id.clone());
+    let cached_issue = issue(
+        site_id.clone(),
+        "100",
+        "Image issue",
+        datetime!(2026-01-03 00:00 UTC),
+    );
+    block_on(store.commit_sync(SyncCommit {
+        site_id: site_id.clone(),
+        user_set_id: user_set_id.clone(),
+        issues: vec![cached_issue],
+        update_events: Vec::new(),
+        replace_membership: true,
+        state: SyncState::new(site_id.clone(), user_set_id),
+    }))
+    .expect("commit issue");
+    let issue_id = IssueId::new("100").expect("issue");
+    for index in 0..=jira_application::MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES {
+        let image = AttachmentImage {
+            attachment_id: format!("image-{index}"),
+            mime_type: "image/png".into(),
+            bytes: b"\x89PNG\r\n\x1a\nvalid".to_vec(),
+        };
+        block_on(store.cache_attachment_image(&site_id, &issue_id, &image)).expect("cache image");
+    }
+    assert!(
+        block_on(store.cached_attachment_image(&site_id, &issue_id, "image-0"))
+            .expect("oldest read")
+            .is_none()
+    );
+    assert!(
+        block_on(store.cached_attachment_image(
+            &site_id,
+            &issue_id,
+            &format!(
+                "image-{}",
+                jira_application::MAX_CACHED_ATTACHMENT_IMAGE_ENTRIES
+            )
+        ))
+        .expect("newest read")
+        .is_some()
+    );
+}
+
+#[test]
+fn attachment_image_cache_evicts_oldest_entry_at_deterministic_aggregate_byte_bound() {
+    let store = SqliteStore::in_memory().expect("open store");
+    let site_id = site("site-a");
+    let user_set_id = saved_set(&store, site_id.clone());
+    let cached_issue = issue(
+        site_id.clone(),
+        "100",
+        "Image issue",
+        datetime!(2026-01-03 00:00 UTC),
+    );
+    block_on(store.commit_sync(SyncCommit {
+        site_id: site_id.clone(),
+        user_set_id: user_set_id.clone(),
+        issues: vec![cached_issue],
+        update_events: Vec::new(),
+        replace_membership: true,
+        state: SyncState::new(site_id.clone(), user_set_id),
+    }))
+    .expect("commit issue");
+    let issue_id = IssueId::new("100").expect("issue");
+    let mut bytes = vec![0; jira_application::MAX_CACHED_ATTACHMENT_IMAGE_BYTES];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    for index in 0..5 {
+        let image = AttachmentImage {
+            attachment_id: format!("large-image-{index}"),
+            mime_type: "image/png".into(),
+            bytes: bytes.clone(),
+        };
+        block_on(store.cache_attachment_image(&site_id, &issue_id, &image)).expect("cache image");
+    }
+    assert!(
+        block_on(store.cached_attachment_image(&site_id, &issue_id, "large-image-0"))
+            .expect("oldest read")
+            .is_none()
+    );
+    assert!(
+        block_on(store.cached_attachment_image(&site_id, &issue_id, "large-image-4"))
+            .expect("newest read")
+            .is_some()
     );
 }
 

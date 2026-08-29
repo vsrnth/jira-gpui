@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Transaction};
 
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const SUPPORTED_SCHEMA_VERSION: i32 = 4;
+const SUPPORTED_SCHEMA_VERSION: i32 = 5;
 
 pub(super) fn initialize_connection(
     connection: &mut Connection,
@@ -56,6 +56,12 @@ fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     if version < 4 {
         migrate_field_changed_kind(&transaction)?;
         transaction.execute_batch("PRAGMA user_version = 4;")?;
+    }
+    if version < 5 {
+        transaction.execute_batch(include_str!(
+            "../../../../migrations/0005_attachment_image_cache.sql"
+        ))?;
+        transaction.execute_batch("PRAGMA user_version = 5;")?;
     }
     transaction.commit()
 }

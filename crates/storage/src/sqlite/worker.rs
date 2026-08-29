@@ -2,9 +2,9 @@ use std::{path::PathBuf, sync::mpsc, thread};
 
 use futures_channel::oneshot;
 use jira_application::{
-    ApplicationError, CachedAssignableUsers, CachedIssueTransitions, CommitOutcome, ErrorKind,
-    IssueListQuery, IssueLocator, IssueTransition, PortFuture, SyncCommit, SyncState,
-    UpdateFeedQuery, UserSetDraft,
+    ApplicationError, AttachmentImage, CachedAssignableUsers, CachedIssueTransitions,
+    CommitOutcome, ErrorKind, IssueListQuery, IssueLocator, IssueTransition, PortFuture,
+    SyncCommit, SyncState, UpdateFeedQuery, UserSetDraft,
 };
 use jira_domain::{
     EventId, Issue, IssueId, JiraSiteId, NotificationDelivery, Timestamp, UpdateEvent, User,
@@ -110,6 +110,24 @@ pub(super) enum Request {
     InvalidateIssueTransitions {
         site_id: JiraSiteId,
         locator: IssueLocator,
+        reply: Reply<()>,
+    },
+    CachedAttachmentImage {
+        site_id: JiraSiteId,
+        issue_id: IssueId,
+        attachment_id: String,
+        reply: Reply<Option<AttachmentImage>>,
+    },
+    CacheAttachmentImage {
+        site_id: JiraSiteId,
+        issue_id: IssueId,
+        image: AttachmentImage,
+        reply: Reply<()>,
+    },
+    RemoveCachedAttachmentImage {
+        site_id: JiraSiteId,
+        issue_id: IssueId,
+        attachment_id: String,
         reply: Reply<()>,
     },
 }
@@ -323,6 +341,43 @@ fn handle_request(connection: &mut Connection, request: Request) {
         } => send(
             reply,
             super::edit_cache::invalidate_issue_transitions(connection, &site_id, &locator),
+        ),
+        Request::CachedAttachmentImage {
+            site_id,
+            issue_id,
+            attachment_id,
+            reply,
+        } => send(
+            reply,
+            super::media_cache::cached_attachment_image(
+                connection,
+                &site_id,
+                &issue_id,
+                &attachment_id,
+            ),
+        ),
+        Request::CacheAttachmentImage {
+            site_id,
+            issue_id,
+            image,
+            reply,
+        } => send(
+            reply,
+            super::media_cache::cache_attachment_image(connection, &site_id, &issue_id, &image),
+        ),
+        Request::RemoveCachedAttachmentImage {
+            site_id,
+            issue_id,
+            attachment_id,
+            reply,
+        } => send(
+            reply,
+            super::media_cache::remove_cached_attachment_image(
+                connection,
+                &site_id,
+                &issue_id,
+                &attachment_id,
+            ),
         ),
     }
 }

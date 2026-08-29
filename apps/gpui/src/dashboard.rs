@@ -107,9 +107,9 @@ use detail_payload::{
 use media::{
     AttachmentDownloadState, MAX_ATTACHMENT_DOWNLOAD_BYTES, attachment_download_button_label,
     attachment_download_is_current, attachment_issue_id, attachment_temp_path,
-    attachment_temp_token, cleanup_attachment_temp, image_result_is_current,
-    inline_attachment_for_download, portal_download_directory, sanitized_attachment_filename,
-    write_attachment_temp,
+    attachment_temp_token, cleanup_attachment_temp, collect_detail_images_with_context,
+    fetch_cached_rich_image_states, image_result_is_current, inline_attachment_for_download,
+    portal_download_directory, sanitized_attachment_filename, write_attachment_temp,
 };
 use request_epoch::{RequestEpoch, RequestSource, RequestTicket};
 
@@ -791,6 +791,7 @@ pub struct Dashboard {
     detail_state: DetailState,
     detail_epoch: RequestEpoch<RequestSource, IssueId>,
     detail_task: Option<gpui::Task<()>>,
+    detail_cache_task: Option<gpui::Task<()>>,
     selected_image_states: RichImageRenderStates,
     remote_image_states: RichImageRenderStates,
     remote_lookup: RemoteLookupState,
@@ -1011,6 +1012,7 @@ impl Dashboard {
             detail_state: DetailState::Empty,
             detail_epoch: RequestEpoch::default(),
             detail_task: None,
+            detail_cache_task: None,
             selected_image_states: RichImageRenderStates::with_context(
                 diagnostics.clone(),
                 DiagnosticFlow::SelectedDetail,
@@ -1125,6 +1127,7 @@ impl Dashboard {
             detail_state: DetailState::Empty,
             detail_epoch: RequestEpoch::default(),
             detail_task: None,
+            detail_cache_task: None,
             selected_image_states: RichImageRenderStates::with_context(
                 diagnostics.clone(),
                 DiagnosticFlow::SelectedDetail,
@@ -1638,6 +1641,7 @@ impl Dashboard {
         self.selected_image_states.clear();
         self.detail_epoch.invalidate();
         self.detail_task.take();
+        self.detail_cache_task.take();
         self.selected_issue = None;
         self.selected_issue_core = None;
         self.detail_state = DetailState::Empty;
@@ -1707,16 +1711,25 @@ impl Dashboard {
             .detail_epoch
             .begin(RequestSource::SelectedDetail, issue_id.clone());
         self.invalidate_attachment_download();
-        self.selected_image_states.set_context(
-            self.diagnostics.clone(),
-            DiagnosticFlow::SelectedDetail,
-            load_token,
-        );
+        if selection_changed {
+            self.selected_image_states.set_context(
+                self.diagnostics.clone(),
+                DiagnosticFlow::SelectedDetail,
+                load_token,
+            );
+        } else {
+            self.selected_image_states.rebind_context(
+                self.diagnostics.clone(),
+                DiagnosticFlow::SelectedDetail,
+                load_token,
+            );
+        }
         self.invalidate_comment_selection();
         self.invalidate_issue_edit_selection();
         // Preserve the prior task-drop position after all selection
         // invalidations; begin above already cancelled its token.
         self.detail_task.take();
+        self.detail_cache_task.take();
         if selection_changed {
             self.selected_issue_core = None;
         }
@@ -1738,6 +1751,20 @@ impl Dashboard {
             .find(|issue| issue.id == issue_id)
             .filter(|issue| issue_has_cached_detail(issue))
             .map(detail_view_from_issue);
+        let cached_image_catalog = cached_detail
+            .as_ref()
+            .map(collect_detail_images_with_context)
+            .unwrap_or_default();
+        if cached_image_catalog.is_empty() && !selection_changed {
+            // A forced refresh without a cached image catalog cannot safely
+            // preserve attachment IDs from the previous payload.
+            self.selected_image_states.clear();
+            self.selected_image_states.rebind_context(
+                self.diagnostics.clone(),
+                DiagnosticFlow::SelectedDetail,
+                load_token,
+            );
+        }
         self.detail_state = if let Some(detail) = cached_detail {
             DetailState::Refreshing {
                 issue_id: issue_id.clone(),
@@ -1753,6 +1780,38 @@ impl Dashboard {
         };
         let users = self.users.clone();
         let diagnostics = self.diagnostics.clone();
+        if !cached_image_catalog.is_empty() {
+            let cache_issue_id = issue_id.clone();
+            let cache_workspace = workspace.clone();
+            let cache_ticket = ticket.clone();
+            let cache_cancellation = cancellation.clone();
+            let cache_diagnostics = diagnostics.clone();
+            let cache_task = cx.spawn(async move |this, cx| {
+                let cached_states = fetch_cached_rich_image_states(
+                    cache_workspace.clone(),
+                    cache_workspace.site_id().clone(),
+                    cache_issue_id,
+                    cached_image_catalog,
+                    cache_cancellation,
+                    cache_diagnostics,
+                    DiagnosticFlow::SelectedDetail,
+                    load_token,
+                )
+                .await;
+                let _ = this.update(cx, |this, cx| {
+                    if !this.selected_detail_ticket_is_current(&cache_ticket) {
+                        return;
+                    }
+                    this.detail_cache_task = None;
+                    if let Ok(mut states) = cached_states {
+                        states.merge_preserving_ready(&this.selected_image_states);
+                        this.selected_image_states = states;
+                        cx.notify();
+                    }
+                });
+            });
+            self.detail_cache_task = Some(cache_task);
+        }
         let task = cx.spawn(async move |this, cx| {
             let result = read_detail(workspace.as_ref(), read_request.clone(), &cancellation).await;
             let detail = match result {
@@ -1816,6 +1875,8 @@ impl Dashboard {
                     }
                     this.selected_issue_core = Some(issue.clone());
                     this.detail_state = DetailState::Loaded(view);
+                    let mut loading = loading;
+                    loading.merge_preserving_ready(&this.selected_image_states);
                     this.selected_image_states = loading;
                     cx.notify();
                     Some(issue_changed)
@@ -1856,7 +1917,8 @@ impl Dashboard {
                     }
                     this.detail_epoch.finish(&ticket);
                     this.detail_task = None;
-                    if let Ok(states) = states {
+                    if let Ok(mut states) = states {
+                        states.merge_preserving_ready(&this.selected_image_states);
                         this.selected_image_states = states;
                     }
                     cx.notify();

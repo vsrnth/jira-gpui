@@ -280,6 +280,33 @@ pub trait IssueCachePort: Send + Sync {
     ) -> PortFuture<'a, ()>;
 }
 
+/// Persistent cache for authenticated issue images. Implementations must keep
+/// entries isolated by all three identities and may evict entries when their
+/// bounded cache is full. Cache failures are deliberately best effort for
+/// callers displaying Jira content.
+pub trait IssueMediaCachePort: Send + Sync {
+    fn cached_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        attachment_id: &'a str,
+    ) -> PortFuture<'a, Option<AttachmentImage>>;
+
+    fn cache_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        image: &'a AttachmentImage,
+    ) -> PortFuture<'a, ()>;
+
+    fn remove_cached_attachment_image<'a>(
+        &'a self,
+        site_id: &'a JiraSiteId,
+        issue_id: &'a IssueId,
+        attachment_id: &'a str,
+    ) -> PortFuture<'a, ()>;
+}
+
 pub trait IssueDiffer: Send + Sync {
     fn diff(&self, change_set: ChangeSet) -> Result<Vec<UpdateEvent>, ApplicationError>;
 }
