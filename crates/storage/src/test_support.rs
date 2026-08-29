@@ -12,8 +12,8 @@ use jira_application::{
 };
 use jira_domain::{
     AccountId, ChangeValue, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId,
-    NotificationDelivery, Priority, Project, Status, Timestamp, UpdateEvent, UpdateKind, User,
-    UserSetId,
+    NotificationDelivery, Priority, Project, RichBlock, RichInline, RichTextDocument, Status,
+    Timestamp, UpdateEvent, UpdateKind, User, UserSetId,
 };
 use time::macros::datetime;
 
@@ -248,6 +248,101 @@ where
     assert_eq!(
         block_on(store.list_issues(&assignee_query)).expect("assignee query"),
         vec![second]
+    );
+}
+
+pub(crate) fn issue_cache_detail_snapshot<S>(store: S)
+where
+    S: IssueCachePort + UserSetPort,
+{
+    let site_id = site("site-detail");
+    let user_set_id = set(&store, site_id.clone(), "detail");
+    let baseline = issue(
+        site_id.clone(),
+        "700",
+        "APP-700",
+        "baseline",
+        datetime!(2026-01-02 00:00 UTC),
+    );
+    commit(
+        &store,
+        site_id.clone(),
+        user_set_id.clone(),
+        vec![baseline.clone()],
+        vec![],
+        true,
+        SyncState::new(site_id.clone(), user_set_id.clone()),
+    );
+
+    let mut detailed = baseline.clone();
+    detailed.description_text = Some("A detail description".into());
+    detailed.rich_description = Some(RichTextDocument::new(
+        vec![RichBlock::Paragraph(vec![RichInline::Text {
+            text: "A bounded rich detail description.".into(),
+            marks: vec![],
+        }])],
+        false,
+    ));
+    assert!(block_on(store.cache_detail_issue(&detailed)).expect("cache detail"));
+    assert!(!block_on(store.cache_detail_issue(&detailed)).expect("unchanged detail"));
+    assert_eq!(
+        block_on(store.get_issue(&site_id, &baseline.id))
+            .expect("detail lookup")
+            .expect("cached detail"),
+        detailed
+    );
+
+    let mut changed_baseline = baseline.clone();
+    changed_baseline.summary = "updated baseline".into();
+    commit(
+        &store,
+        site_id.clone(),
+        user_set_id.clone(),
+        vec![changed_baseline.clone()],
+        vec![],
+        false,
+        SyncState::new(site_id.clone(), user_set_id.clone()),
+    );
+    let preserved = block_on(store.get_issue(&site_id, &baseline.id))
+        .expect("preserved lookup")
+        .expect("preserved issue");
+    assert_eq!(preserved.summary, "updated baseline");
+    assert_eq!(preserved.description_text, detailed.description_text);
+    assert_eq!(preserved.rich_description, detailed.rich_description);
+
+    let mut cleared = preserved;
+    cleared.description_text = None;
+    cleared.rich_description = None;
+    assert!(block_on(store.cache_detail_issue(&cleared)).expect("clear detail"));
+    assert_eq!(
+        block_on(store.get_issue(&site_id, &baseline.id))
+            .expect("cleared lookup")
+            .expect("cleared issue")
+            .description_text,
+        None
+    );
+    assert_eq!(
+        block_on(store.get_issue(&site_id, &baseline.id))
+            .expect("cleared rich lookup")
+            .expect("cleared rich issue")
+            .rich_description,
+        None
+    );
+    assert_eq!(
+        block_on(store.issues_for_user_set(&site_id, &user_set_id))
+            .expect("membership lookup")
+            .len(),
+        1
+    );
+    assert!(
+        !block_on(store.cache_detail_issue(&issue(
+            site_id,
+            "missing",
+            "APP-999",
+            "missing",
+            datetime!(2026-01-03 00:00 UTC),
+        )))
+        .expect("missing detail")
     );
 }
 
@@ -1349,6 +1444,11 @@ mod tests {
         issue_cache_query_filters,
         in_memory_issue_cache_query_filters,
         sqlite_issue_cache_query_filters
+    );
+    contract_tests!(
+        issue_cache_detail_snapshot,
+        in_memory_issue_cache_detail_snapshot,
+        sqlite_issue_cache_detail_snapshot
     );
     contract_tests!(
         issue_cache_membership_replace_and_extend,

@@ -467,6 +467,74 @@ fn file_store_reopens_with_durable_snapshots_and_rolls_back_failures() {
 }
 
 #[test]
+fn detail_snapshot_survives_reopen_and_can_be_cleared() {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("detail.sqlite");
+    let site_id = site("site-detail");
+    let user_set_id;
+    let cached_issue;
+    {
+        let store = SqliteStore::open(&path).expect("open store");
+        user_set_id = saved_set(&store, site_id.clone());
+        cached_issue = issue(
+            site_id.clone(),
+            "701",
+            "Detail",
+            datetime!(2026-01-03 00:00 UTC),
+        );
+        block_on(store.commit_sync(SyncCommit {
+            site_id: site_id.clone(),
+            user_set_id: user_set_id.clone(),
+            issues: vec![cached_issue.clone()],
+            update_events: vec![],
+            replace_membership: true,
+            state: SyncState::new(site_id.clone(), user_set_id.clone()),
+        }))
+        .expect("baseline commit");
+        let mut detailed = cached_issue.clone();
+        detailed.description_text = Some("Persisted detail".into());
+        detailed.rich_description = Some(RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: "Persisted rich detail".into(),
+                marks: vec![],
+            }])],
+            false,
+        ));
+        assert!(block_on(store.cache_detail_issue(&detailed)).expect("cache detail"));
+    }
+    let store = SqliteStore::open(&path).expect("reopen store");
+    let mut cleared = block_on(store.get_issue(&site_id, &cached_issue.id))
+        .expect("detail lookup")
+        .expect("detail exists");
+    assert_eq!(
+        cleared.description_text.as_deref(),
+        Some("Persisted detail")
+    );
+    assert_eq!(
+        cleared
+            .rich_description
+            .as_ref()
+            .map(RichTextDocument::plain_text)
+            .as_deref(),
+        Some("Persisted rich detail")
+    );
+    cleared.description_text = None;
+    cleared.rich_description = None;
+    assert!(block_on(store.cache_detail_issue(&cleared)).expect("clear detail"));
+    let restored = block_on(store.get_issue(&site_id, &cached_issue.id))
+        .expect("cleared lookup")
+        .expect("cleared exists");
+    assert_eq!(restored.description_text, None);
+    assert_eq!(restored.rich_description, None);
+    assert_eq!(
+        block_on(store.issues_for_user_set(&site_id, &user_set_id))
+            .expect("membership lookup")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn issue_edit_cache_persists_and_isolates_locator_kind_and_site() {
     let directory = tempdir().expect("tempdir");
     let path = directory.path().join("edit-cache.sqlite");

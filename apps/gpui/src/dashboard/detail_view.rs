@@ -29,11 +29,22 @@ impl Dashboard {
         }
     }
 
+    fn selected_issue_detail_view(&self) -> Option<IssueViewModel> {
+        selected_issue_from_sources(
+            self.selected_issue.as_ref(),
+            &self.domain_issues,
+            self.selected_issue_core.as_ref(),
+        )
+        .filter(|issue| issue_has_cached_detail(issue))
+        .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+        .or_else(|| self.selected_issue_view())
+    }
+
     pub(super) fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
         let issue = match &self.remote_lookup {
             RemoteLookupState::Loaded { .. } => self.remote_lookup_view(),
             RemoteLookupState::Loading { .. } | RemoteLookupState::Error { .. } => None,
-            RemoteLookupState::Idle => self.selected_issue_view(),
+            RemoteLookupState::Idle => self.selected_issue_detail_view(),
         };
         let detail_state = match &self.remote_lookup {
             RemoteLookupState::Loaded { detail, .. } => DetailState::Loaded(detail.clone()),
@@ -112,7 +123,7 @@ impl Dashboard {
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Loading issue details"))
                     .child(h_flex().gap_2().child(Spinner::new())),
-                DetailState::Empty | DetailState::Loaded(_) => v_flex()
+                DetailState::Empty | DetailState::Loaded(_) | DetailState::Refreshing { .. } => v_flex()
                     .id("issue-detail-empty-surface")
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Select an issue"))
@@ -150,16 +161,26 @@ impl Dashboard {
         let status = issue.status.clone();
         let priority = issue.priority.clone();
         let description = match &detail_state {
-            DetailState::Loaded(detail) => detail.description.clone(),
+            DetailState::Loaded(detail) | DetailState::Refreshing { detail, .. } => {
+                detail.description.clone()
+            }
             _ => issue.description.clone(),
         };
         let rich_description = match &detail_state {
-            DetailState::Loaded(detail) => detail.rich_description.clone(),
+            DetailState::Loaded(detail) | DetailState::Refreshing { detail, .. } => {
+                detail.rich_description.clone()
+            }
             _ => issue.rich_description.clone(),
         };
         let detail_issue_id = match &self.remote_lookup {
             RemoteLookupState::Loaded { issue, .. } => Some(issue.id.clone()),
-            _ if matches!(&detail_state, DetailState::Loaded(_)) => self.selected_issue.clone(),
+            _ if matches!(
+                &detail_state,
+                DetailState::Loaded(_) | DetailState::Refreshing { .. }
+            ) =>
+            {
+                self.selected_issue.clone()
+            }
             _ => None,
         };
         let inline_attachment_action = detail_issue_id.map(|expected_issue_id| {
@@ -355,7 +376,8 @@ impl Dashboard {
             DetailState::Empty
             | DetailState::RemoteLoading { .. }
             | DetailState::RemoteError { .. }
-            | DetailState::Loaded(_) => None,
+            | DetailState::Loaded(_)
+            | DetailState::Refreshing { .. } => None,
         }
     }
 
@@ -386,6 +408,21 @@ impl Dashboard {
                 )
                 .into_any_element(),
             DetailState::Loading { .. } | DetailState::Error { .. } => v_flex().into_any_element(),
+            DetailState::Refreshing { .. } => v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .child("Comments and attachments"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Refreshing comments and attachments in the background."),
+                )
+                .into_any_element(),
             DetailState::RemoteLoading { query } => v_flex()
                 .gap_2()
                 .child(div().text_sm().font_semibold().child("Jira lookup"))

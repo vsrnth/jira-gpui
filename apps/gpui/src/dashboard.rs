@@ -475,6 +475,10 @@ enum DetailState {
     Loading {
         issue_id: IssueId,
     },
+    Refreshing {
+        issue_id: IssueId,
+        detail: IssueDetailViewModel,
+    },
     RemoteLoading {
         query: String,
     },
@@ -587,6 +591,22 @@ fn selected_issue_from_sources<'a>(
         .or_else(|| selected_issue_core.filter(|issue| &issue.id == selected))
 }
 
+fn detail_view_from_issue(issue: &Issue) -> IssueDetailViewModel {
+    IssueDetailViewModel {
+        description: issue
+            .description_text
+            .clone()
+            .unwrap_or_else(|| "No description supplied.".to_owned()),
+        rich_description: issue.rich_description.clone(),
+        comments: Vec::new(),
+        attachments: Vec::new(),
+    }
+}
+
+fn issue_has_cached_detail(issue: &Issue) -> bool {
+    issue.description_text.is_some() || issue.rich_description.is_some()
+}
+
 fn selection_after_issue_view_rebuild(
     selected_issue: Option<IssueId>,
     visible_issues: &[IssueViewModel],
@@ -609,7 +629,9 @@ fn should_defer_detail_refresh(
             .any(|issue| &issue.id == selected_issue)
         && matches!(
             detail_state,
-            DetailState::Loading { issue_id } | DetailState::Error { issue_id, .. }
+            DetailState::Loading { issue_id }
+            | DetailState::Refreshing { issue_id, .. }
+            | DetailState::Error { issue_id, .. }
                 if issue_id == selected_issue
         )
 }
@@ -1529,7 +1551,9 @@ impl Dashboard {
             && !force
             && matches!(
                 self.detail_state,
-                DetailState::Loading { .. } | DetailState::Loaded(_)
+                DetailState::Loading { .. }
+                    | DetailState::Refreshing { .. }
+                    | DetailState::Loaded(_)
             )
         {
             return;
@@ -1562,8 +1586,21 @@ impl Dashboard {
         };
 
         let cancellation = ticket.cancellation().clone();
-        self.detail_state = DetailState::Loading {
-            issue_id: issue_id.clone(),
+        let cached_detail = self
+            .domain_issues
+            .iter()
+            .find(|issue| issue.id == issue_id)
+            .filter(|issue| issue_has_cached_detail(issue))
+            .map(detail_view_from_issue);
+        self.detail_state = if let Some(detail) = cached_detail {
+            DetailState::Refreshing {
+                issue_id: issue_id.clone(),
+                detail,
+            }
+        } else {
+            DetailState::Loading {
+                issue_id: issue_id.clone(),
+            }
         };
         let read_request = DetailReadRequest::Selected {
             issue_id: issue_id.clone(),
@@ -1581,7 +1618,9 @@ impl Dashboard {
                         }
                         this.detail_epoch.finish(&ticket);
                         this.detail_task = None;
-                        this.selected_image_states.clear();
+                        if !matches!(this.detail_state, DetailState::Refreshing { .. }) {
+                            this.selected_image_states.clear();
+                        }
                         this.detail_state = DetailState::Error {
                             issue_id: issue_id.clone(),
                             copy: safe_detail_error(&error),
@@ -1603,19 +1642,43 @@ impl Dashboard {
             let image_issue_id = detail_image_issue_id(&read_request, &issue.id);
             let view = payload.view.clone();
             let loading = payload.loading.clone();
-            let applied = this
+            let should_cache = this
                 .update(cx, |this, cx| {
                     if !this.selected_detail_ticket_is_current(&ticket) {
-                        return false;
+                        return None;
                     }
-                    this.selected_issue_core = Some(issue);
+                    let issue_changed = this
+                        .domain_issues
+                        .iter()
+                        .find(|cached| cached.id == issue_id)
+                        .is_none_or(|cached| cached != &issue);
+                    if issue_changed {
+                        if let Some(cached) = this
+                            .domain_issues
+                            .iter_mut()
+                            .find(|cached| cached.id == issue_id)
+                        {
+                            *cached = issue.clone();
+                        }
+                        this.issues = issue_views_for_filter_with_offset(
+                            &this.domain_issues,
+                            &this.users,
+                            this.status_filter,
+                            &this.search_query,
+                            this.timestamp_offset,
+                        );
+                    }
+                    this.selected_issue_core = Some(issue.clone());
                     this.detail_state = DetailState::Loaded(view);
                     this.selected_image_states = loading;
                     cx.notify();
-                    true
+                    Some(issue_changed)
                 })
-                .unwrap_or(false);
-            if !applied {
+                .unwrap_or(None);
+            if should_cache == Some(true) {
+                let _ = workspace.cache_detail_issue(&issue).await;
+            }
+            if should_cache.is_none() {
                 for (candidate_ordinal, (surface_ordinal, source)) in
                     image_contexts.iter().copied().enumerate()
                 {

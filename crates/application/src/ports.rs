@@ -236,6 +236,10 @@ pub trait IssueEditCachePort: Send + Sync {
 
 /// Cache operations required by issue browsing and synchronization.
 pub trait IssueCachePort: Send + Sync {
+    /// Replace one existing cached issue with its detail-enriched snapshot.
+    /// This never changes memberships, events, or synchronization cursors.
+    fn cache_detail_issue<'a>(&'a self, issue: &'a Issue) -> PortFuture<'a, bool>;
+
     fn list_issues<'a>(&'a self, query: &'a IssueListQuery) -> PortFuture<'a, Vec<Issue>>;
 
     fn get_issue<'a>(

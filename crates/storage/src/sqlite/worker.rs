@@ -15,6 +15,10 @@ use rusqlite::{Connection, OpenFlags};
 use super::{SqliteOpenError, ensure_database_file, migrations};
 
 pub(super) enum Request {
+    CacheDetailIssue {
+        issue: Box<Issue>,
+        reply: Reply<bool>,
+    },
     ListIssues {
         query: IssueListQuery,
         reply: Reply<Vec<Issue>>,
@@ -186,6 +190,10 @@ pub(super) fn dispatch<T: Send + 'static>(
 
 fn handle_request(connection: &mut Connection, request: Request) {
     match request {
+        Request::CacheDetailIssue { issue, reply } => send(
+            reply,
+            super::issue_sync::cache_detail_issue(connection, &issue),
+        ),
         Request::ListIssues { query, reply } => {
             send(reply, super::issue_sync::list_issues(connection, &query))
         }

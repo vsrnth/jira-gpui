@@ -74,6 +74,23 @@ impl InMemoryStore {
 }
 
 impl IssueCachePort for InMemoryStore {
+    fn cache_detail_issue<'a>(&'a self, issue: &'a Issue) -> PortFuture<'a, bool> {
+        Box::pin(async move {
+            let mut state = self.write_state()?;
+            let Some(existing) = state
+                .issues
+                .get_mut(&(issue.site_id.clone(), issue.id.clone()))
+            else {
+                return Ok(false);
+            };
+            if existing == issue {
+                return Ok(false);
+            }
+            *existing = issue.clone();
+            Ok(true)
+        })
+    }
+
     fn list_issues<'a>(&'a self, query: &'a IssueListQuery) -> PortFuture<'a, Vec<Issue>> {
         Box::pin(async move {
             let state = self.read_state()?;
@@ -231,9 +248,23 @@ impl IssueCachePort for InMemoryStore {
             }
 
             for issue in commit.issues {
-                state
-                    .issues
-                    .insert((commit.site_id.clone(), issue.id.clone()), issue);
+                let key = (commit.site_id.clone(), issue.id.clone());
+                let issue = if issue.description_text.is_none() && issue.rich_description.is_none()
+                {
+                    state
+                        .issues
+                        .get(&key)
+                        .map(|existing| {
+                            let mut merged = issue.clone();
+                            merged.description_text = existing.description_text.clone();
+                            merged.rich_description = existing.rich_description.clone();
+                            merged
+                        })
+                        .unwrap_or(issue)
+                } else {
+                    issue
+                };
+                state.issues.insert(key, issue);
             }
 
             let mut inserted_events: Vec<UpdateEvent> = Vec::new();

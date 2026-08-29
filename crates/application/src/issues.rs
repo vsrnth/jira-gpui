@@ -34,6 +34,10 @@ impl IssueCatalogService {
         self.cache.get_issue(site_id, issue_id).await
     }
 
+    pub async fn cache_detail_issue(&self, issue: &Issue) -> Result<bool, ApplicationError> {
+        self.cache.cache_detail_issue(issue).await
+    }
+
     pub async fn search_users(
         &self,
         request: &UserSearchRequest,

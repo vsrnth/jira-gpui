@@ -421,6 +421,11 @@ impl LiveWorkspace {
             .await
     }
 
+    /// Persist the exact successfully fetched issue snapshot for the local detail cache.
+    pub async fn cache_detail_issue(&self, issue: &Issue) -> Result<bool, ApplicationError> {
+        self.catalog.cache_detail_issue(issue).await
+    }
+
     /// Fetch one bounded authenticated thumbnail through the application media service.
     pub async fn fetch_attachment_image(
         &self,

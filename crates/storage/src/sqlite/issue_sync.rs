@@ -86,6 +86,46 @@ pub(super) fn get_issue(
     snapshot.map(|value| decode(&value, "issue")).transpose()
 }
 
+pub(super) fn cache_detail_issue(
+    connection: &mut Connection,
+    issue: &Issue,
+) -> Result<bool, ApplicationError> {
+    let transaction = connection.transaction().map_err(sqlite_error)?;
+    let existing_snapshot = transaction
+        .query_row(
+            "SELECT snapshot FROM issues WHERE site_id = ?1 AND issue_id = ?2",
+            params![issue.site_id.as_str(), issue.id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    let Some(existing_snapshot) = existing_snapshot else {
+        return Ok(false);
+    };
+    let existing: Issue = decode(&existing_snapshot, "issue")?;
+    if existing == *issue {
+        return Ok(false);
+    }
+    let snapshot = encode(issue, "issue")?;
+    transaction
+        .execute(
+            "UPDATE issues SET issue_key = ?1, summary = ?2, assignee_id = ?3, updated_seconds = ?4, updated_nanos = ?5, snapshot = ?6 WHERE site_id = ?7 AND issue_id = ?8",
+            params![
+                issue.key.as_str(),
+                issue.summary,
+                issue.assignee.as_ref().map(|id| id.as_str()),
+                stamp(issue.updated_at).0,
+                stamp(issue.updated_at).1,
+                snapshot,
+                issue.site_id.as_str(),
+                issue.id.as_str(),
+            ],
+        )
+        .map_err(sqlite_error)?;
+    transaction.commit().map_err(sqlite_error)?;
+    Ok(true)
+}
+
 pub(super) fn issues_for_user_set(
     connection: &Connection,
     site_id: &JiraSiteId,
@@ -236,7 +276,28 @@ pub(super) fn commit_sync(
 }
 
 fn insert_issue(transaction: &Transaction<'_>, issue: &Issue) -> Result<(), ApplicationError> {
-    let snapshot = encode(issue, "issue")?;
+    let issue = if issue.description_text.is_none() && issue.rich_description.is_none() {
+        transaction
+            .query_row(
+                "SELECT snapshot FROM issues WHERE site_id = ?1 AND issue_id = ?2",
+                params![issue.site_id.as_str(), issue.id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .map(|snapshot| decode::<Issue>(&snapshot, "issue"))
+            .transpose()?
+            .map(|existing| {
+                let mut merged = issue.clone();
+                merged.description_text = existing.description_text;
+                merged.rich_description = existing.rich_description;
+                merged
+            })
+            .unwrap_or_else(|| issue.clone())
+    } else {
+        issue.clone()
+    };
+    let snapshot = encode(&issue, "issue")?;
     transaction
         .execute("INSERT INTO issues (site_id, issue_id, issue_key, summary, assignee_id, updated_seconds, updated_nanos, snapshot) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(site_id, issue_id) DO UPDATE SET issue_key = excluded.issue_key, summary = excluded.summary, assignee_id = excluded.assignee_id, updated_seconds = excluded.updated_seconds, updated_nanos = excluded.updated_nanos, snapshot = excluded.snapshot", params![issue.site_id.as_str(), issue.id.as_str(), issue.key.as_str(), issue.summary, issue.assignee.as_ref().map(|id| id.as_str()), stamp(issue.updated_at).0, stamp(issue.updated_at).1, snapshot])
         .map_err(sqlite_error)?;

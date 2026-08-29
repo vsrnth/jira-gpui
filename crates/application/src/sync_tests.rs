@@ -93,6 +93,10 @@ struct FakeCache {
 }
 
 impl IssueCachePort for FakeCache {
+    fn cache_detail_issue<'a>(&'a self, _issue: &'a Issue) -> PortFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
     fn list_issues<'a>(&'a self, _query: &'a IssueListQuery) -> PortFuture<'a, Vec<Issue>> {
         Box::pin(async { Ok(Vec::new()) })
     }

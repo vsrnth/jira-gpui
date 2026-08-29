@@ -910,6 +910,84 @@ fn selected_without_workspace_finishes_epoch_and_drops_task(cx: &mut gpui::TestA
     assert_eq!(state, DetailState::Empty);
 }
 
+#[gpui::test]
+fn cached_detail_renders_without_spinner_and_survives_background_failure(
+    cx: &mut gpui::TestAppContext,
+) {
+    let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
+        JiraSiteId::new("site").expect("site"),
+        None,
+        Arc::new(EmptyJira),
+        Arc::new(jira_storage::SqliteStore::in_memory().expect("store")),
+    ))
+    .expect("workspace");
+    let issue = sample_issues().into_iter().next().expect("issue");
+    let issue_id = issue.id.clone();
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.workspace = Some(Arc::new(workspace));
+    let cached_description = "Persisted detail description";
+    dashboard
+        .domain_issues
+        .iter_mut()
+        .find(|candidate| candidate.id == issue_id)
+        .expect("selected issue")
+        .description_text = Some(cached_description.to_owned());
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.select_issue(issue_id.clone(), cx, true);
+            assert!(matches!(
+                dashboard.detail_state,
+                DetailState::Refreshing { .. }
+            ));
+            assert!(!matches!(
+                dashboard.detail_state,
+                DetailState::Loading { .. }
+            ));
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issue-detail-loading").is_none());
+    assert!(visual.debug_bounds("issue-detail-description").is_some());
+    assert!(visual.debug_bounds("issue-detail-error").is_some());
+    cx.read_entity(&dashboard_entity, |dashboard, _| {
+        assert!(matches!(dashboard.detail_state, DetailState::Error { .. }));
+        let selected = dashboard
+            .domain_issues
+            .iter()
+            .find(|candidate| candidate.id == issue_id)
+            .expect("cached selected issue");
+        assert_eq!(
+            selected.description_text.as_deref(),
+            Some(cached_description)
+        );
+    });
+}
+
+#[test]
+fn detail_cache_policy_uses_persisted_description_only_for_quiet_refresh() {
+    let mut issue = sample_issues().into_iter().next().expect("issue");
+    issue.description_text = None;
+    issue.rich_description = None;
+    assert!(!issue_has_cached_detail(&issue));
+
+    issue.description_text = Some("cached description".to_owned());
+    assert!(issue_has_cached_detail(&issue));
+    assert_eq!(
+        detail_view_from_issue(&issue).description,
+        "cached description"
+    );
+
+    issue.description_text = None;
+    issue.rich_description = Some(jira_domain::RichTextDocument::new(vec![], false));
+    assert!(issue_has_cached_detail(&issue));
+}
+
 #[test]
 fn selected_supersession_and_invalidation_cancel_exactly_the_prior_ticket() {
     let mut dashboard = Dashboard::from_sample_data();

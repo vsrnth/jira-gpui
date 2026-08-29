@@ -106,6 +106,18 @@ fn ensure_database_file(path: &Path) -> std::io::Result<()> {
 }
 
 impl IssueCachePort for SqliteStore {
+    fn cache_detail_issue<'a>(&'a self, issue: &'a Issue) -> PortFuture<'a, bool> {
+        let (reply, receiver) = oneshot::channel();
+        worker::dispatch(
+            self.worker.sender.clone(),
+            worker::Request::CacheDetailIssue {
+                issue: Box::new(issue.clone()),
+                reply,
+            },
+            receiver,
+        )
+    }
+
     fn list_issues<'a>(&'a self, query: &'a IssueListQuery) -> PortFuture<'a, Vec<Issue>> {
         let (reply, receiver) = oneshot::channel();
         worker::dispatch(
