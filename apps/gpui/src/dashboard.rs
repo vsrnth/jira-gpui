@@ -244,6 +244,15 @@ enum Section {
     Settings,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsCategory {
+    Appearance,
+    IssueScope,
+    TeamTracker,
+    DesktopNotifications,
+    SavedJiraLogin,
+}
+
 fn refresh_visible_for_section(section: Section) -> bool {
     section != Section::Settings
 }
@@ -639,6 +648,7 @@ fn should_defer_detail_refresh(
 pub struct Dashboard {
     diagnostics: DiagnosticsSink,
     section: Section,
+    settings_category: SettingsCategory,
     sidebar_collapsed: bool,
     appearance_preference: AppearancePreference,
     domain_issues: Vec<Issue>,
@@ -837,6 +847,7 @@ impl Dashboard {
         Self {
             diagnostics: diagnostics.clone(),
             section,
+            settings_category: SettingsCategory::Appearance,
             sidebar_collapsed: false,
             appearance_preference: AppearancePreference::System,
             domain_issues,
@@ -931,6 +942,7 @@ impl Dashboard {
         let dashboard = Self {
             diagnostics: diagnostics.clone(),
             section: Section::Issues,
+            settings_category: SettingsCategory::Appearance,
             sidebar_collapsed: false,
             appearance_preference: AppearancePreference::System,
             domain_issues: Vec::new(),

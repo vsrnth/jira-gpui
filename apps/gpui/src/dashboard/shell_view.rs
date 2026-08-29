@@ -53,13 +53,7 @@ impl Dashboard {
                 Section::Team,
                 cx,
             ))
-            .child(self.sidebar_menu_item(
-                "Settings",
-                0,
-                self.section == Section::Settings,
-                Section::Settings,
-                cx,
-            ));
+            .child(self.settings_sidebar_menu_item(cx));
 
         let header = layout.supports_manual_sidebar_collapse().then(|| {
             h_flex()
@@ -177,6 +171,46 @@ impl Dashboard {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.activate_section(section, cx);
+            }))
+    }
+
+    fn settings_sidebar_menu_item(&self, cx: &mut Context<Self>) -> SidebarMenuItem {
+        SidebarMenuItem::new("Settings")
+            .icon(IconName::Settings2)
+            .active(self.section == Section::Settings)
+            .click_to_open(true)
+            .default_open(self.section == Section::Settings)
+            .children([
+                self.settings_category_menu_item("Appearance", SettingsCategory::Appearance, cx),
+                self.settings_category_menu_item("Issue scope", SettingsCategory::IssueScope, cx),
+                self.settings_category_menu_item("Team tracker", SettingsCategory::TeamTracker, cx),
+                self.settings_category_menu_item(
+                    "Desktop notifications",
+                    SettingsCategory::DesktopNotifications,
+                    cx,
+                ),
+                self.settings_category_menu_item(
+                    "Saved Jira login",
+                    SettingsCategory::SavedJiraLogin,
+                    cx,
+                ),
+            ])
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.activate_section(Section::Settings, cx);
+            }))
+    }
+
+    fn settings_category_menu_item(
+        &self,
+        label: &'static str,
+        category: SettingsCategory,
+        cx: &mut Context<Self>,
+    ) -> SidebarMenuItem {
+        SidebarMenuItem::new(label)
+            .active(self.section == Section::Settings && self.settings_category == category)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.settings_category = category;
+                this.activate_section(Section::Settings, cx);
             }))
     }
 

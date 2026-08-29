@@ -539,31 +539,34 @@ impl Dashboard {
         })
         .keywords(["login", "credentials", "keychain", "keyring"]);
 
+        let selected_group = match self.settings_category {
+            SettingsCategory::Appearance => SettingGroup::new()
+                .title(SETTINGS_GROUP_LABELS[0])
+                .item(appearance),
+            SettingsCategory::IssueScope => SettingGroup::new()
+                .title(SETTINGS_GROUP_LABELS[1])
+                .item(issue_scope),
+            SettingsCategory::TeamTracker => SettingGroup::new()
+                .title(SETTINGS_GROUP_LABELS[2])
+                .item(team),
+            SettingsCategory::DesktopNotifications => SettingGroup::new()
+                .title(SETTINGS_GROUP_LABELS[3])
+                .item(notifications),
+            SettingsCategory::SavedJiraLogin => SettingGroup::new()
+                .title(SETTINGS_GROUP_LABELS[4])
+                .item(saved_login),
+        };
+
         let settings = Settings::new("jira-desk-settings")
             .with_group_variant(GroupBoxVariant::Outline)
-            .sidebar_width(px(200.))
+            .sidebar_width(px(0.))
+            .sidebar_size_range(px(0.)..px(0.))
             .pages(vec![
                 SettingPage::new("Settings")
                     .icon(IconName::Settings2)
                     .default_open(true)
                     .resettable(false)
-                    .groups(vec![
-                        SettingGroup::new()
-                            .title(SETTINGS_GROUP_LABELS[0])
-                            .item(appearance),
-                        SettingGroup::new()
-                            .title(SETTINGS_GROUP_LABELS[1])
-                            .item(issue_scope),
-                        SettingGroup::new()
-                            .title(SETTINGS_GROUP_LABELS[2])
-                            .item(team),
-                        SettingGroup::new()
-                            .title(SETTINGS_GROUP_LABELS[3])
-                            .item(notifications),
-                        SettingGroup::new()
-                            .title(SETTINGS_GROUP_LABELS[4])
-                            .item(saved_login),
-                    ]),
+                    .group(selected_group),
             ]);
 
         div()
