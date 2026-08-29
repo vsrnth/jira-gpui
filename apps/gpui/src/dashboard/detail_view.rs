@@ -1,4 +1,14 @@
 use super::*;
+use gpui_component::{Sizable as _, Size, description_list::DescriptionList};
+
+fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .min_w_0()
+        .text_sm()
+        .child(value)
+        .into_any_element()
+}
 
 pub(super) fn normalized_lookup_query(query: &str) -> String {
     crate::presentation::normalized_issue_key(query)
@@ -303,15 +313,54 @@ impl Dashboard {
             )
             .child(
                 v_flex()
+                    .debug_selector(|| "issue-detail-details".to_owned())
                     .gap_3()
                     .child(div().text_sm().font_semibold().child("Details"))
-                    .child(self.detail_field("Assignee", assignee, layout, cx))
-                    .child(self.detail_field("Reporter", reporter, layout, cx))
-                    .child(self.detail_field("Status category", status_category, layout, cx))
-                    .child(self.detail_field("Parent", parent, layout, cx))
-                    .child(self.detail_field("Created", created, layout, cx))
-                    .child(self.detail_field("Updated", updated, layout, cx))
-                    .child(self.detail_field("Due date", due_date, layout, cx)),
+                    .child(
+                        DescriptionList::horizontal()
+                            .with_size(Size::Small)
+                            .columns(1)
+                            .bordered(false)
+                            .label_width(px(if layout.is_rail() { 108. } else { 132. }))
+                            .item(
+                                "Assignee",
+                                detail_metadata_value(assignee, "issue-detail-assignee"),
+                                1,
+                            )
+                            .item(
+                                "Reporter",
+                                detail_metadata_value(reporter, "issue-detail-reporter"),
+                                1,
+                            )
+                            .item(
+                                "Status category",
+                                detail_metadata_value(
+                                    status_category,
+                                    "issue-detail-status-category",
+                                ),
+                                1,
+                            )
+                            .item(
+                                "Parent",
+                                detail_metadata_value(parent, "issue-detail-parent"),
+                                1,
+                            )
+                            .item(
+                                "Created",
+                                detail_metadata_value(created, "issue-detail-created"),
+                                1,
+                            )
+                            .item(
+                                "Updated",
+                                detail_metadata_value(updated, "issue-detail-updated"),
+                                1,
+                            )
+                            .item(
+                                "Due date",
+                                detail_metadata_value(due_date, "issue-detail-due-date"),
+                                1,
+                            ),
+                    ),
             )
             .when(!labels.is_empty(), |this| {
                 this.child(
@@ -1135,42 +1184,6 @@ impl Dashboard {
             );
         }
         composer.into_any_element()
-    }
-
-    fn detail_field(
-        &self,
-        label: &'static str,
-        value: String,
-        layout: LayoutMode,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if layout.is_mobile() {
-            v_flex()
-                .min_w_0()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label),
-                )
-                .child(div().min_w_0().text_sm().child(value))
-                .into_any_element()
-        } else {
-            h_flex()
-                .min_w_0()
-                .items_start()
-                .child(
-                    div()
-                        .w(px(if layout.is_rail() { 108. } else { 132. }))
-                        .flex_shrink_0()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label),
-                )
-                .child(div().min_w_0().text_sm().child(value))
-                .into_any_element()
-        }
     }
 
     fn pill(&self, label: String, cx: &mut Context<Self>) -> AnyElement {

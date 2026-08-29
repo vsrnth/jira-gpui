@@ -1673,6 +1673,73 @@ fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui::TestAppCont
 }
 
 #[gpui::test]
+fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let issue = sample_issues().into_iter().next().expect("sample issue");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Team;
+    dashboard.team_members = vec![PersistedTeamMember {
+        identifier: "amina".to_owned(),
+        account_id: "amina".to_owned(),
+        display_name: "Amina Yusuf".to_owned(),
+    }];
+    dashboard.team_issues = sample_issues();
+    dashboard.selected_issue = Some(issue.id.clone());
+    dashboard.detail_state = DetailState::Loaded(IssueDetailViewModel {
+        description: issue
+            .description_text
+            .clone()
+            .unwrap_or_else(|| "No description supplied.".to_owned()),
+        rich_description: issue.rich_description.clone(),
+        comments: Vec::new(),
+        attachments: Vec::new(),
+    });
+    let window = cx.open_window(gpui::size(px(1370.), px(900.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let pane = visual
+        .debug_bounds("team-detail")
+        .expect("team detail pane should be laid out");
+    let details = visual
+        .debug_bounds("issue-detail-details")
+        .expect("native details surface should be laid out");
+    assert!(
+        details.origin.x >= pane.origin.x
+            && details.origin.y >= pane.origin.y
+            && details.origin.x + details.size.width <= pane.origin.x + pane.size.width + px(1.)
+            && details.origin.y + details.size.height <= pane.origin.y + pane.size.height + px(1.),
+        "native details surface escapes the detail pane: pane={pane:?}, details={details:?}"
+    );
+
+    for selector in [
+        "issue-detail-assignee",
+        "issue-detail-reporter",
+        "issue-detail-status-category",
+        "issue-detail-parent",
+        "issue-detail-created",
+        "issue-detail-updated",
+        "issue-detail-due-date",
+    ] {
+        let value = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("metadata value should be laid out: {selector}"));
+        assert!(value.size.width > px(0.) && value.size.height > px(0.));
+        assert!(
+            value.origin.x >= details.origin.x
+                && value.origin.y >= details.origin.y
+                && value.origin.x + value.size.width
+                    <= details.origin.x + details.size.width + px(1.)
+                && value.origin.y + value.size.height
+                    <= details.origin.y + details.size.height + px(1.),
+            "metadata value escapes native details surface: selector={selector}, details={details:?}, value={value:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn mobile_remote_lookup_loading_and_error_states_stay_visible_in_the_list(
     cx: &mut gpui::TestAppContext,
 ) {
