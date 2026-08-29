@@ -22,9 +22,14 @@ const LIVE_WORKSPACE_COPY: &str =
     "Settings become available after a live Jira workspace is connected.";
 const LINUX_NOTIFICATION_HELP_COPY: &str = "Send a local test through the Freedesktop notification service used by Jira Desk. This never calls Jira or changes the local update feed.";
 const LINUX_NOTIFICATION_DISPLAY_COPY: &str = "Accepted by the desktop service means the request was received; your desktop may still suppress or group the banner.";
+const LINUX_NOTIFICATION_ACCEPTANCE_COPY: &str =
+    "Accepted by the desktop service · notification ID";
+const LINUX_NOTIFICATION_TECHNICAL_COPY: &str = "App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop entry: dev.jiradesk.JiraDesk · Summary: Jira Desk notification test · Body: If this appears, Jira Desk desktop notifications are working.";
 const DIAGNOSTIC_EVENTS_COPY: &str = "Jira Desk attempts to write diagnostic events to diagnostics.jsonl; individual writes may fail.";
 const LINUX_KEYRING_COPY: &str = "Saved credentials are stored in the Linux desktop keyring and reused automatically across Jira Desk/AppImage versions. Secrets are never written to SQLite, preferences, or logs.";
-const MACOS_NOTIFICATION_HELP_COPY: &str = "Desktop notification testing is not available on macOS yet. Check Local updates for synced activity.";
+const MACOS_NOTIFICATION_HELP_COPY: &str = "Send a local test through Notification Center. The first test may ask for notification permission. This action never calls Jira. Acceptance can still be affected by Focus and system notification settings.";
+const MACOS_NOTIFICATION_DISPLAY_COPY: &str = "Accepted by Notification Center means the request was received; Focus or system notification settings may still suppress or group the banner.";
+const MACOS_NOTIFICATION_ACCEPTANCE_COPY: &str = "Accepted by Notification Center · local receipt";
 const MACOS_KEYRING_COPY: &str = "Saved credentials are stored in the macOS Keychain and reused automatically across Jira Desk versions. Secrets are never written to SQLite, preferences, or logs.";
 const NOTIFICATION_TEST_RESULT_ID: &str = "notification-test-result";
 const NOTIFICATION_TEST_RESULT_ROLE: gpui::accesskit::Role = gpui::accesskit::Role::Status;
@@ -50,7 +55,9 @@ enum SettingsPlatform {
 struct PlatformSettingsCopy {
     notification_help: &'static str,
     notification_display: Option<&'static str>,
+    notification_acceptance: &'static str,
     notification_diagnostics: Option<&'static str>,
+    notification_technical_details: Option<&'static str>,
     notification_test_available: bool,
     keyring: &'static str,
 }
@@ -60,15 +67,19 @@ fn settings_platform_copy(platform: SettingsPlatform) -> PlatformSettingsCopy {
         SettingsPlatform::Linux => PlatformSettingsCopy {
             notification_help: LINUX_NOTIFICATION_HELP_COPY,
             notification_display: Some(LINUX_NOTIFICATION_DISPLAY_COPY),
+            notification_acceptance: LINUX_NOTIFICATION_ACCEPTANCE_COPY,
             notification_diagnostics: Some(DIAGNOSTIC_EVENTS_COPY),
+            notification_technical_details: Some(LINUX_NOTIFICATION_TECHNICAL_COPY),
             notification_test_available: true,
             keyring: LINUX_KEYRING_COPY,
         },
         SettingsPlatform::Macos => PlatformSettingsCopy {
             notification_help: MACOS_NOTIFICATION_HELP_COPY,
-            notification_display: None,
+            notification_display: Some(MACOS_NOTIFICATION_DISPLAY_COPY),
+            notification_acceptance: MACOS_NOTIFICATION_ACCEPTANCE_COPY,
             notification_diagnostics: None,
-            notification_test_available: false,
+            notification_technical_details: None,
+            notification_test_available: true,
             keyring: MACOS_KEYRING_COPY,
         },
     }
@@ -371,16 +382,17 @@ impl Dashboard {
                     .text_color(cx.theme().muted_foreground)
                     .child(platform_copy.notification_help),
             )
-            .when(platform_copy.notification_test_available, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "App name: Jira Desk · Icon: dev.jiradesk.JiraDesk · Desktop entry: dev.jiradesk.JiraDesk · Summary: {TEST_NOTIFICATION_SUMMARY} · Body: {TEST_NOTIFICATION_BODY}"
-                        )),
-                )
-            })
+            .when_some(
+                platform_copy.notification_technical_details,
+                |this, copy| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(copy),
+                    )
+                },
+            )
             .when(platform_copy.notification_test_available, |this| {
                 this.child(
                     Button::new("test-desktop-notification")
@@ -390,9 +402,9 @@ impl Dashboard {
                             "Send test notification"
                         })
                         .disabled(!live || test_running)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.begin_test_desktop_notification(cx)
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.begin_test_desktop_notification(cx)),
+                        ),
                 )
             })
             .when_some(
@@ -408,7 +420,8 @@ impl Dashboard {
                     let result = match report.outcome {
                         DesktopNotificationTestOutcome::Accepted { notification_id } => {
                             format!(
-                                "Accepted by desktop service · notification ID {notification_id}"
+                                "{} {notification_id}",
+                                platform_copy.notification_acceptance
                             )
                         }
                         DesktopNotificationTestOutcome::Failed(error) => format!(
@@ -421,10 +434,11 @@ impl Dashboard {
                             .id(NOTIFICATION_TEST_RESULT_ID)
                             .gap_1()
                             .role(NOTIFICATION_TEST_RESULT_ROLE)
-                            .child(div().text_sm().child(format!(
-                                "Last test · {} · {result}",
-                                report.timestamp
-                            )))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("Last test · {} · {result}", report.timestamp)),
+                            )
                             .when_some(platform_copy.notification_display, |this, copy| {
                                 this.child(
                                     div()
@@ -582,12 +596,13 @@ impl Dashboard {
 mod tests {
     use super::{
         APPEARANCE_HELP_COPY, APPEARANCE_PREFERENCES, DIAGNOSTIC_EVENTS_COPY, LINUX_KEYRING_COPY,
-        LINUX_NOTIFICATION_DISPLAY_COPY, LINUX_NOTIFICATION_HELP_COPY, LIVE_WORKSPACE_COPY,
-        MACOS_KEYRING_COPY, MACOS_NOTIFICATION_HELP_COPY, NOTIFICATION_TEST_RESULT_ID,
-        NOTIFICATION_TEST_RESULT_ROLE, SAVED_LOGIN_DELETE_RESULT_ID,
-        SAVED_LOGIN_DELETE_RESULT_ROLE, SCOPE_HELP_COPY, SETTINGS_GROUP_LABELS,
-        SavedLoginDeleteOutcome, SavedLoginDeleteState, SettingsPlatform, appearance_toggle_checks,
-        saved_login_delete_feedback_for_state, settings_platform_copy,
+        LINUX_NOTIFICATION_ACCEPTANCE_COPY, LINUX_NOTIFICATION_DISPLAY_COPY,
+        LINUX_NOTIFICATION_HELP_COPY, LINUX_NOTIFICATION_TECHNICAL_COPY, LIVE_WORKSPACE_COPY,
+        MACOS_KEYRING_COPY, MACOS_NOTIFICATION_ACCEPTANCE_COPY, MACOS_NOTIFICATION_DISPLAY_COPY,
+        MACOS_NOTIFICATION_HELP_COPY, NOTIFICATION_TEST_RESULT_ID, NOTIFICATION_TEST_RESULT_ROLE,
+        SAVED_LOGIN_DELETE_RESULT_ID, SAVED_LOGIN_DELETE_RESULT_ROLE, SCOPE_HELP_COPY,
+        SETTINGS_GROUP_LABELS, SavedLoginDeleteOutcome, SavedLoginDeleteState, SettingsPlatform,
+        appearance_toggle_checks, saved_login_delete_feedback_for_state, settings_platform_copy,
     };
     use crate::dashboard::Dashboard;
 
@@ -643,6 +658,11 @@ mod tests {
             "Accepted by the desktop service means the request was received; your desktop may still suppress or group the banner."
         );
         assert_eq!(
+            LINUX_NOTIFICATION_ACCEPTANCE_COPY,
+            "Accepted by the desktop service · notification ID"
+        );
+        assert!(LINUX_NOTIFICATION_TECHNICAL_COPY.contains("Desktop entry"));
+        assert_eq!(
             DIAGNOSTIC_EVENTS_COPY,
             "Jira Desk attempts to write diagnostic events to diagnostics.jsonl; individual writes may fail."
         );
@@ -652,7 +672,7 @@ mod tests {
         );
         assert_eq!(
             MACOS_NOTIFICATION_HELP_COPY,
-            "Desktop notification testing is not available on macOS yet. Check Local updates for synced activity."
+            "Send a local test through Notification Center. The first test may ask for notification permission. This action never calls Jira. Acceptance can still be affected by Focus and system notification settings."
         );
         assert_eq!(
             MACOS_KEYRING_COPY,
@@ -687,6 +707,10 @@ mod tests {
             copy.notification_display,
             Some(LINUX_NOTIFICATION_DISPLAY_COPY)
         );
+        assert_eq!(
+            copy.notification_acceptance,
+            LINUX_NOTIFICATION_ACCEPTANCE_COPY
+        );
         assert_eq!(copy.notification_diagnostics, Some(DIAGNOSTIC_EVENTS_COPY));
         assert!(copy.notification_test_available);
         assert!(copy.keyring.contains("Linux desktop keyring"));
@@ -699,10 +723,20 @@ mod tests {
         let copy = settings_platform_copy(SettingsPlatform::Macos);
 
         assert_eq!(copy.notification_help, MACOS_NOTIFICATION_HELP_COPY);
-        assert_eq!(copy.notification_display, None);
+        assert_eq!(
+            copy.notification_display,
+            Some(MACOS_NOTIFICATION_DISPLAY_COPY)
+        );
+        assert_eq!(
+            copy.notification_acceptance,
+            MACOS_NOTIFICATION_ACCEPTANCE_COPY
+        );
         assert_eq!(copy.notification_diagnostics, None);
-        assert!(!copy.notification_test_available);
-        assert!(copy.notification_help.contains("Local updates"));
+        assert_eq!(copy.notification_technical_details, None);
+        assert!(copy.notification_test_available);
+        assert!(copy.notification_help.contains("first test may ask"));
+        assert!(copy.notification_help.contains("never calls Jira"));
+        assert!(copy.notification_help.contains("Focus"));
         assert!(copy.keyring.contains("macOS Keychain"));
         assert!(!copy.notification_help.contains("Freedesktop"));
         assert!(!copy.notification_help.contains("GNOME"));
