@@ -22,7 +22,6 @@ impl Dashboard {
                 v_flex()
                     .id("updates-header")
                     .debug_selector(|| "updates-header".to_owned())
-                    .h(px(if mobile { 124. } else { 96. }))
                     .px(px(if mobile { 12. } else { 20. }))
                     .py(px(8.))
                     .flex_shrink_0()

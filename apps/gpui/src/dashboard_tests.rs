@@ -1011,6 +1011,50 @@ fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
+fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let header = visual
+        .debug_bounds("issue-list-header")
+        .expect("issue list summary header should be laid out");
+    let primary = visual
+        .debug_bounds("issue-list-summary")
+        .expect("issue list primary summary should be laid out");
+    let secondary = visual
+        .debug_bounds("issue-list-context")
+        .expect("issue list secondary context should be laid out");
+
+    for (name, bounds) in [("primary", primary), ("secondary", secondary)] {
+        assert!(
+            bounds.size.width > px(0.) && bounds.size.height > px(0.),
+            "{name} issue summary line collapsed: {bounds:?}"
+        );
+        assert!(
+            bounds.origin.x >= header.origin.x
+                && bounds.origin.x + bounds.size.width
+                    <= header.origin.x + header.size.width + px(1.)
+                && bounds.origin.y >= header.origin.y
+                && bounds.origin.y + bounds.size.height
+                    <= header.origin.y + header.size.height + px(1.),
+            "{name} issue summary line escapes its header: header={header:?}, line={bounds:?}"
+        );
+    }
+    assert!(
+        primary.origin.y + primary.size.height <= secondary.origin.y,
+        "issue summary lines should be vertically separated: primary={primary:?}, secondary={secondary:?}"
+    );
+}
+
+#[gpui::test]
 fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
@@ -1763,6 +1807,54 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui::TestA
         .expect("updates description should be laid out");
     assert!(filters.origin.y > header.origin.y);
     assert!(description.origin.y > filters.origin.y);
+    assert!(
+        description.origin.y + description.size.height
+            <= header.origin.y + header.size.height + px(1.),
+        "updates description collides with or escapes its header: header={header:?}, description={description:?}"
+    );
+}
+
+#[gpui::test]
+fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Updates;
+    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let header = visual
+        .debug_bounds("updates-header")
+        .expect("updates header should be laid out");
+    let heading = visual
+        .debug_bounds("updates-heading")
+        .expect("updates heading should be laid out");
+    let filters = visual
+        .debug_bounds("updates-filters")
+        .expect("updates filters should be laid out");
+    let description = visual
+        .debug_bounds("updates-description")
+        .expect("updates description should be laid out");
+
+    assert!(heading.origin.y >= header.origin.y);
+    assert!(filters.origin.y > heading.origin.y);
+    assert!(description.origin.y > filters.origin.y);
+    for (name, bounds) in [
+        ("heading", heading),
+        ("filters", filters),
+        ("description", description),
+    ] {
+        assert!(
+            bounds.origin.x >= header.origin.x
+                && bounds.origin.x + bounds.size.width
+                    <= header.origin.x + header.size.width + px(1.)
+                && bounds.origin.y + bounds.size.height
+                    <= header.origin.y + header.size.height + px(1.),
+            "updates {name} escapes header: header={header:?}, bounds={bounds:?}"
+        );
+    }
 }
 
 #[gpui::test]

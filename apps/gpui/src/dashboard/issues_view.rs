@@ -56,37 +56,35 @@ impl Dashboard {
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(if mobile {
+            .child(
                 v_flex()
-                    .h(px(58.))
-                    .px_3()
+                    .id("issue-list-header")
+                    .debug_selector(|| "issue-list-header".to_owned())
+                    .h(px(if mobile { 58. } else { 52. }))
+                    .px(px(if mobile { 12. } else { 16. }))
                     .justify_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().min_w_0().truncate().child(format!(
-                        "{} matching Jira issues · Assigned or watched",
-                        self.issues.len(),
-                    )))
-                    .into_any_element()
-            } else {
-                h_flex()
-                    .h(px(44.))
-                    .px_4()
                     .flex_shrink_0()
-                    .justify_between()
+                    .min_w_0()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(div().min_w_0().truncate().child(format!(
-                        "{} matching Jira issues · Assigned or watched",
-                        self.issues.len(),
-                    )))
-                    .child(div().flex_shrink_0().child("Updated newest first"))
-                    .into_any_element()
-            })
+                    .child(
+                        div()
+                            .debug_selector(|| "issue-list-summary".to_owned())
+                            .flex_shrink_0()
+                            .font_semibold()
+                            .child(format!("{} Jira issues", self.issues.len())),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "issue-list-context".to_owned())
+                            .min_w_0()
+                            .truncate()
+                            .child("Assigned or watched · Updated newest first"),
+                    )
+                    .into_any_element(),
+            )
             .when_some(self.search_input.clone(), |this, input| {
                 let lookup_loading = matches!(self.remote_lookup, RemoteLookupState::Loading { .. });
                 if mobile {
