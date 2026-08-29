@@ -21,14 +21,6 @@ pub(super) enum IssueEditState {
         query: String,
         users: Vec<User>,
     },
-    LoadingTransitions {
-        issue_id: IssueId,
-    },
-    TransitionChooser {
-        issue_id: IssueId,
-        issue_key: String,
-        transitions: Vec<IssueTransition>,
-    },
     ConfirmingAssignee {
         issue_id: IssueId,
         issue_key: String,
@@ -169,12 +161,7 @@ pub(super) fn status_control_is_editable(
         && is_selected_issue
         && !is_remote_lookup
         && !operation_in_progress
-        && matches!(
-            issue_edit_state,
-            IssueEditState::Idle
-                | IssueEditState::LoadingTransitions { .. }
-                | IssueEditState::TransitionChooser { .. }
-        )
+        && matches!(issue_edit_state, IssueEditState::Idle)
 }
 
 pub(super) fn issue_edit_target_is_current(
@@ -189,7 +176,6 @@ pub(super) fn issue_edit_target_is_current(
 #[derive(Clone, Debug)]
 pub(super) struct IssueEditFlow {
     state: IssueEditState,
-    status_popover_open: bool,
     generation: u64,
     reconciliation_pending: bool,
     invalidated_submissions: Vec<SubmissionIdentity>,
@@ -200,7 +186,6 @@ impl IssueEditFlow {
     pub(super) fn new() -> Self {
         Self {
             state: IssueEditState::Idle,
-            status_popover_open: false,
             generation: 0,
             reconciliation_pending: false,
             invalidated_submissions: Vec::new(),
@@ -210,14 +195,6 @@ impl IssueEditFlow {
 
     pub(super) fn state(&self) -> &IssueEditState {
         &self.state
-    }
-
-    pub(super) fn status_popover_open(&self) -> bool {
-        self.status_popover_open
-    }
-
-    pub(super) fn set_status_popover_open(&mut self, open: bool) {
-        self.status_popover_open = open;
     }
 
     pub(super) fn is_submitting(&self) -> bool {
@@ -231,12 +208,6 @@ impl IssueEditFlow {
     pub(super) fn begin_assignee_loading(&mut self, issue_id: IssueId, query: String) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.state = IssueEditState::LoadingAssignees { issue_id, query };
-        self.generation
-    }
-
-    pub(super) fn begin_transition_loading(&mut self, issue_id: IssueId) -> u64 {
-        self.generation = self.generation.wrapping_add(1);
-        self.state = IssueEditState::LoadingTransitions { issue_id };
         self.generation
     }
 
@@ -285,36 +256,6 @@ impl IssueEditFlow {
         true
     }
 
-    pub(super) fn finish_transition_loading(
-        &mut self,
-        selected_issue: Option<&IssueId>,
-        issue_id: IssueId,
-        issue_key: String,
-        expected_generation: u64,
-        result: Result<Vec<IssueTransition>, ApplicationError>,
-    ) -> bool {
-        if !self.target_is_current(selected_issue, &issue_id, expected_generation) {
-            return false;
-        }
-        self.state = match result {
-            Ok(transitions) => IssueEditState::TransitionChooser {
-                issue_id,
-                issue_key,
-                transitions,
-            },
-            Err(error) => {
-                let copy = issue_edit_error_message(error.kind(), IssueEditPhase::Lookup);
-                self.status_popover_open = false;
-                IssueEditState::Error {
-                    issue_id,
-                    copy,
-                    operation: IssueEditOperation::Transition,
-                }
-            }
-        };
-        true
-    }
-
     pub(super) fn choose_assignee(&mut self, account_id: Option<AccountId>, display_name: String) {
         let IssueEditState::AssigneeChooser {
             issue_id,
@@ -333,24 +274,20 @@ impl IssueEditFlow {
         };
     }
 
-    pub(super) fn choose_transition(&mut self, transition: IssueTransition) {
-        let IssueEditState::TransitionChooser {
-            issue_id,
-            issue_key,
-            ..
-        } = &self.state
-        else {
-            return;
-        };
+    pub(super) fn begin_transition_confirmation(
+        &mut self,
+        issue_id: IssueId,
+        issue_key: String,
+        transition: IssueTransition,
+    ) {
         self.generation = self.generation.wrapping_add(1);
         self.state = IssueEditState::ConfirmingTransition {
-            issue_id: issue_id.clone(),
-            issue_key: issue_key.clone(),
+            issue_id,
+            issue_key,
             transition_id: transition.id,
             transition_name: transition.name,
             target_status: transition.to.name,
         };
-        self.status_popover_open = false;
     }
 
     pub(super) fn cancel(&mut self) {
@@ -359,7 +296,6 @@ impl IssueEditFlow {
             self.invalidated_submissions.push(identity.clone());
         }
         self.state = IssueEditState::Idle;
-        self.status_popover_open = false;
     }
 
     /// Invalidates reads and pre-dispatch confirmation without cancelling a
@@ -371,11 +307,9 @@ impl IssueEditFlow {
         if let IssueEditState::Submitting { identity, .. } = &self.state {
             self.invalidated_submissions.push(identity.clone());
             self.state = IssueEditState::Idle;
-            self.status_popover_open = false;
             return false;
         }
         self.state = IssueEditState::Idle;
-        self.status_popover_open = false;
         true
     }
 
@@ -644,27 +578,13 @@ mod tests {
     }
 
     #[test]
-    fn chooser_order_and_confirmation_data_are_preserved() {
-        let selected = issue("1");
+    fn native_status_selection_enters_confirmation_without_dispatching_a_write() {
         let mut flow = IssueEditFlow::new();
-        flow.set_status_popover_open(true);
-        let generation = flow.begin_transition_loading(selected.clone());
-        assert!(flow.finish_transition_loading(
-            Some(&selected),
-            selected.clone(),
+        flow.begin_transition_confirmation(
+            issue("1"),
             "IX-1".to_owned(),
-            generation,
-            Ok(vec![
-                transition("1", "First action", "To Do"),
-                transition("2", "Second action", "Done"),
-            ]),
-        ));
-        assert!(matches!(
-            flow.state(),
-            IssueEditState::TransitionChooser { transitions, .. }
-                if transitions[0].name == "First action" && transitions[1].name == "Second action"
-        ));
-        flow.choose_transition(transition("2", "Second action", "Done"));
+            transition("2", "Second action", "Done"),
+        );
         assert!(matches!(
             flow.state(),
             IssueEditState::ConfirmingTransition {
@@ -673,7 +593,7 @@ mod tests {
                 ..
             } if transition_id == "2" && target_status == "Done"
         ));
-        assert!(!flow.status_popover_open());
+        assert!(flow.consume_transition_submission().is_some());
     }
 
     #[test]

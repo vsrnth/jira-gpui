@@ -5,7 +5,7 @@ use time::UtcOffset;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
+    AnyElement, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
@@ -19,10 +19,10 @@ use gpui_component::{
     h_flex, h_resizable,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     notification::Notification,
-    popover::Popover,
     resizable_panel,
     scroll::ScrollableElement as _,
     searchable_list::{SearchableListItem, SearchableVec},
+    select::{SelectEvent, SelectState},
     spinner::Spinner,
     v_flex,
 };
@@ -32,7 +32,6 @@ use jira_application::{
     JiraReadPort, MAX_JQL_SCOPE_LENGTH,
 };
 
-use jira_desktop_notifications::{TEST_NOTIFICATION_BODY, TEST_NOTIFICATION_SUMMARY};
 use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
 #[cfg(any(test, feature = "ui-lab"))]
@@ -97,7 +96,8 @@ use comment_flow::{CommentCompletion, CommentFlow, CommentInvalidation, CommentT
 use issue_edit_flow::issue_edit_target_is_current;
 use issue_edit_flow::{
     AssigneeSubmission, BusyDirective, IssueEditCompletion, IssueEditFlow, IssueEditOperation,
-    IssueEditState, IssueEditSubmission, TransitionSubmission, status_control_is_editable,
+    IssueEditState, IssueEditSubmission, TransitionSubmission, issue_edit_error_message,
+    status_control_is_editable,
 };
 
 use detail_payload::{
@@ -445,6 +445,59 @@ impl SearchableListItem for StatusOption {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StatusSelectOption {
+    Current(String),
+    Transition(IssueTransition),
+}
+
+impl SearchableListItem for StatusSelectOption {
+    type Value = Self;
+
+    fn title(&self) -> gpui::SharedString {
+        match self {
+            Self::Current(status) => status.clone().into(),
+            Self::Transition(transition) => transition_option_label(transition).to_owned().into(),
+        }
+    }
+
+    fn value(&self) -> &Self::Value {
+        self
+    }
+
+    fn disabled(&self) -> bool {
+        matches!(self, Self::Current(_))
+    }
+
+    fn render(&self, _: &mut gpui::Window, _: &mut gpui::App) -> impl gpui::IntoElement {
+        let selector = match self {
+            Self::Current(_) => "issue-status-current".to_owned(),
+            Self::Transition(transition) => format!("status-transition-{}", transition.id),
+        };
+        div()
+            .debug_selector(move || selector.clone())
+            .min_w_0()
+            .truncate()
+            .child(self.title())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StatusSelectReadState {
+    Idle,
+    Loading {
+        issue_id: IssueId,
+        generation: u64,
+    },
+    Ready {
+        issue_id: IssueId,
+    },
+    Error {
+        issue_id: IssueId,
+        copy: OutcomeCopy,
+    },
+}
+
 fn status_filter_trigger_label(selection: IssueStatusSelection) -> String {
     let count = selection.values().len();
     if count > 1 {
@@ -504,16 +557,6 @@ enum DetailState {
 
 fn transition_option_label(transition: &IssueTransition) -> &str {
     transition.to.name.as_str()
-}
-
-const STATUS_TRANSITION_ROW_HEIGHT: f32 = 32.;
-const STATUS_TRANSITION_GAP: f32 = 4.;
-const STATUS_TRANSITION_LIST_MAX_HEIGHT: f32 = 280.;
-
-fn status_transition_list_height(transition_count: usize) -> Pixels {
-    let rows_height = transition_count as f32 * STATUS_TRANSITION_ROW_HEIGHT;
-    let gaps_height = transition_count.saturating_sub(1) as f32 * STATUS_TRANSITION_GAP;
-    px((rows_height + gaps_height).min(STATUS_TRANSITION_LIST_MAX_HEIGHT))
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -688,6 +731,17 @@ pub struct Dashboard {
     status_filter: IssueStatusFilter,
     status_combobox: Option<Entity<ComboboxState<SearchableVec<StatusOption>>>>,
     status_subscriptions: Vec<Subscription>,
+    status_select: Option<Entity<SelectState<SearchableVec<StatusSelectOption>>>>,
+    status_select_subscriptions: Vec<Subscription>,
+    status_select_items: Vec<StatusSelectOption>,
+    status_select_items_revision: u64,
+    status_select_applied_revision: u64,
+    status_select_state: StatusSelectReadState,
+    status_select_generation: u64,
+    status_select_task: Option<gpui::Task<()>>,
+    status_select_cancellation: Option<CancellationToken>,
+    #[cfg(test)]
+    status_select_reads_suppressed: bool,
     search_query: String,
     search_input: Option<Entity<InputState>>,
     search_subscriptions: Vec<Subscription>,
@@ -885,6 +939,17 @@ impl Dashboard {
             status_filter: IssueStatusFilter::All,
             status_combobox: None,
             status_subscriptions: Vec::new(),
+            status_select: None,
+            status_select_subscriptions: Vec::new(),
+            status_select_items: Vec::new(),
+            status_select_items_revision: 0,
+            status_select_applied_revision: 0,
+            status_select_state: StatusSelectReadState::Idle,
+            status_select_generation: 0,
+            status_select_task: None,
+            status_select_cancellation: None,
+            #[cfg(test)]
+            status_select_reads_suppressed: false,
             search_query: String::new(),
             search_input: None,
             search_subscriptions: Vec::new(),
@@ -986,6 +1051,17 @@ impl Dashboard {
             status_filter: IssueStatusFilter::All,
             status_combobox: None,
             status_subscriptions: Vec::new(),
+            status_select: None,
+            status_select_subscriptions: Vec::new(),
+            status_select_items: Vec::new(),
+            status_select_items_revision: 0,
+            status_select_applied_revision: 0,
+            status_select_state: StatusSelectReadState::Idle,
+            status_select_generation: 0,
+            status_select_task: None,
+            status_select_cancellation: None,
+            #[cfg(test)]
+            status_select_reads_suppressed: false,
             search_query: String::new(),
             search_input: None,
             search_subscriptions: Vec::new(),
@@ -1345,7 +1421,6 @@ impl Dashboard {
         self.remote_lookup_epoch.invalidate();
         self.remote_lookup_task.take();
         self.remote_lookup = RemoteLookupState::Idle;
-        self.issue_edit_flow.set_status_popover_open(false);
     }
 
     fn search_jira(&mut self, cx: &mut Context<Self>) {
@@ -1589,6 +1664,7 @@ impl Dashboard {
             self.selected_issue_core = None;
         }
         self.selected_issue = Some(issue_id.clone());
+        self.invalidate_status_select();
 
         let Some(workspace) = self.workspace.clone() else {
             self.detail_epoch.finish(&ticket);
@@ -1596,6 +1672,7 @@ impl Dashboard {
             cx.notify();
             return;
         };
+        self.reload_status_select(cx);
 
         let cancellation = ticket.cancellation().clone();
         let cached_detail = self
@@ -2194,63 +2271,6 @@ impl Dashboard {
         cx.notify();
     }
 
-    fn begin_transition_chooser(&mut self, cx: &mut Context<Self>) {
-        let Some(issue) = selected_issue_from_sources(
-            self.selected_issue.as_ref(),
-            &self.domain_issues,
-            self.selected_issue_core.as_ref(),
-        )
-        .cloned() else {
-            return;
-        };
-        let Some(workspace) = self.workspace.clone() else {
-            return;
-        };
-        self.issue_edit_flow.set_status_popover_open(true);
-        if let Some(cancellation) = self.issue_edit_cancellation.take() {
-            cancellation.cancel();
-        }
-        self.issue_edit_task.take();
-        let generation = self
-            .issue_edit_flow
-            .begin_transition_loading(issue.id.clone());
-        let cancellation = CancellationToken::new();
-        self.issue_edit_cancellation = Some(cancellation.clone());
-        let issue_id = issue.id.clone();
-        let issue_key = issue.key.to_string();
-        let task = cx.spawn(async move |this, cx| {
-            let result = workspace
-                .available_transitions(IssueLocator::Id(issue_id.clone()), &cancellation)
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if !this.issue_edit_flow.target_is_current(
-                    this.selected_issue.as_ref(),
-                    &issue_id,
-                    generation,
-                ) {
-                    return;
-                }
-                this.issue_edit_cancellation = None;
-                this.issue_edit_task = None;
-                this.issue_edit_flow.finish_transition_loading(
-                    this.selected_issue.as_ref(),
-                    issue_id,
-                    issue_key,
-                    generation,
-                    result,
-                );
-                cx.notify();
-            });
-        });
-        self.issue_edit_task = Some(task);
-        cx.notify();
-    }
-
-    fn choose_transition(&mut self, transition: IssueTransition, cx: &mut Context<Self>) {
-        self.issue_edit_flow.choose_transition(transition);
-        cx.notify();
-    }
-
     fn cancel_issue_edit(&mut self, cx: &mut Context<Self>) {
         if let Some(cancellation) = self.issue_edit_cancellation.take() {
             cancellation.cancel();
@@ -2377,6 +2397,9 @@ impl Dashboard {
         );
         self.apply_live_issues(issues, true, cx);
         self.update_groups = update_groups;
+        if self.selected_issue.is_some() {
+            self.reload_status_select(cx);
+        }
     }
 
     fn apply_team_cached(&mut self, cached: CachedWorkspace, cx: &mut Context<Self>) {
@@ -2748,6 +2771,7 @@ impl Dashboard {
 
     fn ensure_status_combobox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.status_combobox.is_some() {
+            self.ensure_status_select(window, cx);
             return;
         }
 
@@ -2774,6 +2798,186 @@ impl Dashboard {
             },
         ));
         self.status_combobox = Some(state);
+        self.ensure_status_select(window, cx);
+    }
+
+    fn status_select_items(
+        status: String,
+        transitions: Vec<IssueTransition>,
+    ) -> Vec<StatusSelectOption> {
+        std::iter::once(StatusSelectOption::Current(status))
+            .chain(transitions.into_iter().map(StatusSelectOption::Transition))
+            .collect()
+    }
+
+    fn set_status_select_items(&mut self, items: Vec<StatusSelectOption>) {
+        self.status_select_items = items;
+        self.status_select_items_revision = self.status_select_items_revision.wrapping_add(1);
+    }
+
+    fn ensure_status_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.status_select_items.is_empty()
+            && let Some(issue) = self.selected_issue_view()
+        {
+            self.set_status_select_items(Self::status_select_items(
+                issue.status.clone(),
+                Vec::new(),
+            ));
+        }
+        if self.status_select.is_none() {
+            let state = cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(self.status_select_items.clone()),
+                    (!self.status_select_items.is_empty())
+                        .then(|| gpui_component::IndexPath::new(0)),
+                    window,
+                    cx,
+                )
+                .searchable(false)
+            });
+            self.status_select_subscriptions.push(cx.subscribe_in(
+                &state,
+                window,
+                |this,
+                 _state,
+                 event: &SelectEvent<SearchableVec<StatusSelectOption>>,
+                 window,
+                 cx| {
+                    let SelectEvent::Confirm(Some(StatusSelectOption::Transition(transition))) =
+                        event
+                    else {
+                        return;
+                    };
+                    this.choose_transition_from_select(transition.clone(), window, cx);
+                },
+            ));
+            self.status_select = Some(state);
+            self.status_select_applied_revision = self.status_select_items_revision;
+        } else if self.status_select_applied_revision != self.status_select_items_revision {
+            if let Some(state) = self.status_select.clone() {
+                let items = SearchableVec::new(self.status_select_items.clone());
+                state.update(cx, |state, cx| {
+                    state.set_items(items, window, cx);
+                    state.set_selected_index(
+                        (!self.status_select_items.is_empty())
+                            .then(|| gpui_component::IndexPath::new(0)),
+                        window,
+                        cx,
+                    );
+                });
+            }
+            self.status_select_applied_revision = self.status_select_items_revision;
+        }
+    }
+
+    fn invalidate_status_select(&mut self) {
+        if let Some(cancellation) = self.status_select_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.status_select_task.take();
+        self.status_select_generation = self.status_select_generation.wrapping_add(1);
+        self.status_select_state = StatusSelectReadState::Idle;
+        let current = self
+            .selected_issue_view()
+            .map(|issue| Self::status_select_items(issue.status.clone(), Vec::new()))
+            .unwrap_or_default();
+        self.set_status_select_items(current);
+    }
+
+    fn reload_status_select(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_status_select();
+        #[cfg(test)]
+        if self.status_select_reads_suppressed {
+            return;
+        }
+        let Some(issue) = self.selected_issue_view() else {
+            return;
+        };
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let issue_id = issue.id.clone();
+        let generation = self.status_select_generation;
+        self.status_select_state = StatusSelectReadState::Loading {
+            issue_id: issue_id.clone(),
+            generation,
+        };
+        let cancellation = CancellationToken::new();
+        self.status_select_cancellation = Some(cancellation.clone());
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace
+                .available_transitions(IssueLocator::Id(issue_id.clone()), &cancellation)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.selected_issue.as_ref() != Some(&issue_id)
+                    || !matches!(
+                        this.status_select_state,
+                        StatusSelectReadState::Loading {
+                            issue_id: ref current,
+                            generation: current_generation,
+                        } if current == &issue_id && current_generation == generation
+                    )
+                {
+                    return;
+                }
+                this.status_select_cancellation = None;
+                this.status_select_task = None;
+                match result {
+                    Ok(transitions) => {
+                        this.set_status_select_items(Self::status_select_items(
+                            this.selected_issue_view()
+                                .filter(|issue| issue.id == issue_id)
+                                .map(|issue| issue.status.clone())
+                                .unwrap_or_else(|| "Unknown".to_owned()),
+                            transitions,
+                        ));
+                        this.status_select_state = StatusSelectReadState::Ready { issue_id };
+                    }
+                    Err(error) => {
+                        this.status_select_state = StatusSelectReadState::Error {
+                            issue_id,
+                            copy: issue_edit_error_message(
+                                error.kind(),
+                                crate::presentation::IssueEditPhase::Lookup,
+                            ),
+                        };
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.status_select_task = Some(task);
+    }
+
+    fn choose_transition_from_select(
+        &mut self,
+        transition: IssueTransition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(issue) = self
+            .selected_issue_view()
+            .filter(|issue| self.selected_issue.as_ref() == Some(&issue.id))
+        else {
+            return;
+        };
+        if !matches!(
+            self.status_select_state,
+            StatusSelectReadState::Ready { ref issue_id } if issue_id == &issue.id
+        ) {
+            return;
+        }
+        self.issue_edit_flow.begin_transition_confirmation(
+            issue.id.clone(),
+            issue.key.clone(),
+            transition,
+        );
+        if let Some(state) = self.status_select.clone() {
+            state.update(cx, |state, cx| {
+                state.set_selected_index(Some(gpui_component::IndexPath::new(0)), window, cx);
+            });
+        }
+        cx.notify();
     }
 
     fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {

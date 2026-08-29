@@ -231,20 +231,14 @@ fn status_control_editability_requires_live_selected_issue() {
 }
 
 #[test]
-fn status_control_allows_only_status_lookup_states() {
+fn status_control_disables_during_confirmation() {
     let issue_id = IssueId::new("100").expect("issue");
-    let loading = IssueEditState::LoadingTransitions {
-        issue_id: issue_id.clone(),
-    };
     let confirming = IssueEditState::ConfirmingAssignee {
         issue_id,
         issue_key: "IX-100".to_owned(),
         account_id: None,
         display_name: "Unassigned".to_owned(),
     };
-    assert!(status_control_is_editable(
-        true, true, false, false, &loading
-    ));
     assert!(!status_control_is_editable(
         true,
         true,
@@ -252,6 +246,97 @@ fn status_control_allows_only_status_lookup_states() {
         false,
         &confirming
     ));
+}
+
+#[gpui::test]
+fn native_status_select_is_bounded_and_selection_only_confirms(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let site_id = JiraSiteId::new("site").expect("site");
+    let calls = Arc::new(Mutex::new(EditCalls::default()));
+    let transitions = vec![IssueTransition {
+        id: "31".to_owned(),
+        name: "Start work".to_owned(),
+        to: jira_domain::Status {
+            id: "3".to_owned(),
+            name: "In Progress".to_owned(),
+            category: None,
+        },
+    }];
+    let editor = Arc::new(RecordingIssueEditor {
+        calls: calls.clone(),
+        users: Vec::new(),
+        transitions: transitions.clone(),
+    });
+    let workspace = Arc::new(
+        futures_lite::future::block_on(LiveWorkspace::initialize_with_writers(
+            site_id,
+            None,
+            Arc::new(EmptyJira),
+            Arc::new(EmptyCommentWriter),
+            editor,
+            Arc::new(jira_storage::SqliteStore::in_memory().expect("store")),
+        ))
+        .expect("workspace"),
+    );
+
+    let mut dashboard = Dashboard::from_sample_data();
+    let issue_id = dashboard.selected_issue.clone().expect("selected issue");
+    dashboard.workspace = Some(workspace);
+    let status = dashboard
+        .selected_issue_view()
+        .expect("selected issue view")
+        .status;
+    dashboard.status_select_items = Dashboard::status_select_items(status, transitions.clone());
+    dashboard.status_select_items_revision = 1;
+    dashboard.status_select_state = StatusSelectReadState::Ready {
+        issue_id: issue_id.clone(),
+    };
+    let window = cx.open_window(gpui::size(px(1_200.), px(900.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let control = visual
+        .debug_bounds("issue-status-control")
+        .expect("status control should be laid out");
+    let select = visual
+        .debug_bounds("issue-status-select")
+        .expect("native status Select should be laid out");
+    assert!(select.size.width > px(0.) && select.size.height > px(0.));
+    assert!(
+        select.origin.x >= control.origin.x
+            && select.origin.y >= control.origin.y
+            && select.origin.x + select.size.width
+                <= control.origin.x + control.size.width + px(1.)
+            && select.origin.y + select.size.height
+                <= control.origin.y + control.size.height + px(1.)
+    );
+    let status_state = dashboard_entity.read_with(&visual, |dashboard, _| {
+        dashboard.status_select_state.clone()
+    });
+    assert!(
+        matches!(status_state, StatusSelectReadState::Ready { .. }),
+        "unexpected status state: {status_state:?}"
+    );
+
+    let transition = transitions[0].clone();
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.choose_transition_from_select(transition, window, cx);
+            assert!(matches!(
+                dashboard.issue_edit_flow.state(),
+                IssueEditState::ConfirmingTransition { .. }
+            ));
+        });
+    });
+    assert!(
+        calls
+            .lock()
+            .expect("calls lock")
+            .transition_writes
+            .is_empty()
+    );
 }
 
 #[test]
@@ -267,16 +352,6 @@ fn transition_option_label_uses_destination_status_only() {
     };
 
     assert_eq!(transition_option_label(&transition), "In Progress");
-}
-
-#[test]
-fn transition_list_height_is_compact_and_bounded() {
-    assert_eq!(status_transition_list_height(1), px(32.));
-    assert_eq!(status_transition_list_height(2), px(68.));
-    assert_eq!(
-        status_transition_list_height(12),
-        px(STATUS_TRANSITION_LIST_MAX_HEIGHT)
-    );
 }
 
 #[test]
@@ -924,6 +999,9 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
     let issue = sample_issues().into_iter().next().expect("issue");
     let issue_id = issue.id.clone();
     let mut dashboard = Dashboard::from_sample_data();
+    // This test isolates cached detail rendering; the native status lookup is
+    // covered by the dedicated status-select fixture below.
+    dashboard.status_select_reads_suppressed = true;
     dashboard.workspace = Some(Arc::new(workspace));
     let cached_description = "Persisted detail description";
     dashboard
@@ -1142,82 +1220,6 @@ fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
 }
 
 #[gpui::test]
-fn transition_chooser_options_remain_visible_in_constrained_popover(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-
-    let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
-        JiraSiteId::new("site").expect("site"),
-        None,
-        Arc::new(EmptyJira),
-        Arc::new(jira_storage::SqliteStore::in_memory().expect("store")),
-    ))
-    .expect("workspace");
-    let mut dashboard = Dashboard::from_sample_data();
-    dashboard.workspace = Some(Arc::new(workspace));
-    let issue = dashboard
-        .selected_issue
-        .clone()
-        .expect("sample issue selected");
-    let transitions = (0..12)
-        .map(|index| IssueTransition {
-            id: (31 + index).to_string(),
-            name: format!("Move issue {index}"),
-            to: jira_domain::Status {
-                id: (3 + index).to_string(),
-                name: format!("Status {index}"),
-                category: None,
-            },
-        })
-        .collect();
-    dashboard
-        .issue_edit_flow
-        .set_state_for_test(IssueEditState::TransitionChooser {
-            issue_id: issue,
-            issue_key: "DESK-176".to_owned(),
-            transitions,
-        });
-    dashboard.issue_edit_flow.set_status_popover_open(true);
-    let window = cx.open_window(gpui::size(px(720.), px(600.)), |_, _| dashboard);
-    let dashboard_entity = window.root(cx).expect("dashboard root");
-    let mut visual = VisualTestContext::from_window(window.into(), cx);
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-
-    let option_bounds = visual
-        .debug_bounds("status-transition-31")
-        .expect("transition option should be laid out");
-    assert!(
-        option_bounds.size.height > px(0.),
-        "transition option collapsed: {option_bounds:?}"
-    );
-    assert!(
-        option_bounds.size.height <= px(32.),
-        "transition option is too tall for a compact row: {option_bounds:?}"
-    );
-    assert!(
-        option_bounds.size.width <= px(320.),
-        "transition option grew beyond the compact popover width: {option_bounds:?}"
-    );
-
-    visual.simulate_click(
-        gpui::point(
-            option_bounds.origin.x + option_bounds.size.width / 2.,
-            option_bounds.origin.y + option_bounds.size.height / 2.,
-        ),
-        Default::default(),
-    );
-    assert!(
-        dashboard_entity.read_with(&visual, |dashboard, _| {
-            matches!(
-                dashboard.issue_edit_flow.state(),
-                IssueEditState::ConfirmingTransition { .. }
-            )
-        }),
-        "first transition should be clickable at {option_bounds:?}"
-    );
-}
-
-#[gpui::test]
 fn dashboard_issue_edit_reads_and_dispatches_each_confirmed_operation_once(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -1321,16 +1323,13 @@ fn dashboard_issue_edit_reads_and_dispatches_each_confirmed_operation_once(
     visual.run_until_parked();
     cx.run_until_parked();
 
-    cx.update_entity(&dashboard_entity, |dashboard, cx| {
+    cx.update_entity(&dashboard_entity, |dashboard, _cx| {
         dashboard.operation_in_progress = false;
-        dashboard
-            .issue_edit_flow
-            .set_state_for_test(IssueEditState::TransitionChooser {
-                issue_id: issue_id.clone(),
-                issue_key: "IX-100".to_owned(),
-                transitions: transition_options.clone(),
-            });
-        dashboard.choose_transition(transition_options[0].clone(), cx);
+        dashboard.issue_edit_flow.begin_transition_confirmation(
+            issue_id.clone(),
+            "IX-100".to_owned(),
+            transition_options[0].clone(),
+        );
     });
     visual.run_until_parked();
     visual.update(|window, cx| {

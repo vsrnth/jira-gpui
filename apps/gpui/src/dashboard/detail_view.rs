@@ -1,5 +1,5 @@
 use super::*;
-use gpui_component::{Sizable as _, Size, description_list::DescriptionList};
+use gpui_component::{Sizable as _, Size, description_list::DescriptionList, select::Select};
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
     div()
@@ -701,116 +701,82 @@ impl Dashboard {
             self.operation_in_progress,
             self.issue_edit_flow.state(),
         );
-        let popover_open = self.issue_edit_flow.status_popover_open()
-            && matches!(
-                self.issue_edit_flow.state(),
-                IssueEditState::LoadingTransitions { .. }
-                    | IssueEditState::TransitionChooser { .. }
-            );
-        let button = Button::new("issue-status-control")
-            .secondary()
-            .label(status)
-            .dropdown_caret(true)
-            .tooltip(if editable {
-                "Change issue status"
-            } else {
-                "Issue status · editing unavailable in this view"
-            })
-            .disabled(!editable);
-        if !editable {
-            return button.into_any_element();
-        }
-        Popover::new("issue-status-popover")
-            .anchor(Anchor::TopLeft)
-            .open(popover_open)
-            .trigger(button)
-            .on_open_change(cx.listener(|this, open, _, cx| {
-                this.issue_edit_flow.set_status_popover_open(*open);
-                if *open && matches!(this.issue_edit_flow.state(), IssueEditState::Idle) {
-                    this.begin_transition_chooser(cx);
-                } else if !*open
-                    && matches!(
-                        this.issue_edit_flow.state(),
-                        IssueEditState::LoadingTransitions { .. }
-                            | IssueEditState::TransitionChooser { .. }
-                    )
-                {
-                    this.cancel_issue_edit(cx);
-                } else {
-                    cx.notify();
-                }
-            }))
-            .w(px(320.))
-            .max_h(px(360.))
-            .p_3()
-            .gap_2()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .shadow_lg()
-            .child(self.render_status_transition_popover(cx))
-            .into_any_element()
-    }
-
-    fn render_status_transition_popover(&self, cx: &mut Context<Self>) -> AnyElement {
-        match self.issue_edit_flow.state().clone() {
-            IssueEditState::LoadingTransitions { .. } => v_flex()
-                .gap_2()
-                .child(div().text_sm().font_semibold().child("Change issue status"))
-                .child(
-                    h_flex().gap_2().child(Spinner::new()).child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Loading available transitions…"),
-                    ),
-                )
-                .into_any_element(),
-            IssueEditState::TransitionChooser { transitions, .. } => {
-                let no_transitions = transitions.is_empty();
-                v_flex()
-                    .gap_2()
-                    .child(div().text_sm().font_semibold().child("Change issue status"))
-                    .when(!no_transitions, |this| {
-                        this.child(
-                            v_flex()
-                                .h(status_transition_list_height(transitions.len()))
-                                .min_h_0()
-                                .max_h(px(STATUS_TRANSITION_LIST_MAX_HEIGHT))
-                                .gap_1()
-                                .overflow_y_scrollbar()
-                                .children(transitions.into_iter().map(|transition| {
-                                    let transition_id = transition.id.clone();
-                                    let label = transition_option_label(&transition).to_owned();
-                                    Button::new(format!("status-transition-{}", transition.id))
-                                        .w_full()
-                                        .compact()
-                                        .ghost()
-                                        .justify_start()
-                                        .debug_selector(move || {
-                                            format!("status-transition-{transition_id}")
-                                        })
-                                        .label(label.clone())
-                                        .tooltip(label)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.choose_transition(transition.clone(), cx)
-                                        }))
-                                })),
-                        )
-                    })
-                    .when(no_transitions, |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No status transitions are currently available."),
-                        )
-                    })
-                    .into_any_element()
+        let ready = issue.is_some_and(|issue| {
+            matches!(
+                self.status_select_state,
+                StatusSelectReadState::Ready { ref issue_id } if issue_id == &issue.id
+            )
+        });
+        let select_disabled = !editable || !ready || self.status_select_items.len() <= 1;
+        let status_feedback = match &self.status_select_state {
+            StatusSelectReadState::Error { issue_id, copy }
+                if issue.map(|issue| &issue.id) == Some(issue_id) =>
+            {
+                Some((copy.message().to_owned(), true))
             }
-            _ => div().into_any_element(),
-        }
+            _ => None,
+        };
+        let status_aria_label = match &self.status_select_state {
+            StatusSelectReadState::Loading { issue_id, .. }
+                if issue.map(|issue| &issue.id) == Some(issue_id) =>
+            {
+                "Issue status · loading available transitions".to_owned()
+            }
+            StatusSelectReadState::Error { issue_id, copy }
+                if issue.map(|issue| &issue.id) == Some(issue_id) =>
+            {
+                format!("Issue status · transitions unavailable: {}", copy.message())
+            }
+            StatusSelectReadState::Ready { issue_id }
+                if issue.map(|issue| &issue.id) == Some(issue_id)
+                    && self.status_select_items.len() <= 1 =>
+            {
+                "Issue status · no status changes are currently available".to_owned()
+            }
+            _ if editable => "Change issue status".to_owned(),
+            _ => "Issue status · editing unavailable in this view".to_owned(),
+        };
+        let Some(state) = self.status_select.clone() else {
+            return Button::new("issue-status-control")
+                .secondary()
+                .label(status)
+                .disabled(true)
+                .into_any_element();
+        };
+        let status_select = Select::new(&state)
+            .with_size(Size::Small)
+            .disabled(select_disabled);
+        v_flex()
+            .id("issue-status-control")
+            .debug_selector(|| "issue-status-control".to_owned())
+            .min_w_0()
+            .aria_label(status_aria_label)
+            .child(
+                div()
+                    .debug_selector(|| "issue-status-select".to_owned())
+                    .min_w_0()
+                    .child(status_select),
+            )
+            .when_some(status_feedback, |this, (message, is_error)| {
+                this.child(
+                    div()
+                        .id("issue-status-feedback")
+                        .debug_selector(|| "issue-status-feedback".to_owned())
+                        .role(if is_error {
+                            gpui::accesskit::Role::Alert
+                        } else {
+                            gpui::accesskit::Role::Status
+                        })
+                        .text_xs()
+                        .text_color(if is_error {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(message),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_issue_edit_controls(
@@ -937,8 +903,6 @@ impl Dashboard {
                     )
                     .into_any_element()
             }
-            IssueEditState::LoadingTransitions { .. }
-            | IssueEditState::TransitionChooser { .. } => div().into_any_element(),
             IssueEditState::ConfirmingAssignee {
                 issue_key,
                 display_name,
@@ -1045,7 +1009,7 @@ impl Dashboard {
                                                 this.begin_assignee_chooser(window, cx)
                                             }
                                             IssueEditOperation::Transition => {
-                                                this.begin_transition_chooser(cx)
+                                                this.reload_status_select(cx)
                                             }
                                         },
                                     )),
