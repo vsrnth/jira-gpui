@@ -16,7 +16,7 @@ use gpui_component::{
         DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
     },
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputContentType, InputEvent, InputState},
     scroll::ScrollableElement as _,
     spinner::Spinner,
     v_flex,
@@ -546,6 +546,7 @@ impl AppShell {
     fn labeled_input(
         label: &'static str,
         accessibility_id: &'static str,
+        content_type: Option<InputContentType>,
         help: Option<&'static str>,
         state: &Entity<InputState>,
         muted_foreground: gpui::Hsla,
@@ -556,6 +557,9 @@ impl AppShell {
             .child(
                 Input::new(state)
                     .w_full()
+                    .when_some(content_type, |this, content_type| {
+                        this.content_type(content_type)
+                    })
                     .accessibility_id(accessibility_id)
                     .aria_label(label),
             )
@@ -675,6 +679,7 @@ impl AppShell {
                     .child(Self::labeled_input(
                         JIRA_SITE_LABEL,
                         "onboarding-jira-site",
+                        None,
                         Some("Use your-team or a full HTTPS Atlassian Cloud URL."),
                         base_url,
                         cx.theme().muted_foreground,
@@ -682,6 +687,7 @@ impl AppShell {
                     .child(Self::labeled_input(
                         "Atlassian email",
                         "onboarding-atlassian-email",
+                        Some(InputContentType::EmailAddress),
                         None,
                         email,
                         cx.theme().muted_foreground,
@@ -694,6 +700,7 @@ impl AppShell {
                                 Input::new(api_token)
                                     .w_full()
                                     .mask_toggle()
+                                    .content_type(InputContentType::Password)
                                     .accessibility_id("onboarding-api-token")
                                     .aria_label(SCOPED_TOKEN_LABEL),
                             )
