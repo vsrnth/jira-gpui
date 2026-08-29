@@ -10,6 +10,13 @@ speculative redesign.
 
 - Use semantic tokens and explicit interaction states rather than one-off
   styling.
+- Prefer gpui-component primitives for application structure and interaction;
+  keep custom layout code only where the component contract does not cover the
+  behavior.
+- Use component size variants and rem-scaled helpers for ordinary layout.
+  Retain pixel values only for native window/capture bounds, component APIs
+  that explicitly require `Pixels`, dynamically clamped viewport geometry,
+  and deliberately physical indicators.
 - Maintain a clear visual hierarchy and consistency across surfaces.
 - Treat accessibility and responsive behavior as correctness requirements.
 - Use purposeful animation only when it communicates state or supports an
@@ -57,6 +64,27 @@ interaction quality—not a mandate to copy visual treatments.
 - `4632e3a` — make issue-row mouse selection consistent with a focus-visible-only keyboard ring and verify compact transition chooser bounds.
 - `8df4758` — distinguish typed Team Tracker refresh failures from successful zero-results empty states while preserving truthful context, accessibility, and cached rows.
 - `c279eb2` — complete explicit review and publication of the macOS UX baseline matrix.
+- `c4be503` — adopt gpui-component's native Sidebar for application navigation.
+- `44d3d37` — review and accept the native Sidebar capture baseline.
+- `f8ab865` — adopt gpui-component's native Settings surface.
+- `a41a588` — review and accept the native Settings capture baseline.
+- `fe914d0` — stabilize compact issue-list header geometry.
+- `326fab4` — bound and simplify the Sidebar refresh footer.
+- `f6ddcf4` — remove the duplicate unread count from the change ledger.
+- `6d44f18` — persist bounded issue-detail snapshots so selection paints
+  cached content immediately while a guarded background refresh checks Jira.
+- `f1d1878` — group Settings content with native setting sections.
+- `19b1c03` — present Jira metadata with the native DescriptionList.
+- `b03c22c` — place Settings navigation directly in the application Sidebar.
+- `7c16fd5` — add privacy-safe macOS Notification Center delivery.
+- `92b20ec` — enable explicit macOS notification testing from Settings.
+- `6728afd`, `9417221`, `9e11e5d`, `b849eeb` — migrate ordinary shell,
+  issue, update, rich-content, onboarding, Settings, and Team geometry to
+  component sizing and rem-scaled helpers.
+- `14155f9` — replace the status Select with a compact native Popover and List
+  that stages a transition for explicit confirmation without writing to Jira.
+- `48089a6` — replace the Team tracker's custom drag rail and width math with
+  native Resizable panels and session-persistent component state.
 
 ## Ordered plan
 
@@ -72,6 +100,32 @@ committed separately. **All currently ordered slices are complete.**
 3. **Completed — Team Tracker:** Keep table selection/detail identity consistent
    through sort, filter, and rebuild; align sort and selection semantics, use
    semantic colors, and bound detail geometry.
+4. **Completed — Native shell and settings:** Use the native Sidebar, Settings,
+   TitleBar integration, Toggle-based appearance controls, and component asset
+   provider while keeping Settings navigation in the application Sidebar.
+5. **Completed — Issue detail interactions:** Paint persisted, bounded detail
+   snapshots immediately; refresh in the background; use DescriptionList for
+   metadata and a Popover/List for explicitly confirmed status transitions.
+6. **Completed — Desktop integration:** Deliver privacy-safe macOS
+   notifications, expose explicit notification testing, and use native
+   Resizable panels for Team table/detail geometry.
+7. **Completed — Design-guide sizing audit:** Replace ordinary fixed pixel
+   spacing and dimensions with component sizes or rem-scaled helpers across the
+   GPUI adapter. The remaining pixel values are limited to:
+   - native Resizable and Settings pane size/range APIs;
+   - DataTable column measurement APIs;
+   - native window, viewport-test, and offscreen-capture bounds;
+   - dynamically clamped mobile/navigation geometry; and
+   - the deliberately physical 3px selected-issue rail.
+
+## Latest UI verification
+
+The complete five-scenario macOS matrix was regenerated after the status
+Popover, sizing audit, and Team Resizable migration by following
+`docs/ui-automation.md`. Issues, Team, Settings, onboarding, and local updates
+were visually reviewed at their canonical matrix sizes. No clipping, overlap,
+or pane-boundary regressions were found. Candidate PNGs remain ignored local
+development artifacts and were not published as new baselines.
 
 ## Per-slice validation gate
 
