@@ -120,6 +120,7 @@ impl Dashboard {
                 h_flex()
                     .id("update-list")
                     .debug_selector(|| "update-list".to_owned())
+                    .accessibility_id("update-list")
                     .flex_1()
                     .overflow_y_scrollbar()
                     .overflow_x_hidden()

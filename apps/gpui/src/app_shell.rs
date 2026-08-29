@@ -288,7 +288,7 @@ impl AppShell {
     /// checks, and all live startup work. The same connection form, title bar, appearance state,
     /// and responsive layout are still rendered; the connect action is disabled as a safety
     /// boundary.
-    #[cfg(feature = "ui-lab")]
+    #[cfg(any(feature = "ui-lab", feature = "ui-automation"))]
     pub(crate) fn new_for_ui_lab(
         dashboard: Option<Entity<Dashboard>>,
         theme: ThemeMode,

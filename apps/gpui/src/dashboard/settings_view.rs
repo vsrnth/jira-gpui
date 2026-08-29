@@ -112,7 +112,12 @@ impl Dashboard {
                     let label = preference.label();
                     let id = format!("appearance-{}", label.to_lowercase());
                     let debug_id = id.clone();
+                    let toggle_id = format!("appearance-toggle-{}", label.to_lowercase());
+                    let toggle_debug_id = toggle_id.clone();
+                    let toggle_accessibility_id = toggle_id.clone();
                     let dashboard = dashboard.clone();
+                    let dashboard_for_a11y = dashboard.clone();
+                    let dashboard_for_keyboard = dashboard.clone();
                     div()
                         .id(id.clone())
                         .debug_selector(move || debug_id.clone())
@@ -120,20 +125,62 @@ impl Dashboard {
                         .role(gpui::accesskit::Role::Group)
                         .aria_label(format!("{label} appearance"))
                         .child(
-                            Toggle::new(format!("appearance-toggle-{}", label.to_lowercase()))
-                                .checked(checks[index])
-                                .outline()
-                                .label(label)
-                                .tooltip(format!("Use {label} appearance"))
-                                .on_click(move |_, window, cx| {
-                                    if let Some(dashboard) = dashboard.upgrade() {
-                                        dashboard.update(cx, |this, cx| {
-                                            this.select_appearance_preference(
-                                                preference, window, cx,
-                                            );
-                                        });
+                            div()
+                                .id(toggle_id.clone())
+                                .debug_selector(move || toggle_debug_id.clone())
+                                .accessibility_id(toggle_accessibility_id)
+                                .role(gpui::accesskit::Role::Button)
+                                .aria_label(format!("{label} appearance"))
+                                .aria_selected(checks[index])
+                                .aria_toggled(if checks[index] {
+                                    gpui::accesskit::Toggled::True
+                                } else {
+                                    gpui::accesskit::Toggled::False
+                                })
+                                // The component Toggle remains the pointer and visual owner. The
+                                // semantic wrapper is not another tab stop, but is directly
+                                // pressable by AX clients and reports the controlled state.
+                                .tab_index(-1)
+                                .on_a11y_action(
+                                    gpui::AccessibleAction::Click,
+                                    move |_, window, cx| {
+                                        if let Some(dashboard) = dashboard_for_a11y.upgrade() {
+                                            dashboard.update(cx, |this, cx| {
+                                                this.select_appearance_preference(
+                                                    preference, window, cx,
+                                                );
+                                            });
+                                        }
+                                    },
+                                )
+                                .on_key_down(move |event, window, cx| {
+                                    if is_activation_key(event) {
+                                        window.prevent_default();
+                                        if let Some(dashboard) = dashboard_for_keyboard.upgrade() {
+                                            dashboard.update(cx, |this, cx| {
+                                                this.select_appearance_preference(
+                                                    preference, window, cx,
+                                                );
+                                            });
+                                        }
                                     }
-                                }),
+                                })
+                                .child(
+                                    Toggle::new(toggle_id)
+                                        .checked(checks[index])
+                                        .outline()
+                                        .label(label)
+                                        .tooltip(format!("Use {label} appearance"))
+                                        .on_click(move |_, window, cx| {
+                                            if let Some(dashboard) = dashboard.upgrade() {
+                                                dashboard.update(cx, |this, cx| {
+                                                    this.select_appearance_preference(
+                                                        preference, window, cx,
+                                                    );
+                                                });
+                                            }
+                                        }),
+                                ),
                         )
                 });
 

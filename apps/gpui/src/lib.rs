@@ -16,10 +16,12 @@ mod local_data;
 mod presentation;
 mod responsive;
 mod rich_text_view;
-#[cfg(any(test, feature = "ui-lab"))]
+#[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
 mod sample_data;
 mod semantic_icons;
 mod team_table;
+#[cfg(feature = "ui-automation")]
+pub mod ui_automation;
 #[cfg(feature = "ui-lab")]
 pub mod ui_lab;
 

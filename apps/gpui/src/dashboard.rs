@@ -34,7 +34,7 @@ use jira_application::{
 
 use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
 
-#[cfg(any(test, feature = "ui-lab"))]
+#[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
 use crate::sample_data::{sample_issues, sample_updates, sample_users};
 
 use crate::{
@@ -317,7 +317,7 @@ pub(crate) enum DashboardEvent {
     AppearanceChanged(AppearancePreference),
 }
 
-#[cfg(feature = "ui-lab")]
+#[cfg(any(feature = "ui-lab", feature = "ui-automation"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SampleSection {
     Issues,
@@ -326,7 +326,7 @@ pub(crate) enum SampleSection {
     Settings,
 }
 
-#[cfg(feature = "ui-lab")]
+#[cfg(any(feature = "ui-lab", feature = "ui-automation"))]
 impl From<SampleSection> for Section {
     fn from(section: SampleSection) -> Self {
         match section {
@@ -835,7 +835,7 @@ impl Dashboard {
         self.team_panes_state = Some(state);
     }
 
-    #[cfg(any(test, feature = "ui-lab"))]
+    #[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
     pub(crate) fn initialize_appearance_preference(&mut self, preference: AppearancePreference) {
         self.appearance_preference = preference;
     }
@@ -875,12 +875,12 @@ impl Dashboard {
             )
     }
 
-    #[cfg(any(test, feature = "ui-lab"))]
+    #[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
     pub(crate) fn from_sample_data() -> Self {
         Self::from_sample_data_with_diagnostics(DiagnosticsSink::disabled(), Section::Issues)
     }
 
-    #[cfg(feature = "ui-lab")]
+    #[cfg(any(feature = "ui-lab", feature = "ui-automation"))]
     pub(crate) fn from_sample_data_for_section(section: SampleSection) -> Self {
         let mut dashboard = match section {
             SampleSection::Issues => Self::from_sample_data(),
@@ -929,7 +929,7 @@ impl Dashboard {
         dashboard
     }
 
-    #[cfg(any(test, feature = "ui-lab"))]
+    #[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
     fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink, section: Section) -> Self {
         let domain_issues = sample_issues();
         let users = sample_users();
