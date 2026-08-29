@@ -49,6 +49,36 @@ interaction quality—not a mandate to copy visual treatments.
 - Local cache, preferences, notification state, and sync cursors may be
   written locally; this does not expand Jira write permissions.
 
+## Current status
+
+### Completed and committed
+
+- **Issue description image caching (`1ae5f58`)** — valid description images
+  are served from a bounded, identity-keyed local cache before Jira fetches;
+  invalid or unavailable cache entries fall back safely to Jira.
+
+### Completed and validated
+
+- **Issue-type icon semantics (`ff8c2cf`, placement in `70dfb79`)** — dedicated Lucide assets map Story to
+  `book-open-text`, Task/standard task to `list-checks`, and Bug/defect to `bug`; other
+  types retain generic embedded icons. Icons are attached to type labels across issue rows,
+  issue detail metadata, and update cards; issue keys remain text-only and common Jira/JSM
+  aliases are covered.
+- **ADF rule and table support (`a8a051b`)** — bounded semantic tables and standalone
+  horizontal rules are parsed, rendered, and projected to plain text.
+- **Sidebar workspace identity (`70dfb79`)** — the expanded native Sidebar is 15 rem
+  (240 px), and workspace identity is reduced to a safe organization label.
+- **Update-card unread alignment (`70dfb79`)** — the unread dot is aligned with the first
+  key/type metadata line and has deterministic local layout assertions.
+- **Six-scenario local macOS regression matrix (`b9c4f07`)** — passed on 2026-08-29 at
+  `target/ui-automation/final-20260829`. It covers `onboarding`, `issues`,
+  `rich-content`, `updates`, `team`, and `settings`; the Settings submenu stayed
+  within 200x180 bounds, Updates met the native midline tolerance of ≤2 points,
+  Issues verified real row type/workspace identity, and rich-content verified a
+  ready image plus rule/table without a loading spinner or unsupported fallback.
+  The reviewed five-case visual candidates are at
+  `target/ui-lab/candidate-20260829-regressions`.
+
 ## Completed coherent commits
 
 - `780a9e5` — remove redundant title headings.
@@ -90,11 +120,21 @@ interaction quality—not a mandate to copy visual treatments.
   UI verification.
 - `ac8a618` — add the local-only real-window XCUITest harness and five semantic
   smoke scenarios.
+- `1ae5f58` — persist bounded issue-description images with cache validation,
+  eviction, and migration coverage.
+- `a8a051b` — render bounded ADF rules and tables.
+- `70dfb79` — clarify issue and Sidebar identity, including type icons,
+  workspace labeling, and update-card alignment.
+- `ff8c2cf` — add dedicated Lucide issue-type assets, composite asset loading,
+  and exact-path mapping coverage.
+- `b9c4f07` — extend local macOS regression coverage to six deterministic
+  scenarios and validate the rich-content and alignment assertions.
 
 ## Ordered plan
 
 Each slice is independently reviewed and validated using the gate below, then
-committed separately. **All currently ordered slices are complete.**
+committed separately. The original ordered slices and the follow-up slices
+recorded in **Current status** above are complete and validated.
 
 1. **Completed — Issues/detail:** Make exact-key Jira loading and failure visible
    on mobile; align page hierarchy and selected, empty, loading, and error
@@ -126,17 +166,29 @@ committed separately. **All currently ordered slices are complete.**
    real-window XCUITest coverage for onboarding, issue/detail identity, updates,
    team, and settings without Jira, keychain, notification, or write side
    effects.
+9. **Completed and validated — Six-scenario local macOS regression coverage:**
+   The complete `onboarding`, `issues`, `rich-content`, `updates`, `team`, and
+   `settings` suite passed on 2026-08-29. Results are retained at
+   `target/ui-automation/final-20260829`.
 
 ## Latest UI verification
 
-The complete five-case macOS visual matrix was regenerated after the status
-Popover, sizing audit, and Team Resizable migration by following
+The previously accepted five-case macOS visual matrix was regenerated after
+the status Popover, sizing audit, and Team Resizable migration by following
 `docs/ui-automation.md`. Issues, Team, Settings, onboarding, and local updates
 were visually reviewed at their canonical matrix sizes. The final five-scenario
 real-window XCUITest suite also passed for onboarding, issues/detail identity,
 updates, team, and settings. No clipping, overlap, pane-boundary, or semantic
 interaction regressions were found. Candidate PNGs and XCUITest results remain
 ignored local development artifacts and were not published as new baselines.
+
+The six-scenario local macOS regression extension passed on 2026-08-29 at
+`target/ui-automation/final-20260829`. It covered real issue-row type/workspace
+identity, a ready image plus horizontal rule/table with no loading or
+unsupported fallback, Updates native midline alignment within 2 points, Team
+Tracker identity, and Settings submenu bounds of 200x180. The reviewed visual
+candidate matrix is retained at
+`target/ui-lab/candidate-20260829-regressions`.
 
 ## Per-slice validation gate
 

@@ -1,0 +1,136 @@
+# Changelog
+
+This changelog records user-visible capabilities and the completed UX work in
+Jira Desk. The `Unreleased` section records changes on the current unreleased
+branch; it is not a published release.
+
+## Unreleased
+
+### Added
+
+- Jira ADF tables now have a bounded, transport-neutral representation with
+  rows, cells, and header-cell semantics. The GPUI rich-text view renders them
+  as readable bordered tables and projects their contents to plain text
+  (`a8a051b`).
+- Standalone ADF rules are represented as semantic horizontal-rule blocks and
+  render as bounded dividers.
+- Jira issue-type semantics now cover common Jira and JSM labels and aliases,
+  including story, task and sub-task variants, bug/defect, epic, initiative,
+  spike, improvement/new feature, incident/problem, change, and service
+  request. Unknown types keep a neutral fallback icon.
+- Common issue types now use app-owned Lucide assets: Story → `book-open-text`,
+  Task/standard task → `list-checks`, and Bug/defect → `bug`. The composite
+  app `AssetSource` serves these paths while delegating the rest of the icon
+  catalog to gpui-component (`ff8c2cf`).
+
+### Changed
+
+- Issue-type icons are associated with the visible type label in issue rows,
+  issue-detail metadata, and update cards. Issue keys remain text-only so the
+  task check icon cannot be mistaken for a status indicator (`70dfb79`).
+- Issue rows and update cards include the source issue-type label in their
+  accessibility names. The detail type surface exposes `Issue type: …`, while
+  its parent keeps the stable, key-based label `Issue detail for {key}` used by
+  local automation.
+- The local update unread indicator is aligned to the first key/type metadata
+  line with component spacing; a deterministic layout assertion bounds the
+  alignment.
+- The expanded native Sidebar allocation is 15 rem (240 px), keeping longer
+  navigation labels readable. Workspace identity text is reduced to a safe
+  site label rather than exposing URL paths or credentials.
+
+### Security
+
+- ADF table parsing is bounded by row, cell, and depth limits, and malformed
+  structures remain represented as safe placeholders.
+- Workspace labels only expose a validated site slug or hostname fallback;
+  credentials, paths, queries, and fragments are not displayed.
+
+### Testing
+
+- Added pure mapping coverage for issue-type aliases and neutral fallbacks.
+- Added exact-path mapping tests for the three dedicated Lucide icons and
+  asset-source tests covering loading and built-in asset delegation.
+- Added rich-text table projection and horizontal-rule rendering coverage.
+- Added local GPUI geometry coverage for update-card unread-dot alignment.
+- Extended the local-only macOS fixture suite to six deterministic scenarios
+  (`onboarding`, `issues`, `rich-content`, `updates`, `team`, and `settings`);
+  the complete run passed on 2026-08-29. Artifacts are retained under
+  `target/ui-automation/final-20260829` (`b9c4f07`).
+
+The validated six-scenario run covered real issue-row type and workspace
+identity, ready rich content (image, rule, and table with no loading or
+unsupported fallback), Updates unread-dot/native-metadata midline alignment
+within 2 points, and Team Tracker identity. Settings also kept its submenu
+within bounded 200x180 geometry. The reviewed five-case visual candidates are
+under `target/ui-lab/candidate-20260829-regressions`.
+
+## Image caching milestone (`1ae5f58`)
+
+### Added
+
+- Persist bounded Jira description images in the local cache, keyed by site,
+  issue, and attachment identity.
+- Serve valid cached images before fetching Jira, validate cached media before
+  use, and fall back to Jira when the cache is unavailable or invalid.
+- Bound cached image count, per-image bytes, and total bytes with eviction and
+  migration coverage.
+
+### Security
+
+- Cached media is restricted by attachment identity, supported image signature,
+  MIME type, and configured size limits. Jira writes remain limited to the
+  explicitly confirmed write ports.
+
+## Local macOS automation milestone (`ac8a618`, with semantic hooks in `7dddcc2`, `e357bcc`, `9a9688e`)
+
+### Added
+
+- A local-only, fixture-based real-window XCUITest host and runner.
+- Five deterministic semantic smoke scenarios covering onboarding,
+  issue/detail identity, updates, Team Tracker, and Settings.
+- Stable accessibility identifiers and bounded visual assertions for local UI
+  verification without Jira credentials, network access, or Jira writes.
+
+The six-scenario extension and its UI follow-up assertions are validated locally
+on 2026-08-29 (`b9c4f07`); see the Unreleased testing notes and
+`target/ui-automation/final-20260829`.
+
+## Completed UX milestones
+
+### Responsive shell and navigation (`1c6760a`, `af7baaf`, `780a9e5`)
+
+- Completed responsive desktop/mobile shell behavior and mobile navigation.
+- Moved refresh and sync status into the Sidebar/mobile status row.
+- Removed redundant title headings and preserved clear workspace context.
+
+### Issues, Updates, and Team Tracker (`16e980d`, `ff534fd`, `377d7e3`)
+
+- Made issue loading, refreshing, empty, and failure states explicit and
+  responsive.
+- Established a readable Updates heading, filter, card, and state hierarchy.
+- Stabilized Team Tracker selection, sorting, semantic colors, and detail
+  geometry.
+
+### Native shell and settings (`c4be503`, `f8ab865`, `48089a6`)
+
+- Adopted the native gpui-component Sidebar and Settings surfaces.
+- Kept Settings navigation in the application Sidebar and integrated native
+  TitleBar behavior.
+- Replaced custom Team Tracker pane sizing with native Resizable panels and
+  session-persistent component state.
+
+### Cached detail and guarded interactions (`6d44f18`, `19b1c03`, `14155f9`)
+
+- Persisted bounded issue-detail snapshots so cached content paints immediately
+  while Jira refreshes in the background.
+- Presented issue metadata with the native DescriptionList.
+- Replaced status selection with a compact Popover/List that stages a status
+  transition for explicit confirmation.
+
+### Desktop integration and onboarding (`7c16fd5`, `92b20ec`, `19a9c4b`, `a5c4cb2`)
+
+- Added privacy-safe macOS Notification Center delivery and explicit local
+  notification testing.
+- Added credential validation before connection and host-appropriate Settings
+  feedback.
