@@ -202,116 +202,140 @@ impl Dashboard {
         let hidden_row_count = hidden_update_row_count(rows.len(), expanded);
         let read_state = if group.unread { "Unread" } else { "Read" };
         let accessible_label = format!(
-            "{read_state} update. Open {}: {}",
-            group.issue_key, group.issue_summary
+            "{read_state} update. Open {} ({}): {}",
+            group.issue_key, issue_type, group.issue_summary
         );
-        let open_area =
-            div()
-                .id(("update-open", index))
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(accessible_label)
-                .tab_index(0)
-                .flex()
-                .flex_1()
-                .h_auto()
-                .when(mobile, |this| this.w_full())
-                .items_start()
-                .min_w_0()
-                .gap_3()
-                .p_2()
-                .hover(|style| style.bg(cx.theme().list_hover))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
-                }))
-                .on_key_down(cx.listener(move |this, event, window, cx| {
-                    if is_activation_key(event) {
-                        window.prevent_default();
-                        this.open_update_issue(keyboard_issue_id.clone(), mobile, cx);
-                    }
-                }))
-                .focus(|style| style.border_1().border_color(cx.theme().primary))
-                .child(
-                    div()
-                        .mt_1()
-                        .size_2()
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .when(group.unread, |this| this.bg(cx.theme().primary))
-                        .when(!group.unread, |this| this.bg(cx.theme().muted)),
-                )
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .gap_1()
-                        .text_base()
-                        .text_color(cx.theme().foreground)
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .w_full()
-                                .justify_between()
-                                .when(mobile, |this| {
-                                    this.flex_col().w_full().items_start().gap_1()
-                                })
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .when(!mobile, |this| this.flex_1())
-                                        .when(layout.is_mobile(), |this| this.flex_col())
-                                        .gap_2()
-                                        .child(
-                                            h_flex()
-                                                .min_w_0()
-                                                .gap_2()
-                                                .child(self.issue_key_with_icon(
-                                                    group.issue_key.clone(),
-                                                    issue_type,
-                                                    cx,
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .flex_shrink_0()
-                                                        .text_xs()
-                                                        .text_color(if group.unread {
-                                                            cx.theme().primary
-                                                        } else {
-                                                            cx.theme().muted_foreground
-                                                        })
-                                                        .child(read_state),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .when(!mobile, |this| this.flex_1())
-                                                .when(mobile, |this| this.w_full())
-                                                .line_clamp(2)
-                                                .text_sm()
-                                                .when(group.unread, |this| this.font_semibold())
-                                                .when(!group.unread, |this| this.font_normal())
-                                                .child(group.issue_summary.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .when(!mobile, |this| this.flex_shrink_0())
-                                        .when(mobile, |this| this.w_full().truncate())
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(group.latest_occurred_at.clone()),
-                                ),
-                        )
-                        .child(v_flex().gap_1().children(
+        let open_area = div()
+            .id(("update-open", index))
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(accessible_label)
+            .tab_index(0)
+            .flex()
+            .flex_1()
+            .h_auto()
+            .when(mobile, |this| this.w_full())
+            .items_start()
+            .min_w_0()
+            .gap_3()
+            .p_2()
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if is_activation_key(event) {
+                    window.prevent_default();
+                    this.open_update_issue(keyboard_issue_id.clone(), mobile, cx);
+                }
+            }))
+            .focus(|style| style.border_1().border_color(cx.theme().primary))
+            .child(
+                div()
+                    .id(format!("update-unread-dot-{index}"))
+                    .debug_selector(move || format!("update-unread-dot-{index}"))
+                    .accessibility_id(format!("update-unread-dot-{index}"))
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label(if group.unread {
+                        "Unread update marker"
+                    } else {
+                        "Read update marker"
+                    })
+                    // The marker aligns with the first metadata line rather than the card's
+                    // outer top edge. Use the component spacing token so the painted native
+                    // frame stays on the same midline as the metadata text.
+                    .mt_2()
+                    .size_2()
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .when(group.unread, |this| this.bg(cx.theme().primary))
+                    .when(!group.unread, |this| this.bg(cx.theme().muted)),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1()
+                    .text_base()
+                    .text_color(cx.theme().foreground)
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .w_full()
+                            .justify_between()
+                            .when(mobile, |this| {
+                                this.flex_col().w_full().items_start().gap_1()
+                            })
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .when(!mobile, |this| this.flex_1())
+                                    .when(layout.is_mobile(), |this| this.flex_col())
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .id(format!("update-metadata-{index}"))
+                                            .debug_selector(move || {
+                                                format!("update-metadata-{index}")
+                                            })
+                                            .accessibility_id(format!("update-metadata-{index}"))
+                                            .role(gpui::accesskit::Role::Group)
+                                            .aria_label("Update metadata")
+                                            .min_w_0()
+                                            .items_start()
+                                            .gap_2()
+                                            .child(
+                                                self.issue_key_label(group.issue_key.clone(), cx),
+                                            )
+                                            .child(self.issue_type_label_with_icon(
+                                                issue_type,
+                                                group.issue_key.clone(),
+                                                cx,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(if group.unread {
+                                                        cx.theme().primary
+                                                    } else {
+                                                        cx.theme().muted_foreground
+                                                    })
+                                                    .child(read_state),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .when(!mobile, |this| this.flex_1())
+                                            .when(mobile, |this| this.w_full())
+                                            .line_clamp(2)
+                                            .text_sm()
+                                            .when(group.unread, |this| this.font_semibold())
+                                            .when(!group.unread, |this| this.font_normal())
+                                            .child(group.issue_summary.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .when(!mobile, |this| this.flex_shrink_0())
+                                    .when(mobile, |this| this.w_full().truncate())
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(group.latest_occurred_at.clone()),
+                            ),
+                    )
+                    .child(
+                        v_flex().gap_1().children(
                             rows.iter().take(visible_row_count).enumerate().map(
                                 |(row_index, row)| {
                                     self.update_row_element(index, row_index, row, mobile, cx)
                                 },
                             ),
-                        )),
-                )
-                .into_any_element();
+                        ),
+                    ),
+            )
+            .into_any_element();
         h_flex()
             .id(("update-card", index))
             .debug_selector(move || format!("update-card-{index}"))

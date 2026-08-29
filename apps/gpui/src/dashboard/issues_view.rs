@@ -1,25 +1,43 @@
 use super::*;
 
 impl Dashboard {
-    pub(super) fn issue_key_with_icon(
+    pub(super) fn issue_key_label(
         &self,
         key: impl Into<String>,
-        issue_type: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        h_flex()
+        div()
             .debug_selector(|| "update-key".to_owned())
             .flex_shrink_0()
+            .text_xs()
+            .font_semibold()
+            .text_color(cx.theme().link)
+            .child(key.into())
+            .into_any_element()
+    }
+
+    pub(super) fn issue_type_label_with_icon(
+        &self,
+        label: impl Into<String>,
+        id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = label.into();
+        h_flex()
+            .id(format!("issue-type-{}", id.into()))
+            .min_w_0()
             .gap_1()
-            .child(Icon::new(issue_type_icon(issue_type)).text_color(cx.theme().link))
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .role(gpui::accesskit::Role::TextRun)
+            .aria_label(format!("Issue type: {label}"))
             .child(
-                div()
+                Icon::new(issue_type_icon(&label))
+                    .size_4()
                     .flex_shrink_0()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(cx.theme().link)
-                    .child(key.into()),
+                    .text_color(cx.theme().muted_foreground),
             )
+            .child(div().min_w_0().truncate().child(label))
             .into_any_element()
     }
 
@@ -427,7 +445,10 @@ impl Dashboard {
         let accessibility_issue_id = format!("issue-row-{}", issue.key);
         let is_remote_result = !label.is_empty();
         let mobile = layout.is_mobile();
-        let accessible_label = format!("Open {}: {}", issue.key, issue.summary);
+        let accessible_label = format!(
+            "Open {} ({}): {}",
+            issue.key, issue.issue_type, issue.summary
+        );
         div()
             .id(format!("issue-row-{}", issue.id))
             .debug_selector(move || format!("issue-row-{debug_issue_id}"))
@@ -495,19 +516,12 @@ impl Dashboard {
                                 h_flex()
                                     .min_w_0()
                                     .gap_2()
-                                    .child(self.issue_key_with_icon(
+                                    .child(self.issue_key_label(issue.key.clone(), cx))
+                                    .child(self.issue_type_label_with_icon(
+                                        issue.issue_type.clone(),
                                         issue.key.clone(),
-                                        &issue.issue_type,
                                         cx,
-                                    ))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(issue.issue_type.clone()),
-                                    ),
+                                    )),
                             )
                             .child(
                                 div()

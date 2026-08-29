@@ -558,7 +558,7 @@ fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::Te
         .debug_bounds("dashboard-main")
         .expect("collapsed main pane should be laid out");
 
-    assert_eq!(expanded.size.width, px(200.));
+    assert_eq!(expanded.size.width, px(240.));
     assert_eq!(collapsed.size.width, px(48.));
     assert_eq!(
         expanded_main.origin.x,
@@ -1989,9 +1989,25 @@ fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::T
     let key_bounds = visual
         .debug_bounds("update-key")
         .expect("issue key should be laid out");
+    let dot_bounds = visual
+        .debug_bounds("update-unread-dot-0")
+        .expect("unread indicator should be laid out");
+    let metadata_bounds = visual
+        .debug_bounds("update-metadata-0")
+        .expect("update metadata row should be laid out");
     let actions_bounds = visual
         .debug_bounds("update-actions-0")
         .expect("update actions should be laid out");
+    // GPUI debug bounds describe the pre-paint flow box, while the native macOS
+    // AX frame includes the component spacing margin. Keep the product-level
+    // midline assertion in the local XCUITest, and verify this renderer keeps
+    // the marker and metadata as non-collapsed, bounded layout surfaces here.
+    assert_eq!(dot_bounds.size.width, px(8.));
+    assert_eq!(dot_bounds.size.height, px(8.));
+    assert!(
+        metadata_bounds.size.height > px(1.),
+        "update metadata collapsed: {metadata_bounds:?}"
+    );
     assert!(
         key_bounds.size.width >= px(90.),
         "full issue key was allowed to shrink: key={key_bounds:?}"
@@ -2210,7 +2226,7 @@ fn team_detail_width_preserves_a_bounded_ticket_pane_at_breakpoints() {
                     <= constraints.available_width + 0.01
             );
             if width == 1_200. && !sidebar_collapsed {
-                assert_eq!(constraints.initial_detail_width, 364.);
+                assert_eq!(constraints.initial_detail_width, 324.);
             }
             if width == 1_370. {
                 assert_eq!(constraints.initial_detail_width, TEAM_DETAIL_INITIAL_WIDTH);

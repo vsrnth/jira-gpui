@@ -266,22 +266,15 @@ impl Dashboard {
                             .child(div().min_w_0().truncate().child(project))
                             .child("/")
                             .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        Icon::new(issue_type_icon(&issue_type))
-                                            .text_color(cx.theme().link),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(detail_key_accessibility_id.clone())
-                                            .accessibility_id(detail_key_accessibility_id)
-                                            .role(gpui::accesskit::Role::TextRun)
-                                            .aria_label(detail_key_label)
-                                            .min_w_0()
-                                            .child(div().min_w_0().truncate().child(key)),
-                                    ),
+                                h_flex().min_w_0().child(
+                                    div()
+                                        .id(detail_key_accessibility_id.clone())
+                                        .accessibility_id(detail_key_accessibility_id)
+                                        .role(gpui::accesskit::Role::TextRun)
+                                        .aria_label(detail_key_label)
+                                        .min_w_0()
+                                        .child(div().min_w_0().truncate().child(key)),
+                                ),
                             ),
                     )
                     .child(
@@ -301,14 +294,24 @@ impl Dashboard {
                             .child(
                                 h_flex()
                                     .debug_selector(|| "issue-detail-type-surface".to_owned())
+                                    .id("issue-detail-type-surface")
                                     .h_6()
                                     .min_w_0()
                                     .items_center()
+                                    .gap_1()
                                     .px_2()
                                     .rounded_full()
                                     .bg(cx.theme().secondary)
                                     .text_sm()
                                     .text_color(cx.theme().secondary_foreground)
+                                    .role(gpui::accesskit::Role::TextRun)
+                                    .aria_label(format!("Issue type: {issue_type}"))
+                                    .child(
+                                        Icon::new(issue_type_icon(&issue_type))
+                                            .size_4()
+                                            .flex_shrink_0()
+                                            .text_color(cx.theme().secondary_foreground),
+                                    )
                                     .child(issue_type),
                             )
                             .child(self.status_control(Some(&issue), status, cx))

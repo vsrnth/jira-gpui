@@ -30,8 +30,8 @@ const WIDE_BREAKPOINT: f32 = 1_200.0;
 
 // Keep this aligned with gpui-component's native icon-collapsed Sidebar width.
 const SIDEBAR_RAIL_WIDTH: f32 = 48.0;
-const STANDARD_SIDEBAR_WIDTH: f32 = 200.0;
-// 200px is wide enough for the full native labels and avoids a second
+const STANDARD_SIDEBAR_WIDTH: f32 = 240.0;
+// 240px keeps the longest native settings label readable and avoids a second
 // workspace contraction at the Wide breakpoint.
 const WIDE_SIDEBAR_WIDTH: f32 = STANDARD_SIDEBAR_WIDTH;
 
@@ -169,7 +169,7 @@ pub(crate) fn effective_sidebar_width(layout: LayoutMode, manually_collapsed: bo
 /// Returns the shell's sidebar allocation.
 ///
 /// Desktop rendering delegates collapse behavior to gpui-component's native
-/// icon mode: expanded sidebars are 200px and collapsed sidebars are 48px.
+/// icon mode: expanded sidebars are 240px and collapsed sidebars are 48px.
 /// The viewport argument remains for callers that share layout calculations
 /// with the mobile shell.
 pub(crate) fn sidebar_width_for_viewport(
@@ -275,9 +275,9 @@ mod tests {
         assert_eq!(effective_sidebar_width(LayoutMode::Mobile, true), 0.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Compact, false), 48.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Compact, true), 48.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Standard, false), 200.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Standard, false), 240.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Standard, true), 48.0);
-        assert_eq!(effective_sidebar_width(LayoutMode::Wide, false), 200.0);
+        assert_eq!(effective_sidebar_width(LayoutMode::Wide, false), 240.0);
         assert_eq!(effective_sidebar_width(LayoutMode::Wide, true), 48.0);
     }
 
@@ -293,7 +293,7 @@ mod tests {
             let layout = layout_for_width(width);
             assert_eq!(
                 sidebar_width_for_viewport(layout, false, width),
-                if layout.is_rail() { 48.0 } else { 200.0 }
+                if layout.is_rail() { 48.0 } else { 240.0 }
             );
         }
         for layout in [LayoutMode::Standard, LayoutMode::Wide] {

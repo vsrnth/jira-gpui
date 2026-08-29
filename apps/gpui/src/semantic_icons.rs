@@ -28,10 +28,15 @@ pub fn issue_type_icon(label: &str) -> IconName {
     match normalize(label).as_str() {
         "story" => IconName::BookOpen,
         "initiative" => IconName::LayoutDashboard,
-        "task" => IconName::Check,
-        "sub-task" => IconName::PanelBottom,
-        "bug" => IconName::TriangleAlert,
+        "task" | "standard task" => IconName::Check,
+        "sub-task" | "subtask" | "sub task" => IconName::PanelBottom,
+        "bug" | "defect" => IconName::TriangleAlert,
         "epic" => IconName::Folder,
+        "spike" => IconName::SquareTerminal,
+        "improvement" | "new feature" | "feature" => IconName::Plus,
+        "incident" | "problem" => IconName::TriangleAlert,
+        "change" => IconName::Settings,
+        "service request" | "service-request" => IconName::Inbox,
         _ => IconName::File,
     }
 }
@@ -75,8 +80,29 @@ mod tests {
     }
 
     #[test]
+    fn maps_common_jira_and_jsm_aliases() {
+        for label in ["task", "standard task"] {
+            assert_eq!(path(issue_type_icon(label)), "icons/check.svg");
+        }
+        for label in ["subtask", "sub task", "sub-task"] {
+            assert_eq!(path(issue_type_icon(label)), "icons/panel-bottom.svg");
+        }
+        for label in ["bug", "defect", "incident", "problem"] {
+            assert_eq!(path(issue_type_icon(label)), "icons/triangle-alert.svg");
+        }
+        assert_eq!(path(issue_type_icon("spike")), "icons/square-terminal.svg");
+        for label in ["improvement", "new feature", "feature"] {
+            assert_eq!(path(issue_type_icon(label)), "icons/plus.svg");
+        }
+        assert_eq!(path(issue_type_icon("change")), "icons/settings.svg");
+        for label in ["service request", "service-request"] {
+            assert_eq!(path(issue_type_icon(label)), "icons/inbox.svg");
+        }
+    }
+
+    #[test]
     fn unknown_issue_types_use_a_neutral_file_icon() {
-        assert_eq!(path(issue_type_icon("subtask")), "icons/file.svg");
+        assert_eq!(path(issue_type_icon("custom type")), "icons/file.svg");
         assert_eq!(path(issue_type_icon("")), "icons/file.svg");
     }
 

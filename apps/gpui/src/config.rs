@@ -153,7 +153,7 @@ where
     let cloud_id = discover_cloud_id(parsed_url)
         .await
         .map_err(|_| StartupError::CloudIdUnavailable)?;
-    let site_label = base_url.clone();
+    let site_label = site_display_label(&base_url);
     let jira = JiraHttpClient::new(site_id.clone(), cloud_id, credentials)
         .map(Arc::new)
         .map_err(|error| match error {
@@ -283,7 +283,7 @@ where
     // Consume the credential strings directly into the client. No startup
     // state retains the token after this function returns.
     let credentials = credentials_from_values(email, api_token)?;
-    let site_label = base_url.clone();
+    let site_label = site_display_label(&base_url);
     let jira = match JiraHttpClient::new(site_id.clone(), cloud_id, credentials) {
         Ok(jira) => Arc::new(jira),
         Err(ConfigError::InvalidBaseUrl) => return Err(StartupError::InvalidBaseUrl),
@@ -300,6 +300,38 @@ where
         jira,
         cache,
     })
+}
+
+/// Return the short organization slug used by the sidebar workspace identity.
+/// Full Atlassian URLs are reduced to their first-party site label; shorthand
+/// input follows the same normalization path. For an unexpected host, expose
+/// only its safe hostname and never a path, query, credentials, or fragment.
+pub(crate) fn site_display_label(value: &str) -> String {
+    let normalized = normalize_manual_base_url(value);
+    if let Ok(url) = JiraBaseUrl::parse(&normalized)
+        && let Some(host) = url.as_url().host_str()
+        && let Some(slug) = host.strip_suffix(".atlassian.net")
+        && !slug.is_empty()
+    {
+        return slug.to_ascii_lowercase();
+    }
+
+    let trimmed = value.trim();
+    let authority = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("HTTPS://"))
+        .and_then(|value| value.split(['/', '?', '#']).next())
+        .filter(|authority| {
+            !authority.is_empty()
+                && !authority.contains('@')
+                && !authority.contains(':')
+                && authority
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character))
+        });
+    authority
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "Jira workspace".to_owned())
 }
 
 fn normalize_manual_inputs(
@@ -597,6 +629,28 @@ mod tests {
         assert_eq!(
             normalize_manual_base_url(" https://My-Team.atlassian.net/ "),
             "https://My-Team.atlassian.net/"
+        );
+    }
+
+    #[test]
+    fn site_display_label_reduces_full_atlassian_url_to_lowercase_slug() {
+        assert_eq!(site_display_label("  https://SUN.atlassian.net/  "), "sun");
+    }
+
+    #[test]
+    fn site_display_label_accepts_normalized_site_slug_input() {
+        assert_eq!(site_display_label("  Sun-Team  "), "sun-team");
+    }
+
+    #[test]
+    fn site_display_label_falls_back_to_safe_hostname_for_nonstandard_host() {
+        assert_eq!(
+            site_display_label("https://jira.example.com/private?token=hidden"),
+            "jira.example.com"
+        );
+        assert_eq!(
+            site_display_label("user:secret@jira.example.com"),
+            "Jira workspace"
         );
     }
 

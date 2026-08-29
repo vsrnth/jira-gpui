@@ -211,6 +211,7 @@ impl Dashboard {
             .id("sidebar-workspace-header")
             .debug_selector(|| "sidebar-workspace-header".to_owned())
             .accessibility_id("sidebar-workspace-header")
+            .role(gpui::accesskit::Role::Group)
             .aria_label(format!("{} · {}", self.site_label, self.mode_label))
             .w_full()
             .min_w_0()
@@ -245,6 +246,7 @@ impl Dashboard {
                             div()
                                 .id("sidebar-workspace-site")
                                 .debug_selector(|| "sidebar-workspace-site".to_owned())
+                                .accessibility_id("sidebar-workspace-site")
                                 .text_sm()
                                 .font_semibold()
                                 .truncate()
@@ -276,6 +278,12 @@ impl Dashboard {
                             .id("sidebar-toggle")
                             .debug_selector(|| "sidebar-toggle".to_owned())
                             .accessibility_id("sidebar-toggle")
+                            .role(gpui::accesskit::Role::Button)
+                            .aria_label(if collapsed {
+                                "Expand sidebar"
+                            } else {
+                                "Collapse sidebar"
+                            })
                             .w_full()
                             .justify_end()
                             .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
@@ -299,6 +307,8 @@ impl Dashboard {
                                 .id("sidebar-toggle")
                                 .debug_selector(|| "sidebar-toggle".to_owned())
                                 .accessibility_id("sidebar-toggle")
+                                .role(gpui::accesskit::Role::Button)
+                                .aria_label("Collapse sidebar")
                                 .flex_shrink_0()
                                 .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
                                     cx.listener(move |this, _, _, cx| {
@@ -374,15 +384,18 @@ impl Dashboard {
         div()
             .id("dashboard-sidebar-shell")
             .debug_selector(|| "dashboard-sidebar".to_owned())
+            .accessibility_id("dashboard-sidebar")
+            .role(gpui::accesskit::Role::Group)
+            .aria_label("Jira Desk sidebar")
             .h_full()
-            .w(gpui::rems(if collapsed { 3. } else { 12.5 }))
+            .w(gpui::rems(if collapsed { 3. } else { 15. }))
             .flex_shrink_0()
             .overflow_hidden()
             .child(
                 Sidebar::new("dashboard-sidebar-component")
                     .collapsible(SidebarCollapsible::Icon)
                     .collapsed(collapsed)
-                    .w(gpui::rems(12.5))
+                    .w(gpui::rems(15.))
                     .header(header)
                     .child(menu)
                     .footer(footer),
