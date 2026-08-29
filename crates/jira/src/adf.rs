@@ -1,6 +1,6 @@
 use jira_domain::{
-    AccountId, AttachmentMetadata, PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline,
-    RichListItem, RichMark, RichTable, RichTableCell, RichTableRow, RichTextDocument,
+    AccountId, AttachmentMetadata, IssueKey, PanelKind, RichAttachmentCard, RichBlock, RichImage,
+    RichInline, RichListItem, RichMark, RichTable, RichTableCell, RichTableRow, RichTextDocument,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -291,6 +291,21 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
         "inlineCard" => match parse_inline_attachment_card(object, state) {
             RichInline::AttachmentCard(card) => {
                 RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
+            }
+            RichInline::Text { text, marks } => {
+                RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
+            }
+            RichInline::Placeholder { label } => RichBlock::Placeholder { label },
+            _ => RichBlock::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            },
+        },
+        "blockCard" => match parse_inline_attachment_card(object, state) {
+            RichInline::AttachmentCard(card) => {
+                RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
+            }
+            RichInline::Text { text, marks } => {
+                RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
             }
             RichInline::Placeholder { label } => RichBlock::Placeholder { label },
             _ => RichBlock::Placeholder {
@@ -843,45 +858,52 @@ fn parse_inline_attachment_card(
     object: &serde_json::Map<String, Value>,
     state: &mut AdfParserState<'_>,
 ) -> RichInline {
-    let Some(media) = state.media.as_ref() else {
-        return RichInline::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
-        };
-    };
     let Some(attrs) = object.get("attrs").and_then(Value::as_object) else {
         return RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         };
     };
+    if attrs.contains_key("data") || attrs.contains_key("datasource") {
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    }
     let Some(url) = attrs.get("url").and_then(Value::as_str) else {
         return RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         };
     };
-    let Some(attachment_id) = attachment_id_from_inline_card_url(url) else {
-        return RichInline::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
+    if let Some(media) = state.media.as_ref()
+        && let Some(attachment_id) = attachment_id_from_inline_card_url(url)
+    {
+        let attachment = match unique_attachment(
+            media
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.id == attachment_id),
+        ) {
+            Ok(Some(attachment)) => attachment,
+            Ok(None) | Err(()) => {
+                return RichInline::Placeholder {
+                    label: UNSUPPORTED_CONTENT.to_owned(),
+                };
+            }
         };
-    };
-    let attachment = match unique_attachment(
-        media
-            .attachments
-            .iter()
-            .filter(|attachment| attachment.id == attachment_id),
-    ) {
-        Ok(Some(attachment)) => attachment,
-        Ok(None) | Err(()) => {
-            return RichInline::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
-            };
-        }
-    };
-    RichInline::AttachmentCard(RichAttachmentCard {
-        attachment_id: attachment.id.clone(),
-        filename: attachment.filename.clone(),
-        mime_type: normalized_attachment_mime(attachment.mime_type.as_deref()),
-        size_bytes: Some(attachment.size_bytes),
-    })
+        return RichInline::AttachmentCard(RichAttachmentCard {
+            attachment_id: attachment.id.clone(),
+            filename: attachment.filename.clone(),
+            mime_type: normalized_attachment_mime(attachment.mime_type.as_deref()),
+            size_bytes: Some(attachment.size_bytes),
+        });
+    }
+    jira_browse_issue_key(url)
+        .map(|text| RichInline::Text {
+            text,
+            marks: Vec::new(),
+        })
+        .unwrap_or(RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        })
 }
 
 fn parse_media_inline_attachment_card(
@@ -1031,6 +1053,43 @@ pub(super) fn attachment_id_from_inline_card_url(value: &str) -> Option<String> 
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')))
     .then(|| candidate.to_owned())
+}
+
+fn jira_browse_issue_key(value: &str) -> Option<String> {
+    if value.len() > MAX_LINK_HREF_BYTES {
+        return None;
+    }
+    let parsed = Url::parse(value).ok()?;
+    let authority_start = value.find("://")? + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |offset| authority_start + offset);
+    let authority = &value[authority_start..authority_end];
+    if parsed.scheme() != "https"
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || authority.contains(':')
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let subdomain = host.strip_suffix(".atlassian.net")?;
+    if subdomain.is_empty() || subdomain.split('.').any(str::is_empty) {
+        return None;
+    }
+    let mut segments = parsed.path_segments()?;
+    if segments.next()? != "browse" {
+        return None;
+    }
+    let candidate = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    IssueKey::new(candidate.to_owned())
+        .ok()
+        .map(|issue_key| issue_key.to_string())
 }
 
 fn normalized_attachment_mime(mime_type: Option<&str>) -> Option<String> {

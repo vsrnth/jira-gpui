@@ -467,7 +467,7 @@ fn keeps_unknown_trusted_attachment_id_unsupported() {
 }
 
 #[test]
-fn leaves_non_attachment_and_ambiguous_inline_card_urls_unsupported() {
+fn maps_jira_browse_cards_but_keeps_external_hosts_unsupported() {
     let mut non_attachment: JiraIssue = serde_json::from_str(include_str!(
         "../tests/fixtures/issue-detail-inline-card.json"
     ))
@@ -476,16 +476,38 @@ fn leaves_non_attachment_and_ambiguous_inline_card_urls_unsupported() {
         "type": "doc", "version": 1, "content": [{
             "type": "paragraph", "content": [{
                 "type": "inlineCard",
-                "attrs": {"url": "https://jira.example.test/browse/ENG-43"}
+                "attrs": {"url": "https://acme.atlassian.net/browse/ENG-43"}
             }]
         }]
     }));
     let detail = IssueMapper
         .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), non_attachment)
         .unwrap();
+    assert_eq!(detail.issue.description_text.as_deref(), Some("ENG-43"));
+    assert!(matches!(
+        &detail.issue.rich_description.unwrap().blocks[0],
+        RichBlock::Paragraph(content)
+            if matches!(content.as_slice(), [RichInline::Text { text, marks }] if text == "ENG-43" && marks.is_empty())
+    ));
+
+    let mut external: JiraIssue = serde_json::from_str(include_str!(
+        "../tests/fixtures/issue-detail-inline-card.json"
+    ))
+    .unwrap();
+    external.fields.description = Some(serde_json::json!({
+        "type": "doc", "version": 1, "content": [{
+            "type": "paragraph", "content": [{
+                "type": "inlineCard",
+                "attrs": {"url": "https://jira.example.test/browse/ENG-43"}
+            }]
+        }]
+    }));
+    let detail = IssueMapper
+        .map_domain_issue_detail(JiraSiteId::new("site").unwrap(), external)
+        .unwrap();
     assert_eq!(
         detail.issue.description_text.as_deref(),
-        Some("[unsupported Jira content]")
+        Some(UNSUPPORTED_CONTENT)
     );
 
     let mut ambiguous: JiraIssue = serde_json::from_str(include_str!(
@@ -514,6 +536,127 @@ fn leaves_non_attachment_and_ambiguous_inline_card_urls_unsupported() {
             .unwrap()
             .contains(UNSUPPORTED_CONTENT)
     );
+}
+
+#[test]
+fn maps_inline_cards_without_placeholder_punctuation_and_wraps_block_cards() {
+    let inline = serde_json::json!({
+        "type": "doc", "version": 1, "content": [{
+            "type": "paragraph", "content": [
+                {"type": "text", "text": "Before "},
+                {"type": "inlineCard", "attrs": {
+                    "url": "https://acme.atlassian.net/browse/ENG-43"
+                }},
+                {"type": "text", "text": " after"}
+            ]
+        }]
+    });
+    let parsed = parse_adf(&inline).expect("valid inline-card document");
+    assert_eq!(parsed.plain_text(), "Before ENG-43 after");
+    assert!(matches!(
+        &parsed.blocks[0],
+        RichBlock::Paragraph(content)
+            if matches!(content.as_slice(), [
+                RichInline::Text { text: before, .. },
+                RichInline::Text { text: key, marks },
+                RichInline::Text { text: after, .. }
+            ] if before == "Before " && key == "ENG-43" && marks.is_empty() && after == " after")
+    ));
+
+    let block = serde_json::json!({
+        "type": "doc", "version": 1, "content": [{
+            "type": "blockCard", "attrs": {
+                "url": "https://acme.atlassian.net/browse/OPS-7"
+            }
+        }]
+    });
+    let parsed = parse_adf(&block).expect("valid block-card document");
+    assert_eq!(parsed.plain_text(), "OPS-7");
+    assert!(matches!(
+        &parsed.blocks[0],
+        RichBlock::Paragraph(content)
+            if matches!(content.as_slice(), [RichInline::Text { text, marks }] if text == "OPS-7" && marks.is_empty())
+    ));
+
+    let uppercase_host = serde_json::json!({
+        "type": "doc", "version": 1, "content": [{
+            "type": "inlineCard", "attrs": {
+                "url": "https://ACME.ATLASSIAN.NET/browse/ENG-43"
+            }
+        }]
+    });
+    let parsed = parse_adf(&uppercase_host).expect("valid uppercase-host card document");
+    assert_eq!(parsed.plain_text(), "ENG-43");
+}
+
+#[test]
+fn rejects_noncanonical_or_non_url_jira_cards() {
+    let rejected_urls = [
+        "http://acme.atlassian.net/browse/ENG-43",
+        "https://atlassian.net/browse/ENG-43",
+        "https://acme.atlassian.net.evil.test/browse/ENG-43",
+        "https://user:secret@acme.atlassian.net/browse/ENG-43",
+        "https://acme.atlassian.net:443/browse/ENG-43",
+        "https://acme.atlassian.net/browse/ENG-43?view=full",
+        "https://acme.atlassian.net/browse/ENG-43#details",
+        "https://acme.atlassian.net/browse/ENG-43/comments",
+        "https://acme.atlassian.net/browse/eng-43",
+    ];
+    for url in rejected_urls {
+        let document = serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "inlineCard", "attrs": {"url": url}
+                }]
+            }]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF");
+        assert_eq!(parsed.plain_text(), UNSUPPORTED_CONTENT, "{url}");
+    }
+
+    for attrs in [
+        serde_json::json!({"data": {"url": "https://acme.atlassian.net/browse/ENG-43"}}),
+        serde_json::json!({"datasource": {"url": "https://acme.atlassian.net/browse/ENG-43"}}),
+    ] {
+        let document = serde_json::json!({
+            "type": "doc", "version": 1, "content": [{
+                "type": "inlineCard", "attrs": attrs
+            }]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF");
+        assert_eq!(parsed.plain_text(), UNSUPPORTED_CONTENT);
+    }
+
+    let card_document = |kind: &str, attrs: serde_json::Value| {
+        let card = serde_json::json!({"type": kind, "attrs": attrs});
+        if kind == "inlineCard" {
+            serde_json::json!({
+                "type": "doc", "version": 1, "content": [{
+                    "type": "paragraph", "content": [card]
+                }]
+            })
+        } else {
+            serde_json::json!({
+                "type": "doc", "version": 1, "content": [card]
+            })
+        }
+    };
+    for kind in ["inlineCard", "blockCard"] {
+        for extra in ["data", "datasource"] {
+            let mut attrs = serde_json::Map::new();
+            attrs.insert(
+                "url".to_owned(),
+                serde_json::json!("https://acme.atlassian.net/browse/ENG-43"),
+            );
+            attrs.insert(
+                extra.to_owned(),
+                serde_json::json!({"url": "https://acme.atlassian.net/browse/ENG-43"}),
+            );
+            let document = card_document(kind, serde_json::Value::Object(attrs));
+            let parsed = parse_adf(&document).expect("valid mixed-shape ADF");
+            assert_eq!(parsed.plain_text(), UNSUPPORTED_CONTENT, "{kind} + {extra}");
+        }
+    }
 }
 
 #[test]

@@ -115,6 +115,18 @@ final class JiraDeskUITests: XCTestCase {
             NSPredicate(format: "label == %@", "Some Jira content isn't supported yet.")
         ).firstMatch
         XCTAssertFalse(unsupported.exists, "valid rich content must not show the unsupported sentinel")
+        for (identifier, expected) in [
+            ("rich-text-paragraph-0", "Epic: ENG-43"),
+            ("rich-text-paragraph-1", "Per the ENG-43, after"),
+            ("rich-text-paragraph-2", "OPS-7"),
+        ] {
+            let paragraph = try require(app.staticTexts[identifier], identifier)
+            XCTAssertEqual(
+                paragraph.value as? String,
+                expected,
+                "\(identifier) should expose exact rich paragraph value"
+            )
+        }
     }
 
     func testSettings() throws {

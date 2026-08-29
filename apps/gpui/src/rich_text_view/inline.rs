@@ -6,9 +6,9 @@ use super::{
     presentation_placeholder_label, render_element_ordinal,
 };
 use gpui::{
-    AnyElement, ElementId, FontStyle, FontWeight, HighlightStyle, IntoElement as _,
-    ParentElement as _, SharedString, StrikethroughStyle, Styled as _, StyledText, UnderlineStyle,
-    div, rems,
+    AnyElement, ElementId, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, div, rems,
 };
 use gpui_component::{Icon, IconName, StyledExt as _, button::Button, h_flex};
 use std::ops::Range;
@@ -19,6 +19,34 @@ pub(super) fn render_inline_line(
     depth: usize,
     budget: &mut RenderBudget,
 ) -> AnyElement {
+    let (bounded_content, content_was_capped) = bounded_inline_content(content);
+    if !bounded_content
+        .iter()
+        .any(|inline| matches!(inline, RichInline::AttachmentCard(_)))
+    {
+        let flow = inline_text_flow(bounded_content, context.palette, depth, budget)
+            .expect("text-only inline content should produce a text flow");
+        let aria_label = flow.text.clone();
+        if content_was_capped {
+            budget.omitted = true;
+        }
+        let ordinal =
+            render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal());
+        return div()
+            .min_w_0()
+            .text_sm()
+            .text_color(context.palette.foreground)
+            .id(ElementId::named_usize("rich-text-paragraph", ordinal))
+            .accessibility_id(format!("rich-text-paragraph-{ordinal}"))
+            // AccessKit maps Label to macOS static text, which keeps the rendered paragraph
+            // discoverable to native automation while retaining the bounded flow text.
+            .role(gpui::accesskit::Role::Label)
+            .aria_label(aria_label)
+            .aria_value(flow.text.clone())
+            .child(render_inline_text_flow(flow))
+            .into_any_element();
+    }
+
     div()
         .min_w_0()
         .text_sm()

@@ -955,6 +955,17 @@ impl Dashboard {
                 marks: Vec::new(),
             }])
         };
+        let sentence = |parts: &[&str]| {
+            RichBlock::Paragraph(
+                parts
+                    .iter()
+                    .map(|part| RichInline::Text {
+                        text: (*part).to_owned(),
+                        marks: Vec::new(),
+                    })
+                    .collect(),
+            )
+        };
         let table = RichTable {
             rows: vec![
                 RichTableRow {
@@ -990,6 +1001,9 @@ impl Dashboard {
         issue.description_text = Some("Rich content fixture".to_owned());
         issue.rich_description = Some(RichTextDocument::new(
             vec![
+                sentence(&["Epic: ", "ENG-43"]),
+                sentence(&["Per the ", "ENG-43", ", after"]),
+                text("OPS-7"),
                 text("Rich content fixture"),
                 RichBlock::horizontal_rule(),
                 RichBlock::Table(table),
