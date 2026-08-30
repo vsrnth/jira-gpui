@@ -10,6 +10,48 @@ die() {
     exit 1
 }
 
+hdiutil_bin=${HDIUTIL_BIN:-hdiutil}
+
+create_compressed_dmg() {
+    dmg_temp=$1
+    staging=$2
+    hdiutil_log=$3
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        if "$hdiutil_bin" create -srcfolder "$staging" -volname "Jira Desk" -format UDZO \
+            -imagekey zlib-level=9 "$dmg_temp" > /dev/null 2>"$hdiutil_log"; then
+            status=0
+        else
+            status=$?
+        fi
+        if [ -s "$hdiutil_log" ]; then
+            cat "$hdiutil_log" >&2
+        fi
+        if [ "$status" -eq 0 ]; then
+            return 0
+        fi
+        if [ "$attempt" -ge 3 ] || ! grep -Fq 'Resource busy' "$hdiutil_log"; then
+            return "$status"
+        fi
+        if [ -e "$dmg_temp" ] || [ -L "$dmg_temp" ]; then
+            rm -f "$dmg_temp"
+        fi
+        next_attempt=$((attempt + 1))
+        printf 'hdiutil create reported Resource busy; retrying attempt %s of 3\n' "$next_attempt" >&2
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+# Keep the retry seam directly executable by deterministic local shell tests without
+# running the full macOS packaging pipeline.
+if [ "${JIRA_DMG_TEST_HELPER_ONLY:-0}" = 1 ]; then
+    [ "$#" -eq 3 ] || exit 2
+    create_compressed_dmg "$1" "$2" "$3"
+    exit $?
+fi
+
 skip_build=0
 if [ "$#" -gt 1 ]; then
     usage
@@ -43,9 +85,10 @@ case "$bundle_version" in
         ;;
 esac
 
-for tool in cargo sips iconutil hdiutil codesign plutil shasum; do
+for tool in cargo sips iconutil codesign plutil shasum; do
     command -v "$tool" >/dev/null 2>&1 || die "required tool is not available: $tool"
 done
+command -v "$hdiutil_bin" >/dev/null 2>&1 || die "required tool is not available: $hdiutil_bin"
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binary="$project_root/target/release/jira-gpui"
@@ -158,8 +201,8 @@ ln -s /Applications "$staging/Applications"
 dmg_name="Jira_Desk-${version}-${arch}.dmg"
 dmg_temp="$work_dir/$dmg_name"
 checksum_temp="$work_dir/$dmg_name.sha256"
-hdiutil create -srcfolder "$staging" -volname "Jira Desk" -format UDZO \
-    -imagekey zlib-level=9 "$dmg_temp" >/dev/null || die "could not create compressed DMG"
+create_compressed_dmg "$dmg_temp" "$staging" "$work_dir/hdiutil-create.stderr" ||
+    die "could not create compressed DMG"
 [ -f "$dmg_temp" ] && [ ! -L "$dmg_temp" ] || die "hdiutil did not create a DMG"
 (cd "$work_dir" && shasum -a 256 "$dmg_name" > "$checksum_temp") || \
     die "could not create DMG checksum"
