@@ -1,7 +1,8 @@
 use super::*;
 use gpui::rems;
 use gpui_component::{
-    Sizable as _, Size, description_list::DescriptionList, list::List, popover::Popover,
+    Sizable as _, Size, accordion::Accordion, description_list::DescriptionList, list::List,
+    popover::Popover,
 };
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
@@ -360,53 +361,96 @@ impl Dashboard {
             )
             .child(
                 v_flex()
+                    .id("issue-detail-details")
+                    .accessibility_id("issue-detail-details")
                     .debug_selector(|| "issue-detail-details".to_owned())
-                    .gap_3()
-                    .child(div().text_sm().font_semibold().child("Details"))
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label("Issue details")
                     .child(
-                        DescriptionList::horizontal()
+                        Accordion::new("issue-detail-details-accordion")
+                            .bordered(true)
                             .with_size(Size::Small)
-                            .columns(1)
-                            .bordered(false)
-                            .label_width(rems(if layout.is_rail() { 6.75 } else { 8.25 }))
-                            .item(
-                                "Assignee",
-                                detail_metadata_value(assignee, "issue-detail-assignee"),
-                                1,
-                            )
-                            .item(
-                                "Reporter",
-                                detail_metadata_value(reporter, "issue-detail-reporter"),
-                                1,
-                            )
-                            .item(
-                                "Status category",
-                                detail_metadata_value(
-                                    status_category,
-                                    "issue-detail-status-category",
-                                ),
-                                1,
-                            )
-                            .item(
-                                "Parent",
-                                detail_metadata_value(parent, "issue-detail-parent"),
-                                1,
-                            )
-                            .item(
-                                "Created",
-                                detail_metadata_value(created, "issue-detail-created"),
-                                1,
-                            )
-                            .item(
-                                "Updated",
-                                detail_metadata_value(updated, "issue-detail-updated"),
-                                1,
-                            )
-                            .item(
-                                "Due date",
-                                detail_metadata_value(due_date, "issue-detail-due-date"),
-                                1,
-                            ),
+                            .item(|item| {
+                                item.open(self.issue_details_open)
+                                    .title(
+                                        div()
+                                            .debug_selector(|| {
+                                                "issue-detail-details-trigger".to_owned()
+                                            })
+                                            .child("Details"),
+                                    )
+                                    .child(
+                                        DescriptionList::horizontal()
+                                            .with_size(Size::Small)
+                                            .columns(1)
+                                            .bordered(false)
+                                            .label_width(rems(if layout.is_rail() {
+                                                6.75
+                                            } else {
+                                                8.25
+                                            }))
+                                            .item(
+                                                "Assignee",
+                                                detail_metadata_value(
+                                                    assignee,
+                                                    "issue-detail-assignee",
+                                                ),
+                                                1,
+                                            )
+                                            .item(
+                                                "Reporter",
+                                                detail_metadata_value(
+                                                    reporter,
+                                                    "issue-detail-reporter",
+                                                ),
+                                                1,
+                                            )
+                                            .item(
+                                                "Status category",
+                                                detail_metadata_value(
+                                                    status_category,
+                                                    "issue-detail-status-category",
+                                                ),
+                                                1,
+                                            )
+                                            .item(
+                                                "Parent",
+                                                detail_metadata_value(
+                                                    parent,
+                                                    "issue-detail-parent",
+                                                ),
+                                                1,
+                                            )
+                                            .item(
+                                                "Created",
+                                                detail_metadata_value(
+                                                    created,
+                                                    "issue-detail-created",
+                                                ),
+                                                1,
+                                            )
+                                            .item(
+                                                "Updated",
+                                                detail_metadata_value(
+                                                    updated,
+                                                    "issue-detail-updated",
+                                                ),
+                                                1,
+                                            )
+                                            .item(
+                                                "Due date",
+                                                detail_metadata_value(
+                                                    due_date,
+                                                    "issue-detail-due-date",
+                                                ),
+                                                1,
+                                            ),
+                                    )
+                            })
+                            .on_toggle_click(cx.listener(|this, open_indices: &[usize], _, cx| {
+                                this.issue_details_open = open_indices.contains(&0);
+                                cx.notify();
+                            })),
                     ),
             )
             .when(!labels.is_empty(), |this| {

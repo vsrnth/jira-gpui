@@ -1779,6 +1779,7 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
         attachments: Vec::new(),
     });
     let window = cx.open_window(gpui::size(px(1370.), px(900.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -1857,6 +1858,38 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
     assert!(
         (f32::from(type_surface.size.height) - f32::from(priority_surface.size.height)).abs() <= 1.
     );
+
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
+    let trigger = visual
+        .debug_bounds("issue-detail-details-trigger")
+        .expect("details accordion trigger should be laid out");
+    visual.simulate_click(
+        gpui::point(
+            trigger.origin.x + trigger.size.width / 2.,
+            trigger.origin.y + trigger.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
+
+    visual.update(|_, cx| dashboard_entity.update(cx, |_, cx| cx.notify()));
+    visual.run_until_parked();
+    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
+
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let trigger = visual
+        .debug_bounds("issue-detail-details-trigger")
+        .expect("details accordion trigger should remain laid out when closed");
+    visual.simulate_click(
+        gpui::point(
+            trigger.origin.x + trigger.size.width / 2.,
+            trigger.origin.y + trigger.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
 }
 
 #[gpui::test]
