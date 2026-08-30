@@ -18,9 +18,9 @@ pub use issue_detail::{
     AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,
 };
 pub use rich_text::{
-    HORIZONTAL_RULE_LABEL, PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline,
-    RichListItem, RichMark, RichStatusColor, RichTable, RichTableCell, RichTableRow,
-    RichTextDocument,
+    HORIZONTAL_RULE_LABEL, PanelKind, RichAttachmentCard, RichBlock, RichDecisionItem,
+    RichDecisionState, RichImage, RichInline, RichListItem, RichMark, RichStatusColor, RichTable,
+    RichTableCell, RichTableRow, RichTaskItem, RichTaskState, RichTextDocument,
 };
 pub use update_event::{
     ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,

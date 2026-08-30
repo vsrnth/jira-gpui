@@ -4,8 +4,8 @@ use crate::adf::{
     attachment_id_from_inline_card_url, count_file_media_references_inner, parse_adf,
 };
 use jira_domain::{
-    HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichInline, RichMark, RichStatusColor, RichTable,
-    RichTextDocument,
+    HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichDecisionState, RichInline, RichMark,
+    RichStatusColor, RichTable, RichTaskState, RichTextDocument,
 };
 
 #[test]
@@ -1283,6 +1283,190 @@ fn maps_supported_rich_text_and_safe_placeholders() {
     assert!(plain.contains("@Asha"));
     assert!(!plain.contains("712020:secret"));
     assert!(!plain.contains("javascript:"));
+}
+
+#[test]
+fn maps_task_decision_expand_emoji_date_and_nested_mentions_without_raw_attrs() {
+    let document = serde_json::json!({
+        "type": "doc", "version": 1, "content": [
+            {"type":"taskList", "attrs":{"localId":"task-list"}, "content":[
+                {"type":"taskItem", "attrs":{"localId":"task-1", "state":"TODO"}, "content":[
+                    {"type":"text", "text":"Write docs "},
+                    {"type":"mention", "attrs":{"id":"712020:secret", "text":"@Asha"}}
+                ]},
+                {"type":"taskItem", "attrs":{"localId":"task-2", "state":"DONE"}, "content":[
+                    {"type":"text", "text":"Ship it"}
+                ]}
+            ]},
+            {"type":"decisionList", "attrs":{"localId":"decision-list"}, "content":[
+                {"type":"decisionItem", "attrs":{"localId":"decision-1", "state":"DECIDED"}, "content":[
+                    {"type":"text", "text":"Use the safe parser"}
+                ]},
+                {"type":"decisionItem", "attrs":{"localId":"decision-2", "state":"UNDECIDED"}, "content":[
+                    {"type":"text", "text":"Keep investigating"}
+                ]}
+            ]},
+            {"type":"expand", "attrs":{"title":"Details", "localId":"expand-1"}, "content":[
+                {"type":"nestedExpand", "attrs":{"title":"Nested", "localId":"expand-2"}, "content":[
+                    {"type":"paragraph", "content":[
+                        {"type":"emoji", "attrs":{"shortName":":wave:", "id":"private", "localId":"private"}},
+                        {"type":"text", "text":" hello"},
+                        {"type":"date", "attrs":{"timestamp":"1712345678901", "localId":"private-date"}}
+                    ]}
+                ]}
+            ]}
+        ]
+    });
+    let parsed = parse_adf(&document).expect("valid ADF");
+    assert!(!parsed.truncated);
+    assert!(matches!(
+        &parsed.blocks[0],
+        RichBlock::TaskList(items)
+            if matches!(items[0].state, RichTaskState::Todo)
+                && matches!(items[1].state, RichTaskState::Done)
+    ));
+    assert!(matches!(
+        &parsed.blocks[1],
+        RichBlock::DecisionList(items)
+            if matches!(items[0].state, RichDecisionState::Decided)
+                && matches!(items[1].state, RichDecisionState::Undecided)
+    ));
+    assert!(matches!(parsed.blocks[2], RichBlock::Expand { .. }));
+    assert!(parsed.plain_text().contains(":wave:"));
+    assert!(parsed.plain_text().contains("2024-04-05"));
+    assert!(parsed.plain_text().contains("@Asha"));
+    let serialized = serde_json::to_string(&parsed).unwrap();
+    assert!(!serialized.contains("localId"));
+    let round_trip: RichTextDocument = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(round_trip, parsed);
+}
+
+#[test]
+fn maps_safe_emoji_text_and_confluence_cards_but_rejects_unsafe_values() {
+    let document = serde_json::json!({
+        "type":"doc", "version":1, "content":[
+            {"type":"paragraph", "content":[
+                {"type":"emoji", "attrs":{"shortName":":wave:", "text":"👋"}},
+                {"type":"inlineCard", "attrs":{"url":"https://acme.atlassian.net/wiki/spaces/ENG/pages/123?secret=1#frag"}},
+                {"type":"inlineCard", "attrs":{"url":"https://acme.example/wiki/spaces/ENG/pages/123"}},
+                {"type":"emoji", "attrs":{"shortName":":ok:", "text":"bad\ntext"}}
+            ]},
+            {"type":"blockCard", "attrs":{"url":"https://acme.atlassian.net/wiki/spaces/ENG/pages/123"}}
+        ]
+    });
+    let parsed = parse_adf(&document).expect("valid ADF");
+    assert_eq!(
+        parsed.plain_text(),
+        "👋Confluence page[unsupported Jira content]:ok:\nConfluence page"
+    );
+    assert!(!parsed.plain_text().contains("secret"));
+    assert!(!parsed.plain_text().contains("acme.atlassian.net"));
+}
+
+#[test]
+fn malformed_common_nodes_remain_placeholders_and_truncated() {
+    for (index, node) in [
+        serde_json::json!({"type":"taskList", "attrs":{"localId":"x"}, "content":[]}),
+        serde_json::json!({"type":"decisionList", "attrs":{"localId":"x"}, "content":[{"type":"decisionItem", "attrs":null}]}),
+        serde_json::json!({"type":"expand", "attrs":{"title":"bad\ntext"}, "content":[{"type":"paragraph", "content":[]}]}),
+        serde_json::json!({"type":"paragraph", "content":[{"type":"emoji", "attrs":{"shortName":"not-an-emoji"}}]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let parsed = parse_adf(&serde_json::json!({
+            "type":"doc", "version":1, "content":[node]
+        }))
+        .expect("valid root");
+        assert!(parsed.truncated, "node {index}: {}", parsed.plain_text());
+        assert!(
+            parsed.plain_text().contains(UNSUPPORTED_CONTENT),
+            "node {index}: {}",
+            parsed.plain_text()
+        );
+    }
+}
+
+#[test]
+fn decision_items_preserve_depth_bounds_in_nested_blocks() {
+    let mut decision = serde_json::json!({
+        "type":"decisionList", "attrs":{"localId":"decision-list"}, "content":[
+            {"type":"decisionItem", "attrs":{"localId":"decision", "state":"DECIDED"}, "content":[
+                {"type":"text", "text":"deep decision"}
+            ]}
+        ]
+    });
+    for _ in 0..63 {
+        decision = serde_json::json!({"type":"blockquote", "content":[decision]});
+    }
+    let parsed = parse_adf(&serde_json::json!({
+        "type":"doc", "version":1, "content":[decision]
+    }))
+    .expect("valid root");
+    assert!(parsed.truncated);
+    assert!(parsed.plain_text().contains("content truncated"));
+}
+
+#[test]
+fn expand_schema_bounds_and_marks_are_enforced() {
+    let malformed = [
+        serde_json::json!({
+            "type":"expand", "marks":[{"type":"breakout", "attrs":{"mode":"wide"}}],
+            "content":[{"type":"paragraph", "content":[{"type":"text", "text":"body"}]}]
+        }),
+        serde_json::json!({
+            "type":"nestedExpand", "content":[{"type":"paragraph", "content":[{"type":"text", "text":"body"}]}]
+        }),
+        serde_json::json!({
+            "type":"expand", "attrs":{"title":"x".repeat(513)},
+            "content":[{"type":"paragraph", "content":[{"type":"text", "text":"body"}]}]
+        }),
+        serde_json::json!({
+            "type":"expand", "attrs":{"title":"x", "localId":"x".repeat(256)},
+            "content":[{"type":"paragraph", "content":[{"type":"text", "text":"body"}]}]
+        }),
+        serde_json::json!({
+            "type":"expand", "attrs":{"title":"bad\u{0007}title"},
+            "content":[{"type":"paragraph", "content":[{"type":"text", "text":"body"}]}]
+        }),
+    ];
+    for node in malformed {
+        let parsed = parse_adf(&serde_json::json!({
+            "type":"doc", "version":1, "content":[node]
+        }))
+        .expect("valid root");
+        assert!(parsed.truncated);
+        assert!(parsed.plain_text().contains(UNSUPPORTED_CONTENT));
+    }
+}
+
+#[test]
+fn dates_require_decimal_milliseconds_and_project_to_iso_days() {
+    let valid = parse_adf(&serde_json::json!({
+        "type":"doc", "version":1, "content":[{"type":"paragraph", "content":[
+            {"type":"date", "attrs":{"timestamp":"1712345678901", "localId":"private"}}
+        ]}]
+    }))
+    .expect("valid date document");
+    assert_eq!(valid.plain_text(), "2024-04-05");
+    let serialized = serde_json::to_string(&valid).unwrap();
+    assert!(!serialized.contains("1712345678901"));
+    let round_trip: RichTextDocument = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(round_trip, valid);
+
+    for timestamp in ["", "-1", "not-a-number", "18446744073709551615"] {
+        let parsed = parse_adf(&serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph", "content":[
+                {"type":"date", "attrs":{"timestamp":timestamp}}
+            ]}]
+        }))
+        .expect("valid root");
+        assert!(parsed.truncated, "{timestamp}");
+        assert!(
+            parsed.plain_text().contains(UNSUPPORTED_CONTENT),
+            "{timestamp}"
+        );
+    }
 }
 
 #[test]

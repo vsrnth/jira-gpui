@@ -158,6 +158,18 @@ pub(super) fn inline_text_flow(
                     false,
                 );
             }
+            RichInline::Emoji { text } => append_inline_text(
+                &mut flow,
+                &budget.text(text),
+                HighlightStyle::default(),
+                false,
+            ),
+            RichInline::Date { date } => append_inline_text(
+                &mut flow,
+                &budget.text(date),
+                HighlightStyle::default(),
+                false,
+            ),
             RichInline::Placeholder { label } => append_inline_text(
                 &mut flow,
                 &budget.text(presentation_placeholder_label(label)),
@@ -302,6 +314,8 @@ fn render_inline(
                 budget.text(label)
             })
             .into_any_element(),
+        RichInline::Emoji { text } => div().min_w_0().child(budget.text(text)).into_any_element(),
+        RichInline::Date { date } => div().min_w_0().child(budget.text(date)).into_any_element(),
         RichInline::Status { text, color } => render_status(text, *color, context, budget),
         RichInline::AttachmentCard(card) => render_attachment_card(card, context, budget),
         RichInline::Placeholder { label } => div()
@@ -517,5 +531,36 @@ mod tests {
         ] {
             assert_same_color(status_tone(color, palette), expected);
         }
+    }
+
+    #[test]
+    fn emoji_and_date_join_the_surrounding_text_flow() {
+        let content = [
+            RichInline::Text {
+                text: "Release ".to_owned(),
+                marks: Vec::new(),
+            },
+            RichInline::Emoji {
+                text: "🚀".to_owned(),
+            },
+            RichInline::Text {
+                text: " on ".to_owned(),
+                marks: Vec::new(),
+            },
+            RichInline::Date {
+                date: "2026-08-30".to_owned(),
+            },
+            RichInline::Text {
+                text: "".to_owned(),
+                marks: Vec::new(),
+            },
+        ];
+        let mut budget = RenderBudget::default();
+        let flow = inline_text_flow(&content, RichTextPalette::default(), 0, &mut budget)
+            .expect("emoji/date content should stay in the text flow");
+
+        assert_eq!(flow.text, "Release 🚀 on 2026-08-30");
+        assert!(flow.highlights.is_empty());
+        assert!(!budget.omitted);
     }
 }

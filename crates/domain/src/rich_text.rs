@@ -102,6 +102,8 @@ pub enum RichBlock {
         content: Vec<RichInline>,
     },
     BulletList(Vec<RichListItem>),
+    TaskList(Vec<RichTaskItem>),
+    DecisionList(Vec<RichDecisionItem>),
     OrderedList {
         order: u32,
         items: Vec<RichListItem>,
@@ -113,6 +115,14 @@ pub enum RichBlock {
     BlockQuote(Vec<RichBlock>),
     Panel {
         kind: PanelKind,
+        content: Vec<RichBlock>,
+    },
+    Expand {
+        title: Option<String>,
+        content: Vec<RichBlock>,
+    },
+    NestedExpand {
+        title: Option<String>,
         content: Vec<RichBlock>,
     },
     Table(RichTable),
@@ -180,6 +190,35 @@ pub struct RichListItem {
     pub blocks: Vec<RichBlock>,
 }
 
+/// A task item retains only its bounded state and visible block content. ADF local IDs
+/// and other attributes are deliberately not part of the domain model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichTaskItem {
+    pub state: RichTaskState,
+    pub content: Vec<RichBlock>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RichTaskState {
+    Todo,
+    Done,
+}
+
+/// A decision item retains visible content and an allowlisted presentation state.
+/// Unknown Jira states are represented as `Unknown` rather than copied through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichDecisionItem {
+    pub state: RichDecisionState,
+    pub content: Vec<RichInline>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RichDecisionState {
+    Decided,
+    Undecided,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RichInline {
     Text {
@@ -195,6 +234,12 @@ pub enum RichInline {
     Status {
         text: String,
         color: RichStatusColor,
+    },
+    Emoji {
+        text: String,
+    },
+    Date {
+        date: String,
     },
     AttachmentCard(RichAttachmentCard),
     Placeholder {
@@ -327,6 +372,34 @@ fn append_block_text(block: &RichBlock, output: &mut PlainTextBuilder, depth: us
                 append_list_item_text(item, output, depth + 1);
             }
         }
+        RichBlock::TaskList(items) => {
+            for item in items {
+                if output.truncated {
+                    break;
+                }
+                output.push_str(match item.state {
+                    RichTaskState::Todo => "☐ ",
+                    RichTaskState::Done => "☑ ",
+                });
+                for child in &item.content {
+                    append_block_text(child, output, depth + 1);
+                }
+            }
+        }
+        RichBlock::DecisionList(items) => {
+            for item in items {
+                if output.truncated {
+                    break;
+                }
+                output.push_str(match item.state {
+                    RichDecisionState::Decided => "✓ ",
+                    RichDecisionState::Undecided => "? ",
+                    RichDecisionState::Unknown => "• ",
+                });
+                append_inline_text(&item.content, output, depth + 1);
+                output.push_str("\n");
+            }
+        }
         RichBlock::OrderedList { order, items } => {
             for (offset, item) in items.iter().enumerate() {
                 if output.truncated {
@@ -342,6 +415,18 @@ fn append_block_text(block: &RichBlock, output: &mut PlainTextBuilder, depth: us
             output.push_str("\n");
         }
         RichBlock::BlockQuote(content) | RichBlock::Panel { content, .. } => {
+            for child in content {
+                if output.truncated {
+                    break;
+                }
+                append_block_text(child, output, depth + 1);
+            }
+        }
+        RichBlock::Expand { title, content } | RichBlock::NestedExpand { title, content } => {
+            if let Some(title) = title {
+                output.push_str(title);
+                output.push_str("\n");
+            }
             for child in content {
                 if output.truncated {
                     break;
@@ -391,6 +476,8 @@ fn append_inline_text(content: &[RichInline], output: &mut PlainTextBuilder, dep
             RichInline::HardBreak => output.push_str("\n"),
             RichInline::Mention { label, .. }
             | RichInline::Status { text: label, .. }
+            | RichInline::Emoji { text: label }
+            | RichInline::Date { date: label }
             | RichInline::Placeholder { label } => output.push_str(label),
             RichInline::AttachmentCard(card) => {
                 output.push_str("[attachment: ");
@@ -449,12 +536,23 @@ fn block_mentions_account(block: &RichBlock, account_id: &AccountId) -> bool {
                 .iter()
                 .any(|block| block_mentions_account(block, account_id))
         }),
+        RichBlock::TaskList(items) => items.iter().any(|item| {
+            item.content
+                .iter()
+                .any(|block| block_mentions_account(block, account_id))
+        }),
+        RichBlock::DecisionList(items) => items
+            .iter()
+            .any(|item| inline_mentions_account(&item.content, account_id)),
         RichBlock::OrderedList { items, .. } => items.iter().any(|item| {
             item.blocks
                 .iter()
                 .any(|block| block_mentions_account(block, account_id))
         }),
         RichBlock::BlockQuote(content) | RichBlock::Panel { content, .. } => content
+            .iter()
+            .any(|block| block_mentions_account(block, account_id)),
+        RichBlock::Expand { content, .. } | RichBlock::NestedExpand { content, .. } => content
             .iter()
             .any(|block| block_mentions_account(block, account_id)),
         RichBlock::Table(table) => table.rows.iter().any(|row| {

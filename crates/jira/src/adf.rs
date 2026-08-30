@@ -1,6 +1,7 @@
 use jira_domain::{
-    AccountId, AttachmentMetadata, IssueKey, PanelKind, RichAttachmentCard, RichBlock, RichImage,
-    RichInline, RichListItem, RichMark, RichStatusColor, RichTable, RichTableCell, RichTableRow,
+    AccountId, AttachmentMetadata, IssueKey, PanelKind, RichAttachmentCard, RichBlock,
+    RichDecisionItem, RichDecisionState, RichImage, RichInline, RichListItem, RichMark,
+    RichStatusColor, RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState,
     RichTextDocument,
 };
 use serde_json::Value;
@@ -18,6 +19,10 @@ const MAX_MEDIA_DIMENSION: u32 = 10_000;
 const MAX_TABLE_ROWS: usize = 64;
 const MAX_TABLE_CELLS: usize = 32;
 const MAX_STATUS_TEXT_BYTES: usize = 255;
+const MAX_EMOJI_TEXT_BYTES: usize = 255;
+const MAX_DATE_TIMESTAMP_BYTES: usize = 64;
+const MAX_EXPAND_TITLE_BYTES: usize = 512;
+const MAX_LOCAL_ID_BYTES: usize = 255;
 pub(super) const UNSUPPORTED_CONTENT: &str = "[unsupported Jira content]";
 pub(super) const UNAVAILABLE_IMAGE: &str = "[Jira image unavailable]";
 
@@ -220,6 +225,8 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
             },
             None => malformed_block(state),
         },
+        "taskList" => parse_task_list_block(object, depth, state),
+        "decisionList" => parse_decision_list_block(object, depth, state),
         "listItem" => match content {
             Some(content) => RichBlock::BlockQuote(parse_blocks(content, depth + 1, state)),
             None => malformed_block(state),
@@ -256,6 +263,8 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
                 _ => malformed_block(state),
             }
         }
+        "expand" => parse_expand_block(object, depth, state, false),
+        "nestedExpand" => parse_expand_block(object, depth, state, true),
         "doc" => RichBlock::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         },
@@ -287,7 +296,7 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
         "rule" => malformed_block(state),
         "table" => parse_table_block(object, depth, state),
         "status" => RichBlock::Paragraph(vec![parse_status_inline(object, state)]),
-        "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date" | "expand" | "nestedExpand" => {
+        "tableCell" | "tableHeader" | "tableRow" | "blockTaskItem" | "emoji" | "date" => {
             RichBlock::Placeholder {
                 label: UNSUPPORTED_CONTENT.to_owned(),
             }
@@ -550,6 +559,15 @@ fn collect_resolved_image_ids(blocks: &[RichBlock], resolved_ids: &mut HashSet<S
                     collect_resolved_image_ids(&item.blocks, resolved_ids);
                 }
             }
+            RichBlock::TaskList(items) => {
+                for item in items {
+                    collect_resolved_image_ids(&item.content, resolved_ids);
+                }
+            }
+            RichBlock::DecisionList(_) => {}
+            RichBlock::Expand { content, .. } | RichBlock::NestedExpand { content, .. } => {
+                collect_resolved_image_ids(content, resolved_ids);
+            }
             RichBlock::Table(table) => {
                 for row in &table.rows {
                     for cell in &row.cells {
@@ -724,6 +742,290 @@ pub(super) fn count_file_media_references_inner(
     }
 }
 
+fn parse_task_list_block(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> RichBlock {
+    if !valid_container_local_id(object) {
+        return malformed_block(state);
+    }
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        return malformed_block(state);
+    };
+    if content.is_empty() {
+        return malformed_block(state);
+    }
+    let mut items = Vec::new();
+    for value in content {
+        if depth >= MAX_ADF_DEPTH || !state.visit() {
+            state.truncated = true;
+            break;
+        }
+        let Some(child) = value.as_object() else {
+            state.truncated = true;
+            items.push(task_placeholder_item());
+            continue;
+        };
+        let Some(kind) = child.get("type").and_then(Value::as_str) else {
+            state.truncated = true;
+            items.push(task_placeholder_item());
+            continue;
+        };
+        match kind {
+            "taskItem" => items.push(parse_task_item(child, depth + 1, state)),
+            "blockTaskItem" => items.push(parse_block_task_item(child, depth + 2, state)),
+            "taskList" => {
+                let nested = parse_task_list_block(child, depth + 1, state);
+                if let Some(previous) = items.last_mut() {
+                    previous.content.push(nested);
+                } else {
+                    items.push(RichTaskItem {
+                        state: RichTaskState::Todo,
+                        content: vec![nested],
+                    });
+                }
+            }
+            _ => {
+                state.truncated = true;
+                items.push(task_placeholder_item());
+            }
+        }
+    }
+    RichBlock::TaskList(items)
+}
+
+fn parse_task_item(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> RichTaskItem {
+    let Some(task_state) = task_state(object) else {
+        state.truncated = true;
+        return task_placeholder_item();
+    };
+    let Some(content) = object.get("content") else {
+        return RichTaskItem {
+            state: task_state,
+            content: Vec::new(),
+        };
+    };
+    let Some(content) = content.as_array() else {
+        state.truncated = true;
+        return task_placeholder_item_with_state(task_state);
+    };
+    RichTaskItem {
+        state: task_state,
+        content: vec![RichBlock::Paragraph(parse_inlines(
+            content,
+            depth + 1,
+            state,
+        ))],
+    }
+}
+
+fn parse_block_task_item(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> RichTaskItem {
+    let Some(task_state) = task_state(object) else {
+        state.truncated = true;
+        return task_placeholder_item();
+    };
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        state.truncated = true;
+        return task_placeholder_item_with_state(task_state);
+    };
+    if content.is_empty() {
+        state.truncated = true;
+        return task_placeholder_item_with_state(task_state);
+    }
+    RichTaskItem {
+        state: task_state,
+        content: parse_blocks(content, depth, state),
+    }
+}
+
+fn task_state(object: &serde_json::Map<String, Value>) -> Option<RichTaskState> {
+    let attrs = object.get("attrs")?.as_object()?;
+    valid_local_id(attrs.get("localId")?)?;
+    match attrs.get("state")?.as_str()? {
+        "TODO" => Some(RichTaskState::Todo),
+        "DONE" => Some(RichTaskState::Done),
+        _ => None,
+    }
+}
+
+fn task_placeholder_item() -> RichTaskItem {
+    task_placeholder_item_with_state(RichTaskState::Todo)
+}
+
+fn task_placeholder_item_with_state(state: RichTaskState) -> RichTaskItem {
+    RichTaskItem {
+        state,
+        content: vec![RichBlock::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        }],
+    }
+}
+
+fn parse_decision_list_block(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> RichBlock {
+    if !valid_container_local_id(object) {
+        return malformed_block(state);
+    }
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        return malformed_block(state);
+    };
+    if content.is_empty() {
+        return malformed_block(state);
+    }
+    let mut items = Vec::new();
+    for value in content {
+        if depth + 1 > MAX_ADF_DEPTH || !state.visit() {
+            state.truncated = true;
+            break;
+        }
+        let Some(object) = value.as_object() else {
+            state.truncated = true;
+            items.push(RichDecisionItem {
+                state: RichDecisionState::Unknown,
+                content: vec![RichInline::Placeholder {
+                    label: UNSUPPORTED_CONTENT.to_owned(),
+                }],
+            });
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("decisionItem") {
+            state.truncated = true;
+            items.push(RichDecisionItem {
+                state: RichDecisionState::Unknown,
+                content: vec![RichInline::Placeholder {
+                    label: UNSUPPORTED_CONTENT.to_owned(),
+                }],
+            });
+            continue;
+        }
+        let Some(decision_state) = decision_state(object) else {
+            state.truncated = true;
+            items.push(RichDecisionItem {
+                state: RichDecisionState::Unknown,
+                content: vec![RichInline::Placeholder {
+                    label: UNSUPPORTED_CONTENT.to_owned(),
+                }],
+            });
+            continue;
+        };
+        let item_content = match object.get("content") {
+            None => Vec::new(),
+            Some(value) => match value.as_array() {
+                Some(values) => parse_inlines(values, depth + 2, state),
+                None => {
+                    state.truncated = true;
+                    vec![RichInline::Placeholder {
+                        label: UNSUPPORTED_CONTENT.to_owned(),
+                    }]
+                }
+            },
+        };
+        items.push(RichDecisionItem {
+            state: decision_state,
+            content: item_content,
+        });
+    }
+    RichBlock::DecisionList(items)
+}
+
+fn decision_state(object: &serde_json::Map<String, Value>) -> Option<RichDecisionState> {
+    let attrs = object.get("attrs")?.as_object()?;
+    valid_local_id(attrs.get("localId")?)?;
+    Some(match attrs.get("state")?.as_str()? {
+        "DECIDED" => RichDecisionState::Decided,
+        "UNDECIDED" => RichDecisionState::Undecided,
+        _ => RichDecisionState::Unknown,
+    })
+}
+
+fn valid_container_local_id(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("attrs")
+        .and_then(Value::as_object)
+        .and_then(|attrs| attrs.get("localId"))
+        .is_some_and(|value| valid_local_id(value).is_some())
+}
+
+fn valid_local_id(value: &Value) -> Option<()> {
+    let value = value.as_str()?.trim();
+    (!value.is_empty()
+        && value.len() <= MAX_LOCAL_ID_BYTES
+        && value.chars().all(|character| !character.is_control()))
+    .then_some(())
+}
+
+fn parse_expand_block(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+    nested: bool,
+) -> RichBlock {
+    if object.get("marks").is_some_and(|marks| !marks.is_array())
+        || object
+            .get("marks")
+            .and_then(Value::as_array)
+            .is_some_and(|marks| !marks.is_empty())
+        || object.get("attrs").is_some_and(|attrs| !attrs.is_object())
+    {
+        return malformed_block(state);
+    }
+    if nested && object.get("attrs").is_none() {
+        return malformed_block(state);
+    }
+    if object
+        .get("attrs")
+        .and_then(Value::as_object)
+        .and_then(|attrs| attrs.get("localId"))
+        .is_some_and(|local_id| valid_local_id(local_id).is_none())
+    {
+        return malformed_block(state);
+    }
+    let title = match object
+        .get("attrs")
+        .and_then(Value::as_object)
+        .and_then(|attrs| attrs.get("title"))
+    {
+        None => None,
+        Some(value) => {
+            let Some(value) = value.as_str().and_then(bounded_expand_title) else {
+                return malformed_block(state);
+            };
+            Some(state.text(value))
+        }
+    };
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        return malformed_block(state);
+    };
+    if content.is_empty() {
+        return malformed_block(state);
+    }
+    let content = parse_blocks(content, depth + 1, state);
+    if nested {
+        RichBlock::NestedExpand { title, content }
+    } else {
+        RichBlock::Expand { title, content }
+    }
+}
+
+fn bounded_expand_title(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= MAX_EXPAND_TITLE_BYTES
+        && value.chars().all(|character| !character.is_control()))
+    .then_some(value)
+}
+
 fn parse_list_items(
     values: &[Value],
     depth: usize,
@@ -847,15 +1149,107 @@ fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> 
                 .unwrap_or_else(|| "Mentioned user".to_owned());
             Some(RichInline::Mention { account_id, label })
         }
-        "emoji" | "date" => Some(RichInline::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
-        }),
+        "emoji" => Some(parse_emoji_inline(object, state)),
+        "date" => Some(parse_date_inline(object, state)),
         "status" => Some(parse_status_inline(object, state)),
         "mediaInline" => Some(parse_media_inline_attachment_card(object, state)),
         "inlineCard" => Some(parse_inline_attachment_card(object, state)),
         _ => Some(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         }),
+    }
+}
+
+fn parse_emoji_inline(
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> RichInline {
+    let Some(attrs) = object.get("attrs").and_then(Value::as_object) else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let text = attrs
+        .get("text")
+        .and_then(Value::as_str)
+        .and_then(|value| bounded_inline_visible_text(value, MAX_EMOJI_TEXT_BYTES))
+        .or_else(|| {
+            attrs
+                .get("shortName")
+                .and_then(Value::as_str)
+                .filter(|value| canonical_emoji_short_name(value))
+        });
+    let Some(text) = text else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    RichInline::Emoji {
+        text: state.text(text),
+    }
+}
+
+fn canonical_emoji_short_name(value: &str) -> bool {
+    value.len() <= MAX_EMOJI_TEXT_BYTES
+        && value.len() >= 3
+        && value.starts_with(':')
+        && value.ends_with(':')
+        && value[1..value.len() - 1]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'-'))
+}
+
+fn bounded_inline_visible_text(value: &str, maximum: usize) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= maximum
+        && value.chars().all(|character| !character.is_control()))
+    .then_some(value)
+}
+
+fn parse_date_inline(
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> RichInline {
+    let Some(timestamp) = object
+        .get("attrs")
+        .and_then(Value::as_object)
+        .and_then(|attrs| attrs.get("timestamp"))
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() <= MAX_DATE_TIMESTAMP_BYTES
+                && !value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Ok(millis) = timestamp.parse::<u64>() else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let seconds = millis / 1_000;
+    let Some(date) = i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| time::OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|date| {
+            date.format(time::macros::format_description!("[year]-[month]-[day]"))
+                .ok()
+        })
+    else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    RichInline::Date {
+        date: state.text(&date),
     }
 }
 
@@ -944,6 +1338,12 @@ fn parse_inline_attachment_card(
             mime_type: normalized_attachment_mime(attachment.mime_type.as_deref()),
             size_bytes: Some(attachment.size_bytes),
         });
+    }
+    if confluence_card_url(url) {
+        return RichInline::Text {
+            text: "Confluence page".to_owned(),
+            marks: Vec::new(),
+        };
     }
     jira_browse_issue_key(url)
         .map(|text| RichInline::Text {
@@ -1139,6 +1539,36 @@ fn jira_browse_issue_key(value: &str) -> Option<String> {
     IssueKey::new(candidate.to_owned())
         .ok()
         .map(|issue_key| issue_key.to_string())
+}
+
+fn confluence_card_url(value: &str) -> bool {
+    if value.len() > MAX_LINK_HREF_BYTES {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(value) else {
+        return false;
+    };
+    if parsed.scheme() != "https"
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    let Some(subdomain) = host.strip_suffix(".atlassian.net") else {
+        return false;
+    };
+    if subdomain.is_empty() || subdomain.split('.').any(str::is_empty) {
+        return false;
+    }
+    let Some(mut segments) = parsed.path_segments() else {
+        return false;
+    };
+    segments.next() == Some("wiki") && segments.next().is_some()
 }
 
 fn normalized_attachment_mime(mime_type: Option<&str>) -> Option<String> {

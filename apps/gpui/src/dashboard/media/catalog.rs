@@ -53,6 +53,12 @@ fn collect_rich_images_from_block(
         RichBlock::BlockQuote(children)
         | RichBlock::Panel {
             content: children, ..
+        }
+        | RichBlock::Expand {
+            content: children, ..
+        }
+        | RichBlock::NestedExpand {
+            content: children, ..
         } => {
             for child in children {
                 collect_rich_images_from_block(child, seen, images);
@@ -64,6 +70,16 @@ fn collect_rich_images_from_block(
         RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
             for item in items {
                 for child in &item.blocks {
+                    collect_rich_images_from_block(child, seen, images);
+                    if images.len() == MAX_RICH_IMAGES {
+                        return;
+                    }
+                }
+            }
+        }
+        RichBlock::TaskList(items) => {
+            for item in items {
+                for child in &item.content {
                     collect_rich_images_from_block(child, seen, images);
                     if images.len() == MAX_RICH_IMAGES {
                         return;
@@ -85,6 +101,7 @@ fn collect_rich_images_from_block(
         }
         RichBlock::Paragraph(_)
         | RichBlock::Heading { .. }
+        | RichBlock::DecisionList(_)
         | RichBlock::CodeBlock { .. }
         | RichBlock::Placeholder { .. } => {}
     }
@@ -176,6 +193,12 @@ fn collect_rich_images_from_block_with_context(
         RichBlock::BlockQuote(children)
         | RichBlock::Panel {
             content: children, ..
+        }
+        | RichBlock::Expand {
+            content: children, ..
+        }
+        | RichBlock::NestedExpand {
+            content: children, ..
         } => {
             for child in children {
                 collect_rich_images_from_block_with_context(
@@ -193,6 +216,22 @@ fn collect_rich_images_from_block_with_context(
         RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
             for item in items {
                 for child in &item.blocks {
+                    collect_rich_images_from_block_with_context(
+                        child,
+                        seen,
+                        images,
+                        surface_ordinal,
+                        source,
+                    );
+                    if images.len() == MAX_RICH_IMAGES {
+                        return;
+                    }
+                }
+            }
+        }
+        RichBlock::TaskList(items) => {
+            for item in items {
+                for child in &item.content {
                     collect_rich_images_from_block_with_context(
                         child,
                         seen,
@@ -226,6 +265,7 @@ fn collect_rich_images_from_block_with_context(
         }
         RichBlock::Paragraph(_)
         | RichBlock::Heading { .. }
+        | RichBlock::DecisionList(_)
         | RichBlock::CodeBlock { .. }
         | RichBlock::Placeholder { .. } => {}
     }
@@ -294,6 +334,35 @@ mod tests {
                 .filter(|image| image.attachment_id == "nested")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn task_and_expand_images_are_collected_in_document_order() {
+        let document = RichTextDocument::new(
+            vec![
+                RichBlock::TaskList(vec![jira_domain::RichTaskItem {
+                    state: jira_domain::RichTaskState::Todo,
+                    content: vec![RichBlock::Expand {
+                        title: Some("Task details".to_owned()),
+                        content: vec![RichBlock::Image(test_image("task-image"))],
+                    }],
+                }]),
+                RichBlock::NestedExpand {
+                    title: Some("More".to_owned()),
+                    content: vec![RichBlock::Image(test_image("nested-image"))],
+                },
+            ],
+            false,
+        );
+
+        let images = collect_rich_images(&document);
+        assert_eq!(
+            images
+                .iter()
+                .map(|image| image.attachment_id.as_str())
+                .collect::<Vec<_>>(),
+            ["task-image", "nested-image"]
         );
     }
 
