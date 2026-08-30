@@ -183,6 +183,60 @@ final class JiraDeskUITests: XCTestCase {
                 "status \(expected) should expose its exact AX value"
             )
         }
+
+        let taskItems = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-task-item-")
+        )
+        XCTAssertEqual(taskItems.count, 2, "fixture table cell should expose TODO and DONE task items")
+        let todoTask = try require(
+            app.descendants(matching: .any)["rich-text-task-item-9-0"],
+            "rich-text-task-item-9-0"
+        )
+        let doneTask = try require(
+            app.descendants(matching: .any)["rich-text-task-item-9-1"],
+            "rich-text-task-item-9-1"
+        )
+        XCTAssertEqual(todoTask.value as? String, "Todo task", "TODO state should remain semantic")
+        XCTAssertEqual(doneTask.value as? String, "Done task", "DONE state should remain semantic")
+
+        let decisionItems = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-decision-item-")
+        )
+        XCTAssertEqual(decisionItems.count, 2, "fixture should expose decided and undecided decisions")
+        let decided = try require(
+            app.descendants(matching: .any)["rich-text-decision-item-13-0"],
+            "rich-text-decision-item-13-0"
+        )
+        let undecided = try require(
+            app.descendants(matching: .any)["rich-text-decision-item-13-1"],
+            "rich-text-decision-item-13-1"
+        )
+        XCTAssertEqual(decided.value as? String, "Decided decision")
+        XCTAssertEqual(undecided.value as? String, "Undecided decision")
+
+        let expand = try require(
+            app.descendants(matching: .any)["rich-text-expand-16"],
+            "rich-text-expand-16"
+        )
+        let nestedExpand = try require(
+            app.descendants(matching: .any)["rich-text-nested-expand-17"],
+            "rich-text-nested-expand-17"
+        )
+        XCTAssertEqual(expand.value as? String, "Expanded")
+        XCTAssertEqual(nestedExpand.value as? String, "Expanded")
+        XCTAssertEqual(expand.label.isEmpty ? expand.title : expand.label, "Details")
+        XCTAssertEqual(nestedExpand.label.isEmpty ? nestedExpand.title : nestedExpand.label, "More details")
+
+        let emojiDate = try require(
+            app.descendants(matching: .any)["rich-text-paragraph-19"],
+            "rich-text-paragraph-19"
+        )
+        XCTAssertTrue(
+            emojiDate.identifier.hasPrefix("rich-text-paragraph-"),
+            "emoji/date line should use a rich-text paragraph accessibility ID"
+        )
+        XCTAssertEqual(emojiDate.value as? String, "✅ 2026-08-30")
+
         for (identifier, expected) in [
             ("rich-text-paragraph-0", "Epic: ENG-43"),
             ("rich-text-paragraph-1", "Per the ENG-43, after"),

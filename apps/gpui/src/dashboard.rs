@@ -937,8 +937,8 @@ impl Dashboard {
     #[cfg(feature = "ui-automation")]
     pub(crate) fn from_ui_automation_rich_content() -> Self {
         use jira_domain::{
-            RichBlock, RichImage, RichInline, RichStatusColor, RichTable, RichTableCell,
-            RichTableRow, RichTextDocument,
+            RichBlock, RichDecisionItem, RichDecisionState, RichImage, RichInline, RichStatusColor,
+            RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState, RichTextDocument,
         };
 
         let mut dashboard = Self::from_sample_data();
@@ -998,6 +998,16 @@ impl Dashboard {
                             content: vec![
                                 status("Fail", RichStatusColor::Red),
                                 text("Cache is preloaded"),
+                                RichBlock::TaskList(vec![
+                                    RichTaskItem {
+                                        state: RichTaskState::Todo,
+                                        content: vec![text("Verify cache freshness")],
+                                    },
+                                    RichTaskItem {
+                                        state: RichTaskState::Done,
+                                        content: vec![text("Render cached image")],
+                                    },
+                                ]),
                             ],
                         },
                     ],
@@ -1018,6 +1028,41 @@ impl Dashboard {
                 RichBlock::horizontal_rule(),
                 RichBlock::Table(table),
                 RichBlock::Image(image.clone()),
+                RichBlock::DecisionList(vec![
+                    RichDecisionItem {
+                        state: RichDecisionState::Decided,
+                        content: vec![RichInline::Text {
+                            text: "Use the cached description".to_owned(),
+                            marks: Vec::new(),
+                        }],
+                    },
+                    RichDecisionItem {
+                        state: RichDecisionState::Undecided,
+                        content: vec![RichInline::Text {
+                            text: "Refresh only when changed".to_owned(),
+                            marks: Vec::new(),
+                        }],
+                    },
+                ]),
+                RichBlock::Expand {
+                    title: Some("Details".to_owned()),
+                    content: vec![RichBlock::NestedExpand {
+                        title: Some("More details".to_owned()),
+                        content: vec![text("Nested content remains visible")],
+                    }],
+                },
+                RichBlock::Paragraph(vec![
+                    RichInline::Emoji {
+                        text: "✅".to_owned(),
+                    },
+                    RichInline::Text {
+                        text: " ".to_owned(),
+                        marks: Vec::new(),
+                    },
+                    RichInline::Date {
+                        date: "2026-08-30".to_owned(),
+                    },
+                ]),
             ],
             false,
         ));
