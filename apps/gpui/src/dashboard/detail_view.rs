@@ -243,6 +243,8 @@ impl Dashboard {
         let updated = issue.updated.clone();
         let due_date = issue.due_date.clone();
         let labels = issue.labels.clone();
+        let details_open = self.issue_details_open;
+        let dashboard_for_details_a11y = cx.entity().downgrade();
         v_flex()
             .id("issue-detail")
             .flex_1()
@@ -371,12 +373,35 @@ impl Dashboard {
                             .bordered(true)
                             .with_size(Size::Small)
                             .item(|item| {
-                                item.open(self.issue_details_open)
+                                item.open(details_open)
                                     .title(
                                         div()
+                                            .id("issue-detail-details-trigger-label")
                                             .debug_selector(|| {
                                                 "issue-detail-details-trigger".to_owned()
                                             })
+                                            .accessibility_id("issue-detail-details-trigger")
+                                            .role(gpui::accesskit::Role::Button)
+                                            .aria_label("Details")
+                                            .aria_expanded(details_open)
+                                            // The Accordion component owns the pointer interaction;
+                                            // this non-tab-stop semantic child gives macOS AX clients
+                                            // a stable, pressable trigger without replacing it.
+                                            .tab_index(-1)
+                                            .on_a11y_action(
+                                                gpui::AccessibleAction::Click,
+                                                move |_, _, cx| {
+                                                    if let Some(dashboard) =
+                                                        dashboard_for_details_a11y.upgrade()
+                                                    {
+                                                        dashboard.update(cx, |this, cx| {
+                                                            this.issue_details_open =
+                                                                !this.issue_details_open;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                },
+                                            )
                                             .child("Details"),
                                     )
                                     .child(

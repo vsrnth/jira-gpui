@@ -78,6 +78,58 @@ final class JiraDeskUITests: XCTestCase {
             object: detail
         )
         XCTAssertTrue(XCTWaiter.wait(for: [detailExpectation], timeout: 8) == .completed)
+
+        let details = try require(
+            app.descendants(matching: .any)["issue-detail-details"],
+            "issue-detail-details"
+        )
+        let detailsButton = try require(
+            app.buttons["issue-detail-details-trigger"],
+            "issue-detail-details-trigger"
+        )
+        XCTAssertEqual(
+            detailsButton.label.isEmpty ? detailsButton.title : detailsButton.label,
+            "Details"
+        )
+        let expandedHeight = details.frame.height
+        XCTAssertGreaterThan(expandedHeight, 0, "expanded Details group should have a meaningful height")
+
+        detailsButton.click()
+        let collapseExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let element = object as? XCUIElement else {
+                    return false
+                }
+                return element.frame.height <= expandedHeight - 4
+            },
+            object: details
+        )
+        XCTAssertTrue(XCTWaiter.wait(for: [collapseExpectation], timeout: 8) == .completed)
+        let collapsedHeight = details.frame.height
+        XCTAssertLessThan(
+            collapsedHeight,
+            expandedHeight - 4,
+            "collapsing Details should materially reduce its height"
+        )
+        XCTAssertTrue(detailsButton.exists, "Details trigger should remain discoverable when collapsed")
+
+        detailsButton.click()
+        let reopenExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let element = object as? XCUIElement else {
+                    return false
+                }
+                return element.frame.height >= expandedHeight - 4
+            },
+            object: details
+        )
+        XCTAssertTrue(XCTWaiter.wait(for: [reopenExpectation], timeout: 8) == .completed)
+        XCTAssertLessThanOrEqual(
+            abs(details.frame.height - expandedHeight),
+            4,
+            "reopening Details should restore its expanded height"
+        )
+        XCTAssertTrue(detailsButton.exists, "Details trigger should remain discoverable when reopened")
     }
 
     func testRichContent() throws {
