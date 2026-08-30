@@ -50,6 +50,10 @@ branch; it is not a published release.
 - The expanded native Sidebar allocation is 15 rem (240 px), keeping longer
   navigation labels readable. Workspace identity text is reduced to a safe
   site label rather than exposing URL paths or credentials.
+- macOS DMG creation retries only failures whose captured `hdiutil` diagnostic
+  contains the exact `Resource busy` text, for at most three attempts. Each
+  retry removes only the partial temporary DMG and preserves the command's
+  diagnostics (`9d5f44d`).
 
 ### Security
 
@@ -81,6 +85,10 @@ branch; it is not a published release.
   candidate at
   `target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 - Added local GPUI geometry coverage for update-card unread-dot alignment.
+- Added deterministic local shell regression coverage for the bounded DMG
+  retry behavior, including transient success, non-transient failure, retry
+  exhaustion, partial-DMG cleanup, and diagnostic preservation:
+  `packaging/macos/tests/test-build-dmg.sh` (`9d5f44d`).
 - Extended the local-only macOS fixture suite to six deterministic scenarios
   (`onboarding`, `issues`, `rich-content`, `updates`, `team`, and `settings`);
   the complete run passed on 2026-08-29. Artifacts are retained under

@@ -63,8 +63,21 @@ dist/Jira_Desk-${VERSION}-${arm64|x86_64}.dmg.sha256
 ## Validation
 
 The build validates the bundle layout, generated property list values, icon,
-and codesign signature before invoking `hdiutil`. Afterward, verify the
-checksum and inspect the read-only DMG without launching the app:
+and codesign signature before invoking `hdiutil`.
+
+The `hdiutil create` step retries only when its captured diagnostic contains
+the exact `Resource busy` text, with at most three total attempts. Before each
+retry it removes only the partial temporary DMG at the requested output path;
+the captured diagnostics from every attempt remain visible, and other
+`hdiutil` failures are returned immediately. Run the focused local regression
+coverage with:
+
+```sh
+sh packaging/macos/tests/test-build-dmg.sh
+```
+
+Afterward, verify the checksum and inspect the read-only DMG without launching
+the app:
 
 ```sh
 VERSION=0.1.34-local
