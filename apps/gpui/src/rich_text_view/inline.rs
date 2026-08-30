@@ -2,8 +2,8 @@
 
 use super::{
     MAX_ATTACHMENT_FILENAME_BYTES, MAX_ATTACHMENT_LOOKAHEAD_BYTES, MAX_RENDER_CHILDREN,
-    RenderBudget, RenderContext, RichAttachmentCard, RichInline, RichMark, RichTextPalette,
-    presentation_placeholder_label, render_element_ordinal,
+    RenderBudget, RenderContext, RichAttachmentCard, RichInline, RichMark, RichStatusColor,
+    RichTextPalette, presentation_placeholder_label, render_element_ordinal,
 };
 use gpui::{
     AnyElement, ElementId, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _,
@@ -20,10 +20,7 @@ pub(super) fn render_inline_line(
     budget: &mut RenderBudget,
 ) -> AnyElement {
     let (bounded_content, content_was_capped) = bounded_inline_content(content);
-    if !bounded_content
-        .iter()
-        .any(|inline| matches!(inline, RichInline::AttachmentCard(_)))
-    {
+    if !bounded_content.iter().any(inline_requires_element) {
         let flow = inline_text_flow(bounded_content, context.palette, depth, budget)
             .expect("text-only inline content should produce a text flow");
         let aria_label = flow.text.clone();
@@ -62,10 +59,7 @@ pub(super) fn render_inlines(
     budget: &mut RenderBudget,
 ) -> AnyElement {
     let (content, content_was_capped) = bounded_inline_content(content);
-    let rendered = if !content
-        .iter()
-        .any(|inline| matches!(inline, RichInline::AttachmentCard(_)))
-    {
+    let rendered = if !content.iter().any(inline_requires_element) {
         let flow = inline_text_flow(content, context.palette, depth, budget)
             .expect("text-only inline content should produce a text flow");
         render_inline_text_flow(flow)
@@ -76,7 +70,7 @@ pub(super) fn render_inlines(
         let mut children = Vec::new();
         let mut text_start = 0;
         for (index, inline) in content.iter().enumerate() {
-            if !matches!(inline, RichInline::AttachmentCard(_)) {
+            if !inline_requires_element(inline) {
                 continue;
             }
             if text_start < index
@@ -175,7 +169,7 @@ pub(super) fn inline_text_flow(
                 false,
             ),
             RichInline::HardBreak => flow.text.push('\n'),
-            RichInline::AttachmentCard(_) => return None,
+            RichInline::Status { .. } | RichInline::AttachmentCard(_) => return None,
         }
         if budget.omitted {
             break;
@@ -237,6 +231,13 @@ fn inline_mark_style(marks: &[RichMark], palette: RichTextPalette) -> HighlightS
         });
     }
     style
+}
+
+fn inline_requires_element(inline: &RichInline) -> bool {
+    matches!(
+        inline,
+        RichInline::Status { .. } | RichInline::AttachmentCard(_)
+    )
 }
 
 fn render_inline_text_flow(flow: InlineTextFlow) -> AnyElement {
@@ -301,6 +302,7 @@ fn render_inline(
                 budget.text(label)
             })
             .into_any_element(),
+        RichInline::Status { text, color } => render_status(text, *color, context, budget),
         RichInline::AttachmentCard(card) => render_attachment_card(card, context, budget),
         RichInline::Placeholder { label } => div()
             .italic()
@@ -308,6 +310,45 @@ fn render_inline(
             .child(budget.text(presentation_placeholder_label(label)))
             .into_any_element(),
         RichInline::HardBreak => div().into_any_element(),
+    }
+}
+
+fn render_status(
+    text: &str,
+    color: RichStatusColor,
+    context: &RenderContext<'_>,
+    budget: &mut RenderBudget,
+) -> AnyElement {
+    let text = budget.text(text);
+    let ordinal = render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal());
+    let tone = status_tone(color, context.palette);
+    h_flex()
+        .id(ElementId::named_usize("rich-text-status", ordinal))
+        .accessibility_id(format!("rich-text-status-{ordinal}"))
+        .role(gpui::accesskit::Role::Label)
+        .aria_label(text.clone())
+        .aria_value(text.clone())
+        .min_w_0()
+        .gap_0p5()
+        .px_1()
+        .py(rems(0.0625))
+        .rounded(rems(0.25))
+        .border_1()
+        .border_color(tone.opacity(0.4))
+        .bg(tone.opacity(0.14))
+        .text_color(tone)
+        .text_xs()
+        .child(text)
+        .into_any_element()
+}
+
+fn status_tone(color: RichStatusColor, palette: RichTextPalette) -> gpui::Hsla {
+    match color {
+        RichStatusColor::Neutral => palette.muted,
+        RichStatusColor::Purple | RichStatusColor::Blue => palette.info,
+        RichStatusColor::Red => palette.danger,
+        RichStatusColor::Yellow => palette.warning,
+        RichStatusColor::Green => palette.success,
     }
 }
 
@@ -418,4 +459,63 @@ pub(super) fn normalize_attachment_filename(value: &str) -> (String, bool) {
         }
     }
     (normalized, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_same_color(actual: gpui::Hsla, expected: gpui::Hsla) {
+        assert_eq!(actual.h, expected.h);
+        assert_eq!(actual.s, expected.s);
+        assert_eq!(actual.l, expected.l);
+        assert_eq!(actual.a, expected.a);
+    }
+
+    #[test]
+    fn status_colors_use_their_bounded_semantic_palette_tones() {
+        let palette = RichTextPalette {
+            muted: gpui::Hsla {
+                h: 0.1,
+                s: 0.2,
+                l: 0.3,
+                a: 1.0,
+            },
+            info: gpui::Hsla {
+                h: 0.2,
+                s: 0.3,
+                l: 0.4,
+                a: 1.0,
+            },
+            warning: gpui::Hsla {
+                h: 0.3,
+                s: 0.4,
+                l: 0.5,
+                a: 1.0,
+            },
+            success: gpui::Hsla {
+                h: 0.4,
+                s: 0.5,
+                l: 0.6,
+                a: 1.0,
+            },
+            danger: gpui::Hsla {
+                h: 0.5,
+                s: 0.6,
+                l: 0.7,
+                a: 1.0,
+            },
+            ..RichTextPalette::default()
+        };
+        for (color, expected) in [
+            (RichStatusColor::Neutral, palette.muted),
+            (RichStatusColor::Purple, palette.info),
+            (RichStatusColor::Blue, palette.info),
+            (RichStatusColor::Red, palette.danger),
+            (RichStatusColor::Yellow, palette.warning),
+            (RichStatusColor::Green, palette.success),
+        ] {
+            assert_same_color(status_tone(color, palette), expected);
+        }
+    }
 }

@@ -115,6 +115,22 @@ final class JiraDeskUITests: XCTestCase {
             NSPredicate(format: "label == %@", "Some Jira content isn't supported yet.")
         ).firstMatch
         XCTAssertFalse(unsupported.exists, "valid rich content must not show the unsupported sentinel")
+
+        let statusNodes = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-status-")
+        )
+        XCTAssertEqual(statusNodes.count, 2, "fixture should expose one status node per result")
+        for expected in ["Pass", "Fail"] {
+            let status = try require(
+                statusNodes.matching(NSPredicate(format: "value == %@", expected)).firstMatch,
+                "rich-text-status-\(expected.lowercased())"
+            )
+            XCTAssertEqual(
+                status.value as? String,
+                expected,
+                "status \(expected) should expose its exact AX value"
+            )
+        }
         for (identifier, expected) in [
             ("rich-text-paragraph-0", "Epic: ENG-43"),
             ("rich-text-paragraph-1", "Per the ENG-43, after"),
@@ -127,6 +143,11 @@ final class JiraDeskUITests: XCTestCase {
                 "\(identifier) should expose exact rich paragraph value"
             )
         }
+
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "rich-content-final"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
     func testSettings() throws {

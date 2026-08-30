@@ -192,10 +192,29 @@ pub enum RichInline {
         account_id: Option<AccountId>,
         label: String,
     },
+    Status {
+        text: String,
+        color: RichStatusColor,
+    },
     AttachmentCard(RichAttachmentCard),
     Placeholder {
         label: String,
     },
+}
+
+/// The allowlisted color vocabulary used by Jira's canonical ADF status node.
+///
+/// Keeping this as an enum prevents arbitrary transport values from crossing into
+/// presentation code while retaining the exact canonical wire spelling for caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RichStatusColor {
+    Neutral,
+    Purple,
+    Blue,
+    Red,
+    Yellow,
+    Green,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,9 +389,9 @@ fn append_inline_text(content: &[RichInline], output: &mut PlainTextBuilder, dep
         match inline {
             RichInline::Text { text, .. } => output.push_str(text),
             RichInline::HardBreak => output.push_str("\n"),
-            RichInline::Mention { label, .. } | RichInline::Placeholder { label } => {
-                output.push_str(label)
-            }
+            RichInline::Mention { label, .. }
+            | RichInline::Status { text: label, .. }
+            | RichInline::Placeholder { label } => output.push_str(label),
             RichInline::AttachmentCard(card) => {
                 output.push_str("[attachment: ");
                 output.push_str(&card.filename);
@@ -467,7 +486,7 @@ mod tests {
 
     use super::{
         HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichImage, RichInline, RichListItem,
-        RichTable, RichTableCell, RichTableRow, RichTextDocument,
+        RichStatusColor, RichTable, RichTableCell, RichTableRow, RichTextDocument,
     };
 
     #[test]
@@ -526,6 +545,53 @@ mod tests {
             "before\nafter"
         );
         assert_eq!(HORIZONTAL_RULE_LABEL, "[horizontal rule]");
+    }
+
+    #[test]
+    fn status_plain_text_uses_only_its_bounded_visible_label() {
+        let document = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![
+                RichInline::Text {
+                    text: "Result: ".to_owned(),
+                    marks: Vec::new(),
+                },
+                RichInline::Status {
+                    text: "Pass".to_owned(),
+                    color: RichStatusColor::Green,
+                },
+            ])],
+            false,
+        );
+        assert_eq!(document.plain_text(), "Result: Pass");
+    }
+
+    #[test]
+    fn status_colors_serialize_with_the_canonical_wire_names() {
+        let colors = [
+            (RichStatusColor::Neutral, "\"neutral\""),
+            (RichStatusColor::Purple, "\"purple\""),
+            (RichStatusColor::Blue, "\"blue\""),
+            (RichStatusColor::Red, "\"red\""),
+            (RichStatusColor::Yellow, "\"yellow\""),
+            (RichStatusColor::Green, "\"green\""),
+        ];
+        for (color, wire_name) in colors {
+            assert_eq!(
+                serde_json::to_string(&color).expect("status color should serialize"),
+                wire_name
+            );
+            assert_eq!(
+                serde_json::from_str::<RichStatusColor>(wire_name)
+                    .expect("canonical status color should deserialize"),
+                color
+            );
+        }
+        for invalid in ["\"Neutral\"", "\"orange\"", "null"] {
+            assert!(
+                serde_json::from_str::<RichStatusColor>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

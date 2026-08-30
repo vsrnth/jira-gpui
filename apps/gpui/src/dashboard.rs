@@ -936,8 +936,8 @@ impl Dashboard {
     #[cfg(feature = "ui-automation")]
     pub(crate) fn from_ui_automation_rich_content() -> Self {
         use jira_domain::{
-            RichBlock, RichImage, RichInline, RichTable, RichTableCell, RichTableRow,
-            RichTextDocument,
+            RichBlock, RichImage, RichInline, RichStatusColor, RichTable, RichTableCell,
+            RichTableRow, RichTextDocument,
         };
 
         let mut dashboard = Self::from_sample_data();
@@ -953,6 +953,12 @@ impl Dashboard {
             RichBlock::Paragraph(vec![RichInline::Text {
                 text: value.to_owned(),
                 marks: Vec::new(),
+            }])
+        };
+        let status = |text: &str, color: RichStatusColor| {
+            RichBlock::Paragraph(vec![RichInline::Status {
+                text: text.to_owned(),
+                color,
             }])
         };
         let sentence = |parts: &[&str]| {
@@ -984,11 +990,14 @@ impl Dashboard {
                     cells: vec![
                         RichTableCell {
                             header: false,
-                            content: vec![text("Status")],
+                            content: vec![status("Pass", RichStatusColor::Green)],
                         },
                         RichTableCell {
                             header: false,
-                            content: vec![text("Ready"), text("Cache is preloaded")],
+                            content: vec![
+                                status("Fail", RichStatusColor::Red),
+                                text("Cache is preloaded"),
+                            ],
                         },
                     ],
                 },

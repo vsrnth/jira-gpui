@@ -1,6 +1,7 @@
 use jira_domain::{
     AccountId, AttachmentMetadata, IssueKey, PanelKind, RichAttachmentCard, RichBlock, RichImage,
-    RichInline, RichListItem, RichMark, RichTable, RichTableCell, RichTableRow, RichTextDocument,
+    RichInline, RichListItem, RichMark, RichStatusColor, RichTable, RichTableCell, RichTableRow,
+    RichTextDocument,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -16,6 +17,7 @@ const MAX_MEDIA_ALT_BYTES: usize = 512;
 const MAX_MEDIA_DIMENSION: u32 = 10_000;
 const MAX_TABLE_ROWS: usize = 64;
 const MAX_TABLE_CELLS: usize = 32;
+const MAX_STATUS_TEXT_BYTES: usize = 255;
 pub(super) const UNSUPPORTED_CONTENT: &str = "[unsupported Jira content]";
 pub(super) const UNAVAILABLE_IMAGE: &str = "[Jira image unavailable]";
 
@@ -284,10 +286,12 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
         }
         "rule" => malformed_block(state),
         "table" => parse_table_block(object, depth, state),
-        "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date" | "status" | "expand"
-        | "nestedExpand" => RichBlock::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
-        },
+        "status" => RichBlock::Paragraph(vec![parse_status_inline(object, state)]),
+        "tableCell" | "tableHeader" | "tableRow" | "emoji" | "date" | "expand" | "nestedExpand" => {
+            RichBlock::Placeholder {
+                label: UNSUPPORTED_CONTENT.to_owned(),
+            }
+        }
         "inlineCard" => match parse_inline_attachment_card(object, state) {
             RichInline::AttachmentCard(card) => {
                 RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
@@ -843,14 +847,59 @@ fn parse_inline(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> 
                 .unwrap_or_else(|| "Mentioned user".to_owned());
             Some(RichInline::Mention { account_id, label })
         }
-        "emoji" | "date" | "status" => Some(RichInline::Placeholder {
+        "emoji" | "date" => Some(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         }),
+        "status" => Some(parse_status_inline(object, state)),
         "mediaInline" => Some(parse_media_inline_attachment_card(object, state)),
         "inlineCard" => Some(parse_inline_attachment_card(object, state)),
         _ => Some(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         }),
+    }
+}
+
+fn parse_status_inline(
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> RichInline {
+    if object.contains_key("marks") || object.contains_key("content") {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    }
+    let Some(attrs) = object.get("attrs").and_then(Value::as_object) else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(text) = attrs
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .filter(|text| text.len() <= MAX_STATUS_TEXT_BYTES)
+    else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    let Some(color) = attrs
+        .get("color")
+        .and_then(Value::as_str)
+        .and_then(status_color)
+    else {
+        state.truncated = true;
+        return RichInline::Placeholder {
+            label: UNSUPPORTED_CONTENT.to_owned(),
+        };
+    };
+    RichInline::Status {
+        text: state.text(text),
+        color,
     }
 }
 
@@ -1149,6 +1198,18 @@ fn panel_kind(value: &str) -> Option<PanelKind> {
         "warning" => Some(PanelKind::Warning),
         "success" => Some(PanelKind::Success),
         "error" => Some(PanelKind::Error),
+        _ => None,
+    }
+}
+
+fn status_color(value: &str) -> Option<RichStatusColor> {
+    match value {
+        "neutral" => Some(RichStatusColor::Neutral),
+        "purple" => Some(RichStatusColor::Purple),
+        "blue" => Some(RichStatusColor::Blue),
+        "red" => Some(RichStatusColor::Red),
+        "yellow" => Some(RichStatusColor::Yellow),
+        "green" => Some(RichStatusColor::Green),
         _ => None,
     }
 }

@@ -11,7 +11,7 @@ use gpui::{AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled a
 use gpui_component::{StyledExt as _, v_flex};
 use jira_domain::{
     PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
-    RichTextDocument,
+    RichStatusColor, RichTextDocument,
 };
 
 use crate::diagnostics::{

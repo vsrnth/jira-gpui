@@ -4,7 +4,8 @@ use crate::adf::{
     attachment_id_from_inline_card_url, count_file_media_references_inner, parse_adf,
 };
 use jira_domain::{
-    HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichInline, RichMark, RichTable, RichTextDocument,
+    HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichInline, RichMark, RichStatusColor, RichTable,
+    RichTextDocument,
 };
 
 #[test]
@@ -435,6 +436,162 @@ fn preserves_mixed_inline_card_sequence_order() {
             RichInline::Text { text: after, .. }
         ] if before == "before" && card.attachment_id == "10002" && after == "after"
     ));
+}
+
+#[test]
+fn maps_canonical_statuses_in_mixed_inline_and_table_content() {
+    let colors = [
+        ("neutral", RichStatusColor::Neutral),
+        ("purple", RichStatusColor::Purple),
+        ("blue", RichStatusColor::Blue),
+        ("red", RichStatusColor::Red),
+        ("yellow", RichStatusColor::Yellow),
+        ("green", RichStatusColor::Green),
+    ];
+    let mut inline_content = vec![serde_json::json!({"type":"text", "text":"before "})];
+    for (index, (color, _)) in colors.iter().enumerate() {
+        inline_content.push(serde_json::json!({
+            "type": "status",
+            "attrs": {
+                "text": format!("S{index}"),
+                "color": color,
+                "localId": "metadata-must-not-leak",
+                "style": "background: red"
+            }
+        }));
+        inline_content.push(serde_json::json!({"type":"text", "text":" after"}));
+    }
+    let document = serde_json::json!({
+        "type":"doc", "version":1, "content":[
+            {"type":"paragraph", "content": inline_content},
+            {"type":"table", "content":[
+                {"type":"tableRow", "content":[
+                    {"type":"tableHeader", "content":[{"type":"paragraph", "content":[
+                        {"type":"status", "attrs":{"text":"Pass", "color":"green"}}
+                    ]}]},
+                    {"type":"tableCell", "content":[{"type":"paragraph", "content":[
+                        {"type":"status", "attrs":{"text":"Fail", "color":"red"}}
+                    ]}]}
+                ]}
+            ]}
+        ]
+    });
+
+    let parsed = parse_adf(&document).expect("valid status document");
+    assert!(!parsed.truncated);
+    assert_eq!(
+        parsed.plain_text(),
+        "before S0 afterS1 afterS2 afterS3 afterS4 afterS5 after\nPass | Fail"
+    );
+    let RichBlock::Paragraph(inlines) = &parsed.blocks[0] else {
+        panic!("expected status paragraph")
+    };
+    for (offset, (_, expected_color)) in colors.iter().enumerate() {
+        assert!(matches!(
+            &inlines[offset * 2 + 1],
+            RichInline::Status { text, color } if text == &format!("S{offset}") && color == expected_color
+        ));
+    }
+    let RichBlock::Table(table) = &parsed.blocks[1] else {
+        panic!("expected status table")
+    };
+    assert!(matches!(
+        &table.rows[0].cells[0].content[0],
+        RichBlock::Paragraph(content)
+            if matches!(&content[..], [RichInline::Status { text, color }] if text == "Pass" && *color == RichStatusColor::Green)
+    ));
+    assert!(matches!(
+        &table.rows[0].cells[1].content[0],
+        RichBlock::Paragraph(content)
+            if matches!(&content[..], [RichInline::Status { text, color }] if text == "Fail" && *color == RichStatusColor::Red)
+    ));
+    assert!(!parsed.plain_text().contains("metadata-must-not-leak"));
+    assert!(!parsed.plain_text().contains("background: red"));
+}
+
+#[test]
+fn malformed_status_attrs_remain_bounded_placeholders() {
+    let malformed_attrs = [
+        serde_json::json!({}),
+        serde_json::json!({"text":"", "color":"green"}),
+        serde_json::json!({"text":null, "color":"green"}),
+        serde_json::json!({"text":42, "color":"green"}),
+        serde_json::json!({"text":"Pass", "color":null}),
+        serde_json::json!({"text":"Pass", "color":"orange"}),
+        serde_json::json!({"text":"Pass", "color":42}),
+        serde_json::json!({"text":"x".repeat(256), "color":"green"}),
+    ];
+    for attrs in malformed_attrs {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph", "content":[
+                {"type":"status", "attrs":attrs}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF root");
+        assert!(parsed.plain_text().starts_with(UNSUPPORTED_CONTENT));
+        assert!(parsed.truncated);
+        assert!(!parsed.plain_text().contains("secret"));
+    }
+    for node in [
+        serde_json::json!({"type":"status", "attrs":null}),
+        serde_json::json!({"type":"status", "attrs":"not-an-object"}),
+        serde_json::json!({"type":"status", "attrs":{"text":"Pass", "color":"green"}, "marks":[]}),
+        serde_json::json!({"type":"status", "attrs":{"text":"Pass", "color":"green"}, "content":[]}),
+    ] {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph", "content":[node]}]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF root");
+        assert!(parsed.plain_text().starts_with(UNSUPPORTED_CONTENT));
+        assert!(parsed.truncated);
+    }
+
+    let top_level = serde_json::json!({
+        "type":"doc", "version":1, "content":[{"type":"status", "attrs":{
+            "text":"Pass", "color":"green"
+        }}]
+    });
+    let parsed = parse_adf(&top_level).expect("top-level status should map to a paragraph");
+    assert_eq!(parsed.plain_text(), "Pass");
+    assert!(matches!(
+        &parsed.blocks[0],
+        RichBlock::Paragraph(content)
+            if matches!(&content[..], [RichInline::Status { text, color }] if text == "Pass" && *color == RichStatusColor::Green)
+    ));
+}
+
+#[test]
+fn status_text_limit_is_byte_bounded_without_splitting_utf8() {
+    let document_for = |text: String| {
+        serde_json::json!({
+            "type": "doc",
+            "version": 1,
+            "content": [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "status",
+                    "attrs": {"text": text, "color": "green"}
+                }]
+            }]
+        })
+    };
+
+    let accepted = parse_adf(&document_for("x".repeat(255))).expect("valid ADF root");
+    assert!(!accepted.truncated);
+    assert!(matches!(
+        &accepted.blocks[0],
+        RichBlock::Paragraph(content)
+            if matches!(
+                content.as_slice(),
+                [RichInline::Status { text, color }]
+                    if text.len() == 255 && *color == RichStatusColor::Green
+            )
+    ));
+
+    let rejected =
+        parse_adf(&document_for(format!("{}é", "x".repeat(254)))).expect("valid ADF root");
+    assert!(rejected.truncated);
+    assert!(rejected.plain_text().starts_with(UNSUPPORTED_CONTENT));
 }
 
 #[test]
