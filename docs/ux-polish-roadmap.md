@@ -64,8 +64,17 @@ interaction quality—not a mandate to copy visual treatments.
   types retain generic embedded icons. Icons are attached to type labels across issue rows,
   issue detail metadata, and update cards; issue keys remain text-only and common Jira/JSM
   aliases are covered.
-- **ADF rule and table support (`a8a051b`)** — bounded semantic tables and standalone
-  horizontal rules are parsed, rendered, and projected to plain text.
+- **ADF rule and table support (`a8a051b`, `cf0884b`)** — bounded semantic
+  tables and standalone horizontal rules are parsed, rendered, and projected
+  to plain text, including stretched uneven-height rows and native table,
+  row, and cell geometry.
+- **ADF smart cards (`8320412`)** — canonical Atlassian browse cards render
+  as bounded issue keys while noncanonical and mixed-attribute cards remain
+  safe unsupported content.
+- **ADF status lozenges (`141da0e`)** — status text is byte-bounded and
+  restricted to the six canonical Jira colors. Valid statuses render as
+  semantic lozenges in paragraphs and tables; malformed, marked, and
+  content-bearing nodes use the bounded unsupported-content fallback.
 - **Sidebar workspace identity (`70dfb79`)** — the expanded native Sidebar is 15 rem
   (240 px), and workspace identity is reduced to a safe organization label.
 - **Update-card unread alignment (`70dfb79`)** — the unread dot is aligned with the first
@@ -78,6 +87,15 @@ interaction quality—not a mandate to copy visual treatments.
   ready image plus rule/table without a loading spinner or unsupported fallback.
   The reviewed five-case visual candidates are at
   `target/ui-lab/candidate-20260829-regressions`.
+
+The ADF status follow-up was verified separately through the local
+`rich-content` scenario on 2026-08-30. It asserted exact native AX values for
+distinct `Pass` and `Fail` status nodes while retaining horizontal-rule and
+uneven-table geometry, ready-image, and no-unsupported-fallback checks. This
+was not a rerun of the complete six-scenario suite. The result bundle and
+retained screenshot are at
+`target/ui-automation/adf-status-final-20260830`; the exported candidate is
+`target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 
 ## Completed coherent commits
 
@@ -129,6 +147,12 @@ interaction quality—not a mandate to copy visual treatments.
   and exact-path mapping coverage.
 - `b9c4f07` — extend local macOS regression coverage to six deterministic
   scenarios and validate the rich-content and alignment assertions.
+- `8320412` — render canonical Jira ADF smart cards as issue keys with
+  strict host/path/attribute validation.
+- `cf0884b` — preserve semantic table geometry through stretched uneven-height
+  rows and native table, row, and cell accessibility bounds.
+- `141da0e` — add bounded canonical ADF status lozenges and safe malformed
+  node fallback coverage.
 
 ## Ordered plan
 

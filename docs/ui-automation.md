@@ -226,9 +226,10 @@ read-only actions:
   and bounded-waits for the `issue-detail` accessible title/label to become
   exactly `Issue detail for DESK-179`.
 - `rich-content` opens a fixture with a horizontal rule, a valid table, and a
-  preloaded PNG image. It requires the semantic rule/table/image IDs, asserts
-  that no image spinner or unsupported-content sentinel is present, and never
-  accesses Jira or persistent storage.
+  preloaded PNG image plus canonical Pass/Fail status lozenges. It requires
+  the semantic rule/table/image IDs, exact native AX values for the distinct
+  status nodes, and asserts that no image spinner or unsupported-content
+  sentinel is present. It never accesses Jira or persistent storage.
 - `settings` starts on the fixture's Settings/Appearance screen, activates the
   verifies that the full `Desktop notifications` label stays within the
   expanded sidebar, activates the nested `Use Dark appearance` CheckBox, and
@@ -256,6 +257,23 @@ retained under `target/ui-automation/final-20260829`:
 
 The corresponding five-case offscreen visual candidates were reviewed and are
 retained under `target/ui-lab/candidate-20260829-regressions`.
+
+### ADF status verification
+
+The `rich-content` scenario was rerun separately on 2026-08-30 for the ADF
+status follow-up. It passed with bounded status text and the fixture's green
+`Pass` and red `Fail` nodes. All six canonical colors are covered by the
+parser/domain tests. XCTest asserted the exact native AX values `Pass` and
+`Fail` on distinct status nodes. The existing horizontal-rule,
+uneven-table geometry, ready-image, and no-unsupported-fallback assertions
+remained active. This was a rich-content-only verification, not a complete
+six-scenario suite rerun.
+
+The result bundle and retained screenshot are under
+`target/ui-automation/adf-status-final-20260830`. The exported candidate
+image is:
+
+`target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 
 The tests deliberately do not activate status transitions, assignee changes,
 comments, saved-login deletion, notification tests, attachment downloads, or
