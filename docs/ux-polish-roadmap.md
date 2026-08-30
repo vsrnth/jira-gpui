@@ -75,6 +75,14 @@ interaction quality—not a mandate to copy visual treatments.
   restricted to the six canonical Jira colors. Valid statuses render as
   semantic lozenges in paragraphs and tables; malformed, marked, and
   content-bearing nodes use the bounded unsupported-content fallback.
+- **Common ADF content (`f30d407`)** — task and decision lists, expandable
+  content, emoji, dates, and canonical Jira Cloud Confluence smart cards now
+  have bounded domain representations, safe plain-text projections, and native
+  rich-text rendering. Malformed or unsupported structures retain the safe
+  fallback instead of leaking raw ADF attributes.
+- **Issue details Accordion (`48a62a5`)** — the existing DescriptionList now
+  lives inside the gpui-component Accordion, expanded by default and
+  collapsible without losing the selected issue or metadata.
 - **Sidebar workspace identity (`70dfb79`)** — the expanded native Sidebar is 15 rem
   (240 px), and workspace identity is reduced to a safe organization label.
 - **Update-card unread alignment (`70dfb79`)** — the unread dot is aligned with the first
@@ -96,6 +104,18 @@ was not a rerun of the complete six-scenario suite. The result bundle and
 retained screenshot are at
 `target/ui-automation/adf-status-final-20260830`; the exported candidate is
 `target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
+
+The common-ADF and Details Accordion follow-up was verified separately through
+the local `issues` and `rich-content` scenarios on 2026-08-30. The issues
+scenario asserted the `issue-detail-details-trigger` semantics and bounded
+collapse/reopen geometry. The rich-content scenario asserted task, decision,
+expand/nested-expand, emoji/date values while retaining the existing
+status/table/rule/ready-image/no-spinner/no-unsupported checks. This was not a
+rerun of the complete six-scenario suite. Results are retained at
+`target/ui-automation/accordion-ax-fix-3/issues/TestResults.xcresult` and
+`target/ui-automation/adf-accordion-pass2/rich-content/TestResults.xcresult`;
+the candidate image is
+`target/ui-automation/adf-accordion-20260830-pass2-rich-content/rich-content-candidate.png`.
 
 ## Completed coherent commits
 
@@ -153,6 +173,14 @@ retained screenshot are at
   rows and native table, row, and cell accessibility bounds.
 - `141da0e` — add bounded canonical ADF status lozenges and safe malformed
   node fallback coverage.
+- `f30d407` — render common bounded ADF task, decision, expand, emoji, date,
+  and safe Confluence smart-card content.
+- `48a62a5` — present issue metadata inside a native, default-expanded
+  gpui-component Details Accordion.
+- `ac43742` — expose the Accordion trigger with stable macOS accessibility
+  semantics.
+- `852ce4a` — add local macOS assertions for common ADF values and Accordion
+  collapse/reopen geometry.
 
 ## Ordered plan
 
@@ -194,6 +222,12 @@ recorded in **Current status** above are complete and validated.
    The complete `onboarding`, `issues`, `rich-content`, `updates`, `team`, and
    `settings` suite passed on 2026-08-29. Results are retained at
    `target/ui-automation/final-20260829`.
+10. **Completed — Common ADF rendering and issue metadata disclosure:**
+    Parse and render bounded task/decision/expand/emoji/date content, retain a
+    safe Confluence smart-card label, and place the existing issue DescriptionList
+    in a default-expanded Accordion. Focused local macOS verification passed on
+    2026-08-30; the full six-scenario suite remains represented by the
+    2026-08-29 run above and was not rerun for this slice.
 
 ## Latest UI verification
 

@@ -26,6 +26,14 @@ branch; it is not a published release.
   `https://<site>.atlassian.net/browse/<KEY>` links render as issue keys without
   retaining or exposing URLs. Noncanonical URLs and mixed smart-card
   attributes are rejected (`8320412`).
+- Common Jira ADF content now has bounded representations and native rendering
+  for task lists (`taskList`, `taskItem`, and `blockTaskItem`), decision lists,
+  expandable sections (`expand` and `nestedExpand`), emoji, and dates. Canonical
+  Jira Cloud Confluence cards render as a safe visible label without exposing
+  their URL path or query (`f30d407`).
+- Issue metadata is now grouped in a native gpui-component Accordion around the
+  existing DescriptionList. It is expanded by default and can be collapsed and
+  reopened while preserving the selected issue (`48a62a5`).
 - Jira issue-type semantics now cover common Jira and JSM labels and aliases,
   including story, task and sub-task variants, bug/defect, epic, initiative,
   spike, improvement/new feature, incident/problem, change, and service
@@ -63,6 +71,9 @@ branch; it is not a published release.
   marked, or content-bearing nodes never expose raw attributes or content.
 - Smart-card parsing accepts only canonical Atlassian browse links with
   matching attributes; rejected links never become rendered URL content.
+- Common ADF parsing is bounded by depth, item, text, and nesting limits. Invalid
+  task, decision, expand, emoji, date, and smart-card nodes retain the safe
+  unsupported-content fallback; raw ADF attributes are not rendered.
 - Workspace labels only expose a validated site slug or hostname fallback;
   credentials, paths, queries, and fragments are not displayed.
 
@@ -74,6 +85,16 @@ branch; it is not a published release.
 - Added rich-text table projection and horizontal-rule rendering coverage.
 - Added local semantic verification for canonical ADF status lozenges,
   including exact native AX values for distinct `Pass` and `Fail` nodes.
+- Added local semantic verification for task/decision item values,
+  expand/nested-expand labels, and the exact `✅ 2026-08-30` emoji/date flow.
+  The same fixture retains rule, table, status, ready-image, no-spinner, and
+  no-unsupported-content assertions.
+- Added local macOS verification for the `issue-detail-details-trigger`
+  Accordion: default-expanded state, collapse/reopen behavior, and bounded
+  group-height geometry. The focused result bundles passed on 2026-08-30 at
+  `target/ui-automation/accordion-ax-fix-3/issues/TestResults.xcresult` and
+  `target/ui-automation/adf-accordion-pass2/rich-content/TestResults.xcresult`.
+  This was not a rerun of the complete six-scenario suite.
 - Added local semantic verification for stretched uneven-height ADF tables,
   table/row/cell geometry, and canonical smart-card issue-key rendering. The
   fixture-only macOS artifact is

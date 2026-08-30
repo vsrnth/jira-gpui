@@ -224,12 +224,19 @@ read-only actions:
 - `issues` selects the deterministic fixture row `issue-row-DESK-179` and
   verifies Story/Task type identity, the normalized `sample` workspace label,
   and bounded-waits for the `issue-detail` accessible title/label to become
-  exactly `Issue detail for DESK-179`.
+  exactly `Issue detail for DESK-179`. It also verifies the semantic
+  `issue-detail-details-trigger` control, confirms that the Details accordion
+  starts expanded, collapses and reopens it, and checks that its height changes
+  and returns within bounded geometry tolerances.
 - `rich-content` opens a fixture with a horizontal rule, a valid table, and a
   preloaded PNG image plus canonical Pass/Fail status lozenges. It requires
   the semantic rule/table/image IDs, exact native AX values for the distinct
   status nodes, and asserts that no image spinner or unsupported-content
-  sentinel is present. It never accesses Jira or persistent storage.
+  sentinel is present. The fixture also exercises exact task and decision item
+  values (`Todo task`, `Done task`, `Decided decision`, and `Undecided
+  decision`), expanded and nested-expanded content (`Expanded`, `Details`, and
+  `More details`), and the inline emoji/date value `✅ 2026-08-30`. It never
+  accesses Jira or persistent storage.
 - `settings` starts on the fixture's Settings/Appearance screen, activates the
   verifies that the full `Desktop notifications` label stays within the
   expanded sidebar, activates the nested `Use Dark appearance` CheckBox, and
@@ -279,6 +286,32 @@ The tests deliberately do not activate status transitions, assignee changes,
 comments, saved-login deletion, notification tests, attachment downloads, or
 any other Jira write. Site/email are fixed synthetic test data that may appear
 only in local XCTest diagnostics; no API token is supplied or read.
+
+### ADF and accordion verification
+
+The rich-content fixture covers the common ADF nodes that previously rendered
+as unsupported placeholders: `taskList`/`taskItem` and `blockTaskItem`,
+`decisionList`/`decisionItem`, `expand`/`nestedExpand`, `emoji`, and `date`. It
+also covers the safe visible label for canonical Jira Cloud Confluence smart
+cards. Parser limits, malformed-node handling, and unsupported-node fallback
+remain exercised by domain and adapter tests; UI assertions accept only the
+bounded semantic values exposed by the fixture.
+
+The issue fixture covers the native gpui-component Accordion around the
+existing DescriptionList. The Details section is expanded by default and can
+be collapsed and reopened without changing the selected issue or metadata.
+The trigger and group use stable semantic identifiers so XCUITest checks
+behavior and bounded geometry rather than implementation-specific coordinates.
+
+The latest scenario-specific verification passed on 2026-08-30:
+
+- Issues/Details Accordion: `target/ui-automation/accordion-ax-fix-3/issues/TestResults.xcresult`
+- Rich ADF content: `target/ui-automation/adf-accordion-pass2/rich-content/TestResults.xcresult`
+
+The retained rich-content candidate image is
+`target/ui-automation/adf-accordion-20260830-pass2-rich-content/rich-content-candidate.png`.
+These are local development artifacts; they are not baselines and this was not
+a fresh rerun of the complete six-scenario suite.
 
 Each run is written below `target/ui-automation/<run-id>` by default (the
 directory is ignored by Git). Each scenario contains:
