@@ -299,6 +299,7 @@ impl Dashboard {
         let detail_key_label = format!("Selected Jira issue {key}");
         let summary = issue.summary.clone();
         let issue_type = issue.issue_type.clone();
+        let type_semantics = issue_type_semantics(&issue_type);
         let status = issue.status.clone();
         let priority = issue.priority.clone();
         let description = match &detail_state {
@@ -448,14 +449,16 @@ impl Dashboard {
                                     .rounded_full()
                                     .bg(cx.theme().secondary)
                                     .text_sm()
-                                    .text_color(cx.theme().secondary_foreground)
+                                    .text_color(self.issue_type_color(type_semantics.tone, cx))
                                     .role(gpui::accesskit::Role::TextRun)
                                     .aria_label(format!("Issue type: {issue_type}"))
                                     .child(
-                                        Icon::new(issue_type_icon(&issue_type))
+                                        Icon::new(type_semantics.icon)
                                             .size_4()
                                             .flex_shrink_0()
-                                            .text_color(cx.theme().secondary_foreground),
+                                            .text_color(
+                                                self.issue_type_color(type_semantics.tone, cx),
+                                            ),
                                     )
                                     .child(issue_type),
                             )

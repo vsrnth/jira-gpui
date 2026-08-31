@@ -65,7 +65,7 @@ use crate::{
         RichAttachmentCardAction, RichImageRenderStates, RichTextPalette, render_rich_text,
         render_rich_text_with_actions,
     },
-    semantic_icons::{PriorityTone, issue_type_icon, priority_semantics},
+    semantic_icons::{IssueTypeTone, PriorityTone, issue_type_semantics, priority_semantics},
     team_table::{TeamTicketTableDelegate, TeamTicketTableStateExt},
 };
 

@@ -17,6 +17,31 @@ pub enum IssueTypeIcon {
     Component(IconName),
 }
 
+/// The semantic color assigned to a known Jira issue type.
+///
+/// This is intentionally a color role rather than a concrete color. Dashboard rendering resolves
+/// the role through the active theme so the same identity cue remains readable in light and dark
+/// themes. Unknown/custom types stay neutral and do not acquire an accidental meaning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IssueTypeTone {
+    /// Bug and defect issues use the theme's red base color.
+    Red,
+    /// Task issues use the theme's green base color.
+    Green,
+    /// Story issues use the theme's blue base color.
+    Blue,
+    /// Epic issues use the theme's bright purple base color (the component theme's magenta slot).
+    Purple,
+    /// Unknown and less common issue types use the neutral muted foreground.
+    Neutral,
+}
+
+/// The complete semantic presentation for a Jira issue type.
+pub struct IssueTypeSemantics {
+    pub icon: IssueTypeIcon,
+    pub tone: IssueTypeTone,
+}
+
 impl IconNamed for IssueTypeIcon {
     fn path(self) -> SharedString {
         match self {
@@ -62,21 +87,57 @@ pub enum PriorityTone {
     Unknown,
 }
 
-/// Maps a Jira issue type label to an embedded icon.
-pub fn issue_type_icon(label: &str) -> IssueTypeIcon {
+/// Maps a Jira issue type label to its Lucide icon and semantic color tone.
+pub fn issue_type_semantics(label: &str) -> IssueTypeSemantics {
     match normalize(label).as_str() {
-        "story" => IssueTypeIcon::App(AppIconName::BookOpenText),
-        "task" | "standard task" => IssueTypeIcon::App(AppIconName::ListChecks),
-        "bug" | "defect" => IssueTypeIcon::App(AppIconName::Bug),
-        "initiative" => IssueTypeIcon::Component(IconName::LayoutDashboard),
-        "sub-task" | "subtask" | "sub task" => IssueTypeIcon::Component(IconName::PanelBottom),
-        "epic" => IssueTypeIcon::Component(IconName::Folder),
-        "spike" => IssueTypeIcon::Component(IconName::SquareTerminal),
-        "improvement" | "new feature" | "feature" => IssueTypeIcon::Component(IconName::Plus),
-        "incident" | "problem" => IssueTypeIcon::Component(IconName::TriangleAlert),
-        "change" => IssueTypeIcon::Component(IconName::Settings),
-        "service request" | "service-request" => IssueTypeIcon::Component(IconName::Inbox),
-        _ => IssueTypeIcon::Component(IconName::File),
+        "story" => IssueTypeSemantics {
+            icon: IssueTypeIcon::App(AppIconName::BookOpenText),
+            tone: IssueTypeTone::Blue,
+        },
+        "task" | "standard task" => IssueTypeSemantics {
+            icon: IssueTypeIcon::App(AppIconName::ListChecks),
+            tone: IssueTypeTone::Green,
+        },
+        "bug" | "defect" => IssueTypeSemantics {
+            icon: IssueTypeIcon::App(AppIconName::Bug),
+            tone: IssueTypeTone::Red,
+        },
+        "initiative" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::LayoutDashboard),
+            tone: IssueTypeTone::Neutral,
+        },
+        "sub-task" | "subtask" | "sub task" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::PanelBottom),
+            tone: IssueTypeTone::Neutral,
+        },
+        "epic" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::Folder),
+            tone: IssueTypeTone::Purple,
+        },
+        "spike" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::SquareTerminal),
+            tone: IssueTypeTone::Neutral,
+        },
+        "improvement" | "new feature" | "feature" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::Plus),
+            tone: IssueTypeTone::Neutral,
+        },
+        "incident" | "problem" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::TriangleAlert),
+            tone: IssueTypeTone::Neutral,
+        },
+        "change" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::Settings),
+            tone: IssueTypeTone::Neutral,
+        },
+        "service request" | "service-request" => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::Inbox),
+            tone: IssueTypeTone::Neutral,
+        },
+        _ => IssueTypeSemantics {
+            icon: IssueTypeIcon::Component(IconName::File),
+            tone: IssueTypeTone::Neutral,
+        },
     }
 }
 
@@ -119,45 +180,90 @@ mod tests {
 
     #[test]
     fn maps_every_supported_issue_type_case_insensitively() {
-        assert_eq!(path(issue_type_icon(" Story ")), "icons/book-open-text.svg");
         assert_eq!(
-            path(issue_type_icon("INITIATIVE")),
+            path(issue_type_semantics(" Story ").icon),
+            "icons/book-open-text.svg"
+        );
+        assert_eq!(
+            path(issue_type_semantics("INITIATIVE").icon),
             "icons/layout-dashboard.svg"
         );
-        assert_eq!(path(issue_type_icon("Task")), "icons/list-checks.svg");
-        assert_eq!(path(issue_type_icon("sub-TASK")), "icons/panel-bottom.svg");
-        assert_eq!(path(issue_type_icon("Bug")), "icons/bug.svg");
-        assert_eq!(path(issue_type_icon("epic")), "icons/folder.svg");
+        assert_eq!(
+            path(issue_type_semantics("Task").icon),
+            "icons/list-checks.svg"
+        );
+        assert_eq!(
+            path(issue_type_semantics("sub-TASK").icon),
+            "icons/panel-bottom.svg"
+        );
+        assert_eq!(path(issue_type_semantics("Bug").icon), "icons/bug.svg");
+        assert_eq!(path(issue_type_semantics("epic").icon), "icons/folder.svg");
     }
 
     #[test]
     fn maps_common_jira_and_jsm_aliases() {
         for label in ["task", "standard task"] {
-            assert_eq!(path(issue_type_icon(label)), "icons/list-checks.svg");
+            assert_eq!(
+                path(issue_type_semantics(label).icon),
+                "icons/list-checks.svg"
+            );
         }
         for label in ["subtask", "sub task", "sub-task"] {
-            assert_eq!(path(issue_type_icon(label)), "icons/panel-bottom.svg");
+            assert_eq!(
+                path(issue_type_semantics(label).icon),
+                "icons/panel-bottom.svg"
+            );
         }
         for label in ["bug", "defect"] {
-            assert_eq!(path(issue_type_icon(label)), "icons/bug.svg");
+            assert_eq!(path(issue_type_semantics(label).icon), "icons/bug.svg");
         }
         for label in ["incident", "problem"] {
-            assert_eq!(path(issue_type_icon(label)), "icons/triangle-alert.svg");
+            assert_eq!(
+                path(issue_type_semantics(label).icon),
+                "icons/triangle-alert.svg"
+            );
         }
-        assert_eq!(path(issue_type_icon("spike")), "icons/square-terminal.svg");
+        assert_eq!(
+            path(issue_type_semantics("spike").icon),
+            "icons/square-terminal.svg"
+        );
         for label in ["improvement", "new feature", "feature"] {
-            assert_eq!(path(issue_type_icon(label)), "icons/plus.svg");
+            assert_eq!(path(issue_type_semantics(label).icon), "icons/plus.svg");
         }
-        assert_eq!(path(issue_type_icon("change")), "icons/settings.svg");
+        assert_eq!(
+            path(issue_type_semantics("change").icon),
+            "icons/settings.svg"
+        );
         for label in ["service request", "service-request"] {
-            assert_eq!(path(issue_type_icon(label)), "icons/inbox.svg");
+            assert_eq!(path(issue_type_semantics(label).icon), "icons/inbox.svg");
         }
     }
 
     #[test]
     fn unknown_issue_types_use_a_neutral_file_icon() {
-        assert_eq!(path(issue_type_icon("custom type")), "icons/file.svg");
-        assert_eq!(path(issue_type_icon("")), "icons/file.svg");
+        assert_eq!(
+            path(issue_type_semantics("custom type").icon),
+            "icons/file.svg"
+        );
+        assert_eq!(path(issue_type_semantics("").icon), "icons/file.svg");
+    }
+
+    #[test]
+    fn known_issue_types_use_the_requested_color_tones() {
+        assert_eq!(issue_type_semantics("Bug").tone, IssueTypeTone::Red);
+        assert_eq!(
+            issue_type_semantics("standard task").tone,
+            IssueTypeTone::Green
+        );
+        assert_eq!(issue_type_semantics(" story ").tone, IssueTypeTone::Blue);
+        assert_eq!(issue_type_semantics("EPIC").tone, IssueTypeTone::Purple);
+    }
+
+    #[test]
+    fn unknown_and_uncolored_issue_types_remain_neutral() {
+        for label in ["custom type", "Initiative", "sub-task", "Spike", ""] {
+            assert_eq!(issue_type_semantics(label).tone, IssueTypeTone::Neutral);
+        }
     }
 
     #[test]

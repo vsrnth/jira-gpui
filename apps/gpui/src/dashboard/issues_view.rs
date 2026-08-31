@@ -9,6 +9,19 @@ fn issue_row_accessible_label(
     format!("Open {key} ({issue_type}): {summary} · Priority: {priority}")
 }
 
+/// Resolve a semantic issue-type tone through the active theme's contrast-aware base colors.
+fn issue_type_color_for_theme(tone: IssueTypeTone, theme: &gpui_component::Theme) -> gpui::Hsla {
+    match tone {
+        IssueTypeTone::Red => theme.red,
+        IssueTypeTone::Green => theme.green,
+        IssueTypeTone::Blue => theme.blue,
+        // gpui-component's magenta theme slot is purple-600 in light mode and purple-400 in
+        // dark mode, keeping the Epic treatment vivid while retaining foreground contrast.
+        IssueTypeTone::Purple => theme.magenta,
+        IssueTypeTone::Neutral => theme.muted_foreground,
+    }
+}
+
 impl Dashboard {
     pub(super) fn issue_key_label(
         &self,
@@ -32,19 +45,20 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = label.into();
+        let type_semantics = issue_type_semantics(&label);
         h_flex()
             .id(format!("issue-type-{}", id.into()))
             .min_w_0()
             .gap_1()
             .text_xs()
-            .text_color(cx.theme().muted_foreground)
+            .text_color(self.issue_type_color(type_semantics.tone, cx))
             .role(gpui::accesskit::Role::TextRun)
             .aria_label(format!("Issue type: {label}"))
             .child(
-                Icon::new(issue_type_icon(&label))
+                Icon::new(type_semantics.icon)
                     .size_4()
                     .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground),
+                    .text_color(self.issue_type_color(type_semantics.tone, cx)),
             )
             .child(div().min_w_0().truncate().child(label))
             .into_any_element()
@@ -80,6 +94,14 @@ impl Dashboard {
             PriorityTone::Neutral | PriorityTone::Unknown => cx.theme().muted_foreground,
             PriorityTone::Low | PriorityTone::Minimal => cx.theme().link,
         }
+    }
+
+    pub(super) fn issue_type_color(
+        &self,
+        tone: IssueTypeTone,
+        cx: &mut Context<Self>,
+    ) -> gpui::Hsla {
+        issue_type_color_for_theme(tone, cx.theme())
     }
 
     pub(super) fn render_issues(
@@ -620,7 +642,33 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::issue_row_accessible_label;
+    use super::{issue_row_accessible_label, issue_type_color_for_theme};
+    use crate::semantic_icons::IssueTypeTone;
+
+    #[test]
+    fn issue_type_tones_resolve_to_theme_colors() {
+        let theme = gpui_component::Theme::default();
+        assert_eq!(
+            issue_type_color_for_theme(IssueTypeTone::Red, &theme),
+            theme.red
+        );
+        assert_eq!(
+            issue_type_color_for_theme(IssueTypeTone::Green, &theme),
+            theme.green
+        );
+        assert_eq!(
+            issue_type_color_for_theme(IssueTypeTone::Blue, &theme),
+            theme.blue
+        );
+        assert_eq!(
+            issue_type_color_for_theme(IssueTypeTone::Purple, &theme),
+            theme.magenta
+        );
+        assert_eq!(
+            issue_type_color_for_theme(IssueTypeTone::Neutral, &theme),
+            theme.muted_foreground
+        );
+    }
 
     #[test]
     fn issue_row_accessible_label_retains_identity_and_priority() {
