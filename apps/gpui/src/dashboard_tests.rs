@@ -2123,6 +2123,78 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
 }
 
 #[gpui::test]
+fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let issue = sample_issues().into_iter().next().expect("sample issue");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
+    let window = cx.open_window(gpui::size(px(1_200.), px(1_200.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.ensure_comment_input(window, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let detail = visual
+        .debug_bounds("issue-detail")
+        .expect("issue detail should be laid out");
+    let composer = visual
+        .debug_bounds("comment-composer")
+        .expect("comment composer should be laid out");
+    let description = visual
+        .debug_bounds("issue-detail-description")
+        .expect("issue description should be laid out");
+    let actions = visual
+        .debug_bounds("comment-composer-actions")
+        .expect("comment action row should be laid out");
+    let post_comment = visual
+        .debug_bounds("post-comment")
+        .expect("post comment button should be laid out");
+
+    assert!(post_comment.size.width > px(0.));
+    assert!(post_comment.size.height > px(0.));
+    assert!(
+        post_comment.size.width < composer.size.width * 0.6,
+        "idle post-comment should retain intrinsic width: button={post_comment:?}, composer={composer:?}"
+    );
+    assert!(
+        actions.origin.x >= composer.origin.x
+            && actions.origin.y >= composer.origin.y
+            && actions.origin.x + actions.size.width
+                <= composer.origin.x + composer.size.width + px(1.)
+            && actions.origin.y + actions.size.height
+                <= composer.origin.y + composer.size.height + px(1.),
+        "comment action row should remain inside composer: actions={actions:?}, composer={composer:?}"
+    );
+    assert!(
+        post_comment.origin.x >= actions.origin.x
+            && post_comment.origin.y >= actions.origin.y
+            && post_comment.origin.x + post_comment.size.width
+                <= actions.origin.x + actions.size.width + px(1.)
+            && post_comment.origin.y + post_comment.size.height
+                <= actions.origin.y + actions.size.height + px(1.),
+        "post comment should remain inside action row: button={post_comment:?}, actions={actions:?}"
+    );
+    assert!(
+        composer.origin.x >= detail.origin.x
+            && composer.origin.y >= detail.origin.y
+            && composer.origin.x + composer.size.width
+                <= detail.origin.x + detail.size.width + px(1.)
+            && composer.origin.y + composer.size.height
+                <= detail.origin.y + detail.size.height + px(1.),
+        "comment composer should remain inside issue detail: composer={composer:?}, detail={detail:?}"
+    );
+    assert!(
+        composer.origin.y >= description.origin.y + description.size.height,
+        "comment composer should not overlap the description: description={description:?}, composer={composer:?}"
+    );
+}
+
+#[gpui::test]
 fn mobile_remote_lookup_loading_and_error_states_stay_visible_in_the_list(
     cx: &mut gpui::TestAppContext,
 ) {

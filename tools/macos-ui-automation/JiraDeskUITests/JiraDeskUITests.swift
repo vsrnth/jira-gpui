@@ -518,6 +518,28 @@ final class JiraDeskUITests: XCTestCase {
             app.descendants(matching: .any)["issue-detail"],
             "issue-detail"
         )
+        let commentComposer = try require(
+            app.descendants(matching: .any)["comment-composer"],
+            "comment-composer"
+        )
+        let commentActions = try require(
+            app.descendants(matching: .any)["comment-composer-actions"],
+            "comment-composer-actions"
+        )
+        let postComment = try require(app.buttons["post-comment"], "post-comment")
+        XCTAssertGreaterThan(postComment.frame.width, 0, "Post comment should have visible width")
+        XCTAssertGreaterThan(postComment.frame.height, 0, "Post comment should have visible height")
+        XCTAssertLessThan(
+            postComment.frame.width,
+            commentComposer.frame.width * 0.6,
+            "Post comment should retain intrinsic compact width"
+        )
+        XCTAssertTrue(commentComposer.frame.contains(commentActions.frame), "comment actions should remain inside composer")
+        XCTAssertTrue(commentActions.frame.contains(postComment.frame), "Post comment should remain inside its action row")
+        XCTAssertTrue(
+            commentComposer.frame.width.isFinite && commentComposer.frame.height.isFinite,
+            "comment composer frame should remain finite even when below the rich-content viewport"
+        )
         let richLinkNodes = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-link-")
         )

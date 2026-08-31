@@ -390,6 +390,7 @@ impl Dashboard {
             .id("issue-detail")
             .flex_1()
             .min_w_0()
+            .debug_selector(|| "issue-detail".to_owned())
             .accessibility_id("issue-detail")
             .role(gpui::accesskit::Role::Group)
             .aria_label(format!("Issue detail for {}", issue.key))
@@ -1342,6 +1343,11 @@ impl Dashboard {
         let posting = self.comment_flow.is_posting();
         let editing_confirmed = self.comment_flow.is_confirming();
         let mut composer = v_flex()
+            .id("comment-composer")
+            .debug_selector(|| "comment-composer".to_owned())
+            .accessibility_id("comment-composer")
+            .role(gpui::accesskit::Role::Group)
+            .aria_label("Comment composer")
             .min_w_0()
             .gap_2()
             .child(div().text_sm().font_semibold().child("Add comment"))
@@ -1380,11 +1386,20 @@ impl Dashboard {
                 )
                 .child(
                     h_flex()
+                        .id("comment-composer-actions")
+                        .debug_selector(|| "comment-composer-actions".to_owned())
+                        .accessibility_id("comment-composer-actions")
+                        .role(gpui::accesskit::Role::Group)
+                        .aria_label("Comment actions")
+                        .w_full()
+                        .when(!layout.is_mobile(), |this| this.justify_end())
                         .when(layout.is_mobile(), |this| this.flex_col())
                         .gap_2()
                         .child(
                             Button::new("post-comment-now")
                                 .primary()
+                                .small()
+                                .compact()
                                 .label("Post now")
                                 .on_click(
                                     cx.listener(|this, _, window, cx| {
@@ -1392,9 +1407,15 @@ impl Dashboard {
                                     }),
                                 ),
                         )
-                        .child(Button::new("cancel-comment").label("Cancel").on_click(
-                            cx.listener(|this, _, _, cx| this.cancel_comment_confirmation(cx)),
-                        )),
+                        .child(
+                            Button::new("cancel-comment")
+                                .small()
+                                .compact()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_comment_confirmation(cx)
+                                })),
+                        ),
                 );
         } else if posting {
             composer = composer.child(
@@ -1413,11 +1434,22 @@ impl Dashboard {
                 )
                 .child(
                     h_flex()
+                        .id("comment-composer-actions")
+                        .debug_selector(|| "comment-composer-actions".to_owned())
+                        .accessibility_id("comment-composer-actions")
+                        .role(gpui::accesskit::Role::Group)
+                        .aria_label("Comment actions")
+                        .w_full()
+                        .when(!layout.is_mobile(), |this| this.justify_end())
                         .when(layout.is_mobile(), |this| this.flex_col())
                         .gap_2()
                         .child(
                             Button::new("post-comment")
                                 .primary()
+                                .small()
+                                .compact()
+                                .debug_selector(|| "post-comment".to_owned())
+                                .accessibility_id("post-comment")
                                 .label("Post comment")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.begin_comment_confirmation(cx)
@@ -1428,6 +1460,7 @@ impl Dashboard {
                                 Button::new("refresh-comments-after-unknown")
                                     .secondary()
                                     .outline()
+                                    .small()
                                     .compact()
                                     .label("Refresh comments")
                                     .on_click(
@@ -1438,10 +1471,28 @@ impl Dashboard {
                 );
         } else {
             composer = composer.child(
-                Button::new("post-comment")
-                    .primary()
-                    .label("Post comment")
-                    .on_click(cx.listener(|this, _, _, cx| this.begin_comment_confirmation(cx))),
+                h_flex()
+                    .id("comment-composer-actions")
+                    .debug_selector(|| "comment-composer-actions".to_owned())
+                    .accessibility_id("comment-composer-actions")
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label("Comment actions")
+                    .w_full()
+                    .when(!layout.is_mobile(), |this| this.justify_end())
+                    .when(layout.is_mobile(), |this| this.flex_col())
+                    .gap_2()
+                    .child(
+                        Button::new("post-comment")
+                            .primary()
+                            .small()
+                            .compact()
+                            .debug_selector(|| "post-comment".to_owned())
+                            .accessibility_id("post-comment")
+                            .label("Post comment")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.begin_comment_confirmation(cx)),
+                            ),
+                    ),
             );
         }
         composer.into_any_element()
