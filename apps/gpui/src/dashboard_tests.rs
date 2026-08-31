@@ -689,7 +689,7 @@ fn long_sync_status_stays_bounded_beside_desktop_content_at_short_height(
 ) {
     cx.update(gpui_component::init);
     let mut dashboard = Dashboard::from_sample_data();
-    dashboard.sync_message = "Refresh complete · 192 issues · 0 new local updates · 0 local updates loaded · desktop notifications: 0 accepted by desktop service, 0 unavailable · baseline · additional diagnostic context that must remain inside the sidebar".to_owned();
+    dashboard.sync_message = "Updated · 192 issues · 3 new updates".to_owned();
     let window = cx.open_window(gpui::size(px(1_100.), px(160.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -716,7 +716,7 @@ fn sidebar_sync_message_visibility_only_hides_redundant_preview_copy() {
     ));
     for message in [
         "Opening local cache…",
-        "Refresh complete · 2 issues",
+        "Updated · 2 issues",
         "Startup error · unavailable",
     ] {
         assert!(should_render_sidebar_sync_message(message));
@@ -727,7 +727,7 @@ fn sidebar_sync_message_visibility_only_hides_redundant_preview_copy() {
 fn long_sync_status_stays_above_mobile_content_at_short_height(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
     let mut dashboard = Dashboard::from_sample_data();
-    dashboard.sync_message = "Refresh complete · 192 issues · 0 new local updates · 0 local updates loaded · desktop notifications: 0 accepted by desktop service, 0 unavailable · baseline · additional diagnostic context that must remain inside the status region".to_owned();
+    dashboard.sync_message = "Updated · 192 issues · 3 new updates".to_owned();
     let window = cx.open_window(gpui::size(px(320.), px(160.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -903,12 +903,12 @@ fn refresh_notification_distinguishes_zero_new_updates() {
 }
 
 #[test]
-fn refresh_status_uses_submission_wording_for_desktop_notifications() {
+fn refresh_status_uses_bounded_update_wording_without_notification_counts() {
     let result = refresh_result_with_inserted_events(1);
 
     let message = refresh_complete_message(&result);
-    assert!(message.contains("accepted by desktop service"));
-    assert!(!message.contains("delivered"));
+    assert_eq!(message, "Updated · 5 issues · 1 new update");
+    assert!(!message.contains("desktop notification"));
 }
 
 #[test]
@@ -918,23 +918,17 @@ fn refresh_status_omits_zero_counts_and_internal_details() {
     result.outcome.notifications_delivered = 0;
     result.outcome.notification_failures = 0;
 
-    assert_eq!(
-        refresh_complete_message(&result),
-        "Refresh complete · 5 issues"
-    );
+    assert_eq!(refresh_complete_message(&result), "Updated · 5 issues");
 }
 
 #[test]
-fn refresh_status_reports_notification_failures_without_claiming_delivery() {
+fn refresh_status_ignores_notification_failures_in_primary_copy() {
     let mut result = refresh_result_with_inserted_events(0);
     result.outcome.notification_failures = 2;
 
     let message = refresh_complete_message(&result);
-    assert_eq!(
-        message,
-        "Refresh complete · 5 issues · 2 desktop notifications unavailable"
-    );
-    assert!(!message.contains("delivered"));
+    assert_eq!(message, "Updated · 5 issues");
+    assert!(!message.contains("unavailable"));
 }
 
 #[test]
@@ -946,7 +940,7 @@ fn refresh_status_uses_singular_nouns_for_single_counts() {
 
     assert_eq!(
         refresh_complete_message(&result),
-        "Refresh complete · 1 issue · 1 new local update · 1 desktop notification accepted by desktop service · 1 desktop notification unavailable"
+        "Updated · 1 issue · 1 new update"
     );
 }
 
@@ -958,8 +952,16 @@ fn refresh_status_uses_plural_nouns_for_multiple_counts() {
 
     assert_eq!(
         refresh_complete_message(&result),
-        "Refresh complete · 5 issues · 2 new local updates · 2 desktop notifications accepted by desktop service · 2 desktop notifications unavailable"
+        "Updated · 5 issues · 2 new updates"
     );
+}
+
+#[test]
+fn refresh_status_uses_plural_noun_for_zero_issues() {
+    let mut result = refresh_result_with_inserted_events(0);
+    result.cached.issues.clear();
+
+    assert_eq!(refresh_complete_message(&result), "Updated · 0 issues");
 }
 
 #[test]

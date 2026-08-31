@@ -142,7 +142,7 @@ fn should_close_status_filter_after_change(
 
 fn refresh_complete_message(result: &RefreshResult) -> String {
     let mut parts = vec![format!(
-        "Refresh complete · {} {}",
+        "Updated · {} {}",
         result.cached.issues.len(),
         pluralize(result.cached.issues.len(), "issue", "issues")
     )];
@@ -150,33 +150,7 @@ fn refresh_complete_message(result: &RefreshResult) -> String {
         parts.push(format!(
             "{} {}",
             result.outcome.events_inserted,
-            pluralize(
-                result.outcome.events_inserted,
-                "new local update",
-                "new local updates"
-            )
-        ));
-    }
-    if result.outcome.notifications_delivered > 0 {
-        parts.push(format!(
-            "{} desktop notification{} accepted by desktop service",
-            result.outcome.notifications_delivered,
-            if result.outcome.notifications_delivered == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ));
-    }
-    if result.outcome.notification_failures > 0 {
-        parts.push(format!(
-            "{} desktop notification{} unavailable",
-            result.outcome.notification_failures,
-            if result.outcome.notification_failures == 1 {
-                ""
-            } else {
-                "s"
-            }
+            pluralize(result.outcome.events_inserted, "new update", "new updates")
         ));
     }
     parts.join(" · ")
