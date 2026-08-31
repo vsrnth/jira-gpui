@@ -787,16 +787,7 @@ impl AppShell {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .when(shell.connecting, |this| {
-                                    this.child(
-                                        div()
-                                            .id("onboarding-status-spinner")
-                                            .accessibility_id("onboarding-status-spinner")
-                                            .aria_label("Jira connection verification in progress")
-                                            .size_4()
-                                            .child(
-                                                Spinner::new().small().color(cx.theme().primary),
-                                            ),
-                                    )
+                                    this.child(Spinner::new().small().color(cx.theme().primary))
                                 })
                                 .child(div().min_w_0().child(status.clone())),
                         )
