@@ -50,8 +50,97 @@ final class JiraDeskUITests: XCTestCase {
         }
     }
 
+    func testOnboardingBusy() throws {
+        try launchFixture(scenario: "onboarding-busy")
+
+        let body = try require(
+            app.descendants(matching: .any)["onboarding-connect-dialog-body"],
+            "onboarding-connect-dialog-body"
+        )
+        let status = try require(
+            app.descendants(matching: .any)["onboarding-status"],
+            "onboarding-status"
+        )
+        let statusSemanticText = [status.label, status.title, status.value as? String ?? ""]
+            .joined(separator: " ")
+        XCTAssertTrue(
+            statusSemanticText.contains("Verifying Jira credentials and configuring your Jira connection…"),
+            "busy onboarding should expose the stable verification progress copy"
+        )
+        XCTAssertTrue(body.frame.contains(status.frame), "progress status should be inside the dialog body")
+        XCTAssertGreaterThan(status.frame.width, 240, "progress status should have a meaningful bounded width")
+        XCTAssertGreaterThan(status.frame.height, 20, "progress status should have a meaningful bounded height")
+        let spinner = try require(
+            app.descendants(matching: .any)["onboarding-status-spinner"],
+            "onboarding-status-spinner"
+        )
+        let spinnerSemanticText = [spinner.label, spinner.title, spinner.value as? String ?? ""]
+            .joined(separator: " ")
+        XCTAssertTrue(
+            spinnerSemanticText.contains("Jira connection verification in progress"),
+            "busy onboarding should expose the spinner's stable progress identity"
+        )
+        XCTAssertTrue(status.frame.contains(spinner.frame), "spinner should be inside the progress status region")
+        XCTAssertGreaterThan(spinner.frame.width, 8, "spinner should have bounded visible width")
+        XCTAssertGreaterThan(spinner.frame.height, 8, "spinner should have bounded visible height")
+
+        for identifier in [
+            "onboarding-jira-site",
+            "onboarding-atlassian-email",
+            "onboarding-api-token",
+            "remember-jira-login",
+        ] {
+            let control = try require(app.descendants(matching: .any)[identifier], identifier)
+            XCTAssertFalse(control.isEnabled, "busy onboarding control must be disabled: \(identifier)")
+            XCTAssertTrue(body.frame.contains(control.frame), "control should remain inside the dialog body: \(identifier)")
+        }
+        for identifier in [
+            "onboarding-connect-dialog-cancel",
+            "onboarding-connect-dialog-submit",
+        ] {
+            let control = try require(app.descendants(matching: .any)[identifier], identifier)
+            XCTAssertFalse(control.isEnabled, "busy onboarding action must be disabled: \(identifier)")
+            XCTAssertGreaterThan(control.frame.width, 80, "busy onboarding action should have bounded width: \(identifier)")
+            XCTAssertGreaterThan(control.frame.height, 20, "busy onboarding action should have bounded height: \(identifier)")
+        }
+
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "onboarding-busy-final"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
     func testIssues() throws {
         try launchFixture(scenario: "issues")
+        for (key, expectedType) in [
+            ("DESK-184", "Story"),
+            ("DESK-179", "Task"),
+            ("DESK-176", "Bug"),
+            ("DESK-171", "Epic"),
+        ] {
+            let row = try require(
+                app.descendants(matching: .any)["issue-row-\(key)"],
+                "issue-row-\(key)"
+            )
+            let type = try require(
+                app.descendants(matching: .any)["issue-type-\(key)"],
+                "issue-type-\(key)"
+            )
+            let typeSemanticText = [type.label, type.title, type.value as? String ?? ""]
+                .joined(separator: " ")
+            XCTAssertTrue(
+                typeSemanticText.contains("Issue type: \(expectedType)"),
+                "\(key) should expose its exact issue-type identity"
+            )
+            XCTAssertTrue(row.frame.contains(type.frame), "\(key) issue type should stay inside its row bounds")
+            XCTAssertGreaterThan(type.frame.width, 20, "\(key) issue type should have visible bounded width")
+            XCTAssertGreaterThan(type.frame.height, 10, "\(key) issue type should have visible bounded height")
+            XCTAssertLessThanOrEqual(
+                abs(type.frame.minX - row.frame.minX),
+                row.frame.width / 2,
+                "\(key) issue type should remain aligned with its row content"
+            )
+        }
         let storyRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184")
         XCTAssertTrue(storyRow.title.contains("(Story)"), "known Story row should retain its issue-type identity")
         let row = try require(app.descendants(matching: .any)["issue-row-DESK-179"], "issue-row-DESK-179")
@@ -182,6 +271,11 @@ final class JiraDeskUITests: XCTestCase {
             "reopening Details should restore its expanded height"
         )
         XCTAssertTrue(detailsButton.exists, "Details trigger should remain discoverable when reopened")
+
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "issues-issue-types-final"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
     func testRichContent() throws {

@@ -11,6 +11,8 @@ use anyhow::{Result, bail};
 pub enum UiAutomationScenario {
     /// The first-run connection form, with the dialog initially closed.
     Onboarding,
+    /// The first-run connection form with the production verification dialog busy and inert.
+    OnboardingBusy,
     /// The local Jira issue list and detail view.
     Issues,
     /// Rich issue content with a preloaded image fixture.
@@ -28,6 +30,7 @@ impl UiAutomationScenario {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Onboarding => "onboarding",
+            Self::OnboardingBusy => "onboarding-busy",
             Self::Issues => "issues",
             Self::RichContent => "rich-content",
             Self::Updates => "updates",
@@ -40,13 +43,14 @@ impl UiAutomationScenario {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "onboarding" => Ok(Self::Onboarding),
+            "onboarding-busy" => Ok(Self::OnboardingBusy),
             "issues" => Ok(Self::Issues),
             "rich-content" => Ok(Self::RichContent),
             "updates" => Ok(Self::Updates),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, issues, rich-content, updates, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, updates, team, settings"
             ),
         }
     }
@@ -62,9 +66,10 @@ pub enum Command {
 }
 
 /// Text printed by `--help`.
-pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | issues | rich-content | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
+pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
 
-const SCENARIOS: &str = "onboarding, issues, rich-content, updates, team, settings";
+const SCENARIOS: &str =
+    "onboarding, onboarding-busy, issues, rich-content, updates, team, settings";
 
 fn next_value(args: &mut impl Iterator<Item = String>) -> Result<String> {
     let value = args
@@ -174,7 +179,9 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                         cx.new(|_| dashboard)
                     };
                     let dashboard = match scenario {
-                        UiAutomationScenario::Onboarding => None,
+                        UiAutomationScenario::Onboarding | UiAutomationScenario::OnboardingBusy => {
+                            None
+                        }
                         UiAutomationScenario::Issues => Some(
                             Dashboard::from_sample_data_for_section(SampleSection::Issues),
                         ),
@@ -195,7 +202,17 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                     let shell = cx.new(|cx| {
                         AppShell::new_for_ui_lab(dashboard, ThemeMode::Light, window, cx)
                     });
-                    cx.new(|cx| Root::new(shell, window, cx))
+                    let root = cx.new(|cx| Root::new(shell.clone(), window, cx));
+                    if scenario == UiAutomationScenario::OnboardingBusy {
+                        // The dialog layer is owned by the production Root. Defer until this root
+                        // is installed, then invoke only the inert busy-state hook.
+                        window.defer(cx, move |window, cx| {
+                            shell.update(cx, |shell, cx| {
+                                shell.open_connection_dialog_for_ui_automation_busy(window, cx);
+                            });
+                        });
+                    }
+                    root
                 })
                 .map(|_| ())
                 .map_err(|error| anyhow::anyhow!("failed to open automation host window: {error}"))
@@ -221,6 +238,7 @@ mod tests {
     fn parser_accepts_only_the_supported_scenario_form() {
         for (name, scenario) in [
             ("onboarding", UiAutomationScenario::Onboarding),
+            ("onboarding-busy", UiAutomationScenario::OnboardingBusy),
             ("issues", UiAutomationScenario::Issues),
             ("rich-content", UiAutomationScenario::RichContent),
             ("updates", UiAutomationScenario::Updates),

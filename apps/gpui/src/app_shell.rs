@@ -757,6 +757,7 @@ impl AppShell {
                                     cx.notify();
                                 });
                             })
+                            .accessibility_id("remember-jira-login")
                             .aria_label(REMEMBER_CREDENTIALS_LABEL)
                             .text_sm()
                             .child(
@@ -786,7 +787,16 @@ impl AppShell {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .when(shell.connecting, |this| {
-                                    this.child(Spinner::new().small().color(cx.theme().primary))
+                                    this.child(
+                                        div()
+                                            .id("onboarding-status-spinner")
+                                            .accessibility_id("onboarding-status-spinner")
+                                            .aria_label("Jira connection verification in progress")
+                                            .size_4()
+                                            .child(
+                                                Spinner::new().small().color(cx.theme().primary),
+                                            ),
+                                    )
                                 })
                                 .child(div().min_w_0().child(status.clone())),
                         )
@@ -880,6 +890,20 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_connection_dialog(window, cx);
+    }
+
+    /// Opens the production connection dialog in a deterministic busy state for local
+    /// accessibility automation. This only mutates the inert UI-lab shell; it never starts the
+    /// connection path or any asynchronous work.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn open_connection_dialog_for_ui_automation_busy(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.connecting = true;
+        self.connection_status = Some(VERIFYING_CREDENTIALS_STATUS.to_owned());
         self.open_connection_dialog(window, cx);
     }
 
