@@ -73,30 +73,97 @@ final class JiraDeskUITests: XCTestCase {
         // Spinner is visual-only; its accessible progress semantics intentionally live on the
         // parent Status node, which keeps the status copy stable even when AX merges children.
 
-        for identifier in [
-            "onboarding-jira-site",
-            "onboarding-atlassian-email",
-            "onboarding-api-token",
-            "remember-jira-login",
+        let site = try require(
+            app.descendants(matching: .any)["onboarding-jira-site"],
+            "onboarding-jira-site"
+        )
+        let email = try require(
+            app.descendants(matching: .any)["onboarding-atlassian-email"],
+            "onboarding-atlassian-email"
+        )
+        let token = try require(
+            app.descendants(matching: .any)["onboarding-api-token"],
+            "onboarding-api-token"
+        )
+        let remember = try require(
+            app.descendants(matching: .any)["remember-jira-login"],
+            "remember-jira-login"
+        )
+        let initialSite = axValue(site)
+        let initialEmail = axValue(email)
+        let initialToken = axValue(token)
+        let initialRemember = axValue(remember)
+
+        for (control, identifier) in [
+            (site, "onboarding-jira-site"),
+            (email, "onboarding-atlassian-email"),
+            (token, "onboarding-api-token"),
         ] {
-            let control = try require(app.descendants(matching: .any)[identifier], identifier)
-            XCTAssertFalse(control.isEnabled, "busy onboarding control must be disabled: \(identifier)")
             XCTAssertTrue(body.frame.contains(control.frame), "control should remain inside the dialog body: \(identifier)")
+            XCTAssertGreaterThan(control.frame.width, 200, "busy onboarding field should have bounded width: \(identifier)")
+            XCTAssertGreaterThan(control.frame.height, 20, "busy onboarding field should have bounded height: \(identifier)")
+            control.click()
+            app.typeKey("x", modifierFlags: [])
         }
-        for identifier in [
-            "onboarding-connect-dialog-cancel",
-            "onboarding-connect-dialog-submit",
-        ] {
-            let control = try require(app.descendants(matching: .any)[identifier], identifier)
-            XCTAssertFalse(control.isEnabled, "busy onboarding action must be disabled: \(identifier)")
-            XCTAssertGreaterThan(control.frame.width, 80, "busy onboarding action should have bounded width: \(identifier)")
-            XCTAssertGreaterThan(control.frame.height, 20, "busy onboarding action should have bounded height: \(identifier)")
+        XCTAssertEqual(axValue(site), initialSite, "busy Jira site field must not mutate")
+        XCTAssertEqual(axValue(email), initialEmail, "busy Atlassian email field must not mutate")
+        XCTAssertEqual(axValue(token), initialToken, "busy API token field must not mutate")
+
+        XCTAssertTrue(body.frame.contains(remember.frame), "remember control should remain inside the dialog body")
+        XCTAssertGreaterThan(remember.frame.width, 180, "remember control should have bounded width")
+        XCTAssertGreaterThan(remember.frame.height, 20, "remember control should have bounded height")
+        remember.click()
+        XCTAssertEqual(axValue(remember), initialRemember, "busy remember control must not mutate")
+
+        let assertBusyDialogStillPresent = {
+            let currentStatus = self.app.descendants(matching: .any)["onboarding-status"]
+            XCTAssertTrue(currentStatus.exists, "busy status must remain after an inert action")
+            let currentStatusText = [currentStatus.label, currentStatus.title, self.axValue(currentStatus)]
+                .joined(separator: " ")
+            XCTAssertTrue(
+                currentStatusText.contains("Verifying Jira credentials and configuring your Jira connection…"),
+                "busy status copy must remain after an inert action"
+            )
+            XCTAssertTrue(body.exists, "busy connection dialog must remain after an inert action")
         }
+
+        let cancel = try require(
+            app.descendants(matching: .any)["onboarding-connect-dialog-cancel"],
+            "onboarding-connect-dialog-cancel"
+        )
+        XCTAssertGreaterThan(cancel.frame.width, 80, "busy Cancel action should have bounded width")
+        XCTAssertGreaterThan(cancel.frame.height, 20, "busy Cancel action should have bounded height")
+        cancel.click()
+        assertBusyDialogStillPresent()
+
+        let submit = try require(
+            app.descendants(matching: .any)["onboarding-connect-dialog-submit"],
+            "onboarding-connect-dialog-submit"
+        )
+        XCTAssertGreaterThan(submit.frame.width, 80, "busy submit action should have bounded width")
+        XCTAssertGreaterThan(submit.frame.height, 20, "busy submit action should have bounded height")
+        submit.click()
+        assertBusyDialogStillPresent()
+
+        XCTAssertFalse(
+            app.descendants(matching: .any)["dashboard-sidebar"].exists,
+            "busy inert actions must not open a dashboard"
+        )
 
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "onboarding-busy-final"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    private func axValue(_ element: XCUIElement) -> String {
+        if let value = element.value as? String {
+            return value
+        }
+        if let value = element.value as? NSNumber {
+            return value.stringValue
+        }
+        return element.value.map { String(describing: $0) } ?? ""
     }
 
     func testIssues() throws {
