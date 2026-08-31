@@ -50,6 +50,11 @@ branch; it is not a published release.
   Highest, up for High, equal bars for Medium, down for Low, and double-down
   for Lowest. The mapping is exposed in issue rows and detail surfaces with
   stable semantic priority identifiers (`1df6588`).
+- Text-only Jira ADF descriptions that contain an unambiguous Markdown block
+  construct (such as headings, lists, quotes, rules, or fenced code) now use
+  gpui-component's Markdown TextView so headings and inline code render without
+  literal delimiters. Canonical structured ADF remains on the native renderer,
+  preserving tables, media, mentions, statuses, and attachments (`b6e8812`).
 
 ### Changed
 
@@ -78,6 +83,9 @@ branch; it is not a published release.
   checks Jira; comment ADF image references resolve against the exact issue
   attachment catalog and image bytes reuse the persistent cache-first media
   path (`3b19107`).
+- Markdown links in the text-only fallback are inert, and Markdown/HTML image
+  syntax is rejected so Jira images continue to use the authenticated,
+  persistent attachment-cache path (`b6e8812`).
 
 ### Security
 
@@ -138,6 +146,13 @@ branch; it is not a published release.
   collapsed-sidebar centering, cached empty descriptions, comment image
   readiness, and the absence of a detail spinner on repeated issue selection
   (`6379508`).
+- Added bounded Rust coverage for conservative text-only ADF Markdown
+  detection, including rejection of ambiguous inline syntax and Markdown/HTML
+  images. Added deterministic local macOS rich-content assertions for rendered
+  headings, delimiter absence, and bounded Markdown description geometry
+  (`b6e8812`). The revised real-window scenario is pending execution after
+  three machine-level XCTest automation-mode initialization timeouts; this
+  does not supersede the earlier six-scenario passing run.
 - The consolidated local-only macOS XCUITest suite passed all six scenarios on
   2026-08-31 at `target/ui-automation/cache-priority-final-20260831`; each
   `xcresulttool` summary reported `1 passed, 0 failed`. Commit `295484c`

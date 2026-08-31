@@ -277,6 +277,24 @@ the earlier intermediate host-timeout attempts. Commit `295484c` stabilizes
 issue-row priority, empty-description cache, and collapsed workspace header
 accessibility semantics.
 
+### Markdown description revision pending local execution
+
+Commit `b6e8812` adds deterministic Rust coverage and a fixture-backed
+`rich-content` XCUITest for text-only Jira ADF descriptions that contain
+unambiguous Markdown block syntax. The assertions cover rendered headings,
+absence of visible `##`/backtick delimiters, bounded description geometry, and
+the existing structured ADF/media semantics. The XCUITest project self-test and
+bundle build passed on 2026-08-31, but three real-window attempts stopped before
+test execution with `Timed out while enabling automation mode`:
+
+- `target/ui-automation/markdown-description-final-20260831`
+- `target/ui-automation/markdown-description-retry-20260831`
+- `target/ui-automation/markdown-description-after-testmanager-reset-20260831`
+
+These are pending real-window execution results, not passing scenario results.
+They do not supersede the earlier six-scenario passing run at
+`target/ui-automation/cache-priority-final-20260831`.
+
 The complete six-scenario local suite passed on 2026-08-29. Its artifacts are
 retained under `target/ui-automation/final-20260829`:
 

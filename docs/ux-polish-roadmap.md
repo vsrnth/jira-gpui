@@ -112,6 +112,14 @@ interaction quality—not a mandate to copy visual treatments.
   successfully fetched empty description is persisted as loaded, so reopening
   it does not show a spinner; comment ADF images resolve through the exact
   issue attachment catalog and reuse persistent cache-first image bytes.
+- **Text-only ADF Markdown descriptions (`b6e8812`)** — conservatively route
+  structureless Jira ADF text containing unmistakable block Markdown through
+  gpui-component's Markdown TextView, while canonical ADF remains on the
+  native renderer. Markdown links remain inert and Markdown/HTML image syntax
+  is rejected so all Jira images stay on the authenticated persistent cache
+  path. Rust coverage passes; the revised local macOS rich-content scenario
+  has been added but still needs a successful real-window execution after
+  machine-level XCTest automation-mode initialization timeouts.
 - **Local regression coverage (`295484c`)** — the consolidated local macOS
   XCUITest suite passed all six scenarios on 2026-08-31 at
   `target/ui-automation/cache-priority-final-20260831`, with each
@@ -139,6 +147,17 @@ rerun of the complete six-scenario suite. Results are retained at
 `target/ui-automation/adf-accordion-pass2/rich-content/TestResults.xcresult`;
 the candidate image is
 `target/ui-automation/adf-accordion-20260830-pass2-rich-content/rich-content-candidate.png`.
+
+The text-only ADF Markdown revision (`b6e8812`) has deterministic Rust coverage
+and local-only XCUITest assertions for rendered headings, delimiter absence, and
+bounded description geometry. The XCUITest project self-test and bundle build
+passed on 2026-08-31, but three real-window `rich-content` attempts stopped
+before test execution with `Timed out while enabling automation mode`. The
+retained attempt roots are
+`target/ui-automation/markdown-description-final-20260831`,
+`target/ui-automation/markdown-description-retry-20260831`, and
+`target/ui-automation/markdown-description-after-testmanager-reset-20260831`.
+This pending revision does not supersede the earlier six-scenario passing run.
 
 ## Completed coherent commits
 
