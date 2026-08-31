@@ -101,6 +101,24 @@ interaction quality—not a mandate to copy visual treatments.
   ready image plus rule/table without a loading spinner or unsupported fallback.
   The reviewed five-case visual candidates are at
   `target/ui-lab/candidate-20260829-regressions`.
+- **Priority icon standardization (`1df6588`)** — all five Jira priority
+  levels use the corresponding double/single chevron or equal-bars icon in
+  issue rows and detail surfaces, with stable semantic identifiers and exact
+  labels for local UI verification.
+- **Collapsed sidebar alignment (`66071eb`)** — workspace and toggle controls
+  are centered within the collapsed rail and remain bounded away from the
+  divider.
+- **Persistent empty-detail and comment-image caching (`3b19107`)** — a
+  successfully fetched empty description is persisted as loaded, so reopening
+  it does not show a spinner; comment ADF images resolve through the exact
+  issue attachment catalog and reuse persistent cache-first image bytes.
+- **Local regression coverage (`6379508`)** — deterministic macOS assertions
+  cover the empty-detail cache path, comment image readiness, priority identity,
+  and collapsed-sidebar alignment. The bundle/self-test compiled on 2026-08-31;
+  host automation mode timed out before test bodies in both attempts, so no
+  passing real-window result is claimed. Diagnostics remain at
+  `target/ui-automation/cache-priority-20260831` and
+  `target/ui-automation/cache-priority-retry-20260831`.
 
 The ADF status follow-up was verified separately through the local
 `rich-content` scenario on 2026-08-30. It asserted exact native AX values for
@@ -191,6 +209,11 @@ the candidate image is
   cells while retaining safe malformed-content fallback behavior.
 - `319ddec` — verify blank-cell semantics and aligned table geometry in the
   local macOS rich-content fixture.
+- `1df6588` — standardize the five Jira priority icons and semantic labels.
+- `66071eb` — center collapsed-sidebar workspace and toggle controls.
+- `3b19107` — persist loaded empty details and cache comment ADF image bytes.
+- `6379508` — add local semantic regression coverage for cache, media,
+  priorities, and collapsed-sidebar alignment.
 
 ## Ordered plan
 
@@ -243,8 +266,20 @@ recorded in **Current status** above are complete and validated.
     malformed paragraph and structurally invalid empty-cell input on the safe
     fallback path. Rich-content-only local macOS verification passed on
     2026-08-31; it did not rerun the complete six-scenario suite.
+12. **Completed — Detail/media cache and Jira priority polish:** Persist the
+    loaded state of genuinely empty details, refresh cached detail and comment
+    media in the background, standardize all five priority icons, and align
+    collapsed-sidebar controls. Local macOS coverage was added; compilation
+    and self-test passed, while real-window execution remains pending a host
+    fix for `Timed out while enabling automation mode`.
 
 ## Latest UI verification
+
+The deterministic offscreen five-case GPUI matrix was captured successfully on
+2026-08-31 at `target/ui-lab/cache-priority-20260831`, including Issues and
+Settings candidate images. This is distinct from the real-window XCUITest
+verification: that run compiled and self-tested but was blocked before test
+bodies by the host's `Timed out while enabling automation mode` failure.
 
 The previously accepted five-case macOS visual matrix was regenerated after
 the status Popover, sizing audit, and Team Resizable migration by following

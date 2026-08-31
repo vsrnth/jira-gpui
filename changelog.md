@@ -46,6 +46,10 @@ branch; it is not a published release.
   Task/standard task → `list-checks`, and Bug/defect → `bug`. The composite
   app `AssetSource` serves these paths while delegating the rest of the icon
   catalog to gpui-component (`ff8c2cf`).
+- Jira priorities now use a complete five-level icon vocabulary: double-up for
+  Highest, up for High, equal bars for Medium, down for Low, and double-down
+  for Lowest. The mapping is exposed in issue rows and detail surfaces with
+  stable semantic priority identifiers (`1df6588`).
 
 ### Changed
 
@@ -66,6 +70,14 @@ branch; it is not a published release.
   contains the exact `Resource busy` text, for at most three attempts. Each
   retry removes only the partial temporary DMG and preserves the command's
   diagnostics (`9d5f44d`).
+- Collapsed-sidebar workspace and toggle controls are centered within the
+  physical rail, with bounded geometry coverage so the controls do not drift
+  toward the divider (`66071eb`).
+- Empty issue descriptions are treated as a loaded, cacheable detail state.
+  Cached detail snapshots paint immediately while a guarded background refresh
+  checks Jira; comment ADF image references resolve against the exact issue
+  attachment catalog and image bytes reuse the persistent cache-first media
+  path (`3b19107`).
 
 ### Security
 
@@ -122,6 +134,14 @@ branch; it is not a published release.
   candidate at
   `target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 - Added local GPUI geometry coverage for update-card unread-dot alignment.
+- Added local GPUI and macOS semantic coverage for all five priority labels,
+  collapsed-sidebar centering, cached empty descriptions, comment image
+  readiness, and the absence of a detail spinner on repeated issue selection
+  (`6379508`).
+- Captured the deterministic offscreen five-case GPUI matrix successfully on
+  2026-08-31 at `target/ui-lab/cache-priority-20260831`, including the Issues
+  and Settings candidate images. This capture result is separate from the
+  real-window XCUITest run, which was blocked by the host automation timeout.
 - Added deterministic local shell regression coverage for the bounded DMG
   retry behavior, including transient success, non-transient failure, retry
   exhaustion, partial-DMG cleanup, and diagnostic preservation:

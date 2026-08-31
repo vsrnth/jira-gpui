@@ -227,25 +227,43 @@ read-only actions:
   exactly `Issue detail for DESK-179`. It also verifies the semantic
   `issue-detail-details-trigger` control, confirms that the Details accordion
   starts expanded, collapses and reopens it, and checks that its height changes
-  and returns within bounded geometry tolerances.
+  and returns within bounded geometry tolerances. The fixture also checks all
+  five stable priority identities and labels, and reselects an issue with a
+  genuinely empty cached description to ensure it remains ready without a
+  loading spinner while background refresh is deferred.
 - `rich-content` opens a fixture with a horizontal rule, a valid table, and a
   preloaded PNG image plus canonical Pass/Fail status lozenges. It requires
   the semantic rule/table/image IDs, exact native AX values for the distinct
   status nodes, and asserts that no image spinner or unsupported-content
-  sentinel is present. The fixture also exercises exact task and decision item
+  sentinel is present. It also includes a comment ADF image whose bytes are
+  already cache-ready, proving comment media follows the same persistent,
+  cache-first path as description media. The fixture also exercises exact task
+  and decision item
   values (`Todo task`, `Done task`, `Decided decision`, and `Undecided
   decision`), expanded and nested-expanded content (`Expanded`, `Details`, and
   `More details`), and the inline emoji/date value `✅ 2026-08-30`. It never
   accesses Jira or persistent storage.
-- `settings` starts on the fixture's Settings/Appearance screen, activates the
-  verifies that the full `Desktop notifications` label stays within the
+- `settings` starts on the fixture's Settings/Appearance screen and verifies
+  that the full `Desktop notifications` label stays within the
   expanded sidebar, activates the nested `Use Dark appearance` CheckBox, and
-  then confirms collapsed mode hides expanded labels.
+  then confirms collapsed mode hides expanded labels and keeps the workspace
+  icon and sidebar toggle centered in the collapsed rail.
 - `updates` navigates to its read-only surface and compares the accessibility
   frames of `update-unread-dot-0` and `update-metadata-0` with a bounded
   vertical tolerance. `team` verifies the `team-table` container.
 
 ### Latest validated run
+
+The cache/priority regression run was prepared locally on 2026-08-31. The
+deterministic offscreen five-case GPUI matrix captured successfully at
+`target/ui-lab/cache-priority-20260831`, including Issues and Settings
+candidate images. This does not imply that the separate real-window XCUITest
+run passed: its test bodies were blocked by the host timeout described below.
+The XCUITest bundle and self-test compiled successfully, but real UI execution was
+blocked before test bodies ran by repeated `Timed out while enabling automation
+mode` failures. Consequently these scenarios are not claimed as passed. The
+preserved diagnostic roots are `target/ui-automation/cache-priority-20260831`
+and `target/ui-automation/cache-priority-retry-20260831`.
 
 The complete six-scenario local suite passed on 2026-08-29. Its artifacts are
 retained under `target/ui-automation/final-20260829`:
@@ -330,6 +348,18 @@ rich-content result is retained at
 the candidate image is
 `target/ui-automation/adf-empty-cells-20260831-pass2/blank-cells-candidate.png`.
 This rich-content-only run does not replace or claim a fresh full-suite run.
+
+### Cache, comment media, priority, and collapsed-rail verification
+
+The 2026-08-31 fixture additions are local-only and deterministic. They use
+synthetic issue data, no Jira credentials, no network, no Jira writes, and no
+CI execution. Assertions cover the persistent `detail_loaded` marker for empty
+descriptions, cache-first comment image bytes, exact five-level priority labels
+and identifiers, and collapsed-sidebar control geometry. The XCUITest project
+and its self-test passed compilation, while both attempted real-window runs
+stopped before the test bodies because macOS repeatedly timed out enabling
+automation mode. Keep the two diagnostic roots above when investigating that
+host-level failure; they do not constitute passing results.
 
 Each run is written below `target/ui-automation/<run-id>` by default (the
 directory is ignored by Git). Each scenario contains:
