@@ -79,6 +79,14 @@ pub struct Issue {
     /// Structured issue description; old cached snapshots may not contain it.
     #[serde(default)]
     pub rich_description: Option<RichTextDocument>,
+    /// Whether this issue has been populated by a complete issue-detail fetch.
+    ///
+    /// Search snapshots leave this false, including when their description fields are empty.
+    /// The default preserves compatibility with cached snapshots written before this marker
+    /// existed; callers may still recognize those snapshots from their non-empty description
+    /// payloads.
+    #[serde(default)]
+    pub detail_loaded: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub due_date: Option<Date>,
@@ -122,6 +130,7 @@ impl Issue {
             labels,
             description_text: None,
             rich_description: None,
+            detail_loaded: false,
             created_at,
             updated_at,
             due_date,
@@ -193,5 +202,18 @@ mod tests {
     fn issue_assignment_is_based_on_stable_account_id() {
         assert!(issue().is_assigned_to(&AccountId::new("person").unwrap()));
         assert!(!issue().is_assigned_to(&AccountId::new("other-person").unwrap()));
+    }
+
+    #[test]
+    fn new_issue_is_not_detail_loaded_and_legacy_snapshots_default_safely() {
+        let issue = issue();
+        assert!(!issue.detail_loaded);
+
+        let value = serde_json::to_value(issue).expect("issue serialization");
+        let object = value.as_object().expect("issue object");
+        let mut legacy = object.clone();
+        legacy.remove("detail_loaded");
+        let restored: Issue = serde_json::from_value(legacy.into()).expect("legacy issue");
+        assert!(!restored.detail_loaded);
     }
 }

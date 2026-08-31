@@ -470,6 +470,7 @@ mod tests {
                 &IssueCommentsPageRequest {
                     site_id: site_id.clone(),
                     issue_id: issue_id.clone(),
+                    attachments: Vec::new(),
                     start_at: 0,
                     page_cursor: None,
                     page_size: 1,

@@ -4,8 +4,8 @@ use crate::adf::{
     attachment_id_from_inline_card_url, count_file_media_references_inner, parse_adf,
 };
 use jira_domain::{
-    HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichDecisionState, RichInline, RichMark,
-    RichStatusColor, RichTable, RichTaskState, RichTextDocument,
+    AttachmentMetadata, HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichDecisionState, RichInline,
+    RichMark, RichStatusColor, RichTable, RichTaskState, RichTextDocument,
 };
 
 #[test]
@@ -76,6 +76,10 @@ fn maps_the_same_fixture_into_the_domain_model() {
     assert_eq!(issue.status.name, "In Progress");
     assert_eq!(issue.due_date.unwrap().to_string(), "2026-08-30");
     assert_eq!(issue.parent.as_ref().unwrap().key.as_str(), "ENG-1");
+    assert!(
+        !issue.detail_loaded,
+        "search mappings must not claim detail-loaded data"
+    );
 }
 
 #[test]
@@ -129,6 +133,7 @@ fn maps_issue_detail_adf_and_attachment_metadata_without_content_urls() {
         Some("First line\nSecond line\nA link label")
     );
     assert!(detail.issue.rich_description.is_some());
+    assert!(detail.issue.detail_loaded);
     assert_eq!(detail.attachments.len(), 1);
     assert_eq!(detail.attachments[0].id, "10001");
     assert_eq!(detail.attachments[0].size_bytes, 2048);
@@ -1123,6 +1128,7 @@ fn drops_rich_content_when_issue_or_comment_adf_has_no_visible_text() {
         .unwrap();
     assert!(detail.issue.description_text.is_none());
     assert!(detail.issue.rich_description.is_none());
+    assert!(detail.issue.detail_loaded);
 
     let mut page: JiraCommentPage =
         serde_json::from_str(include_str!("../tests/fixtures/comments-page.json")).unwrap();
@@ -1170,6 +1176,71 @@ fn maps_comment_page_and_calculates_next_start_without_exposing_visibility_json(
             .unwrap()
             .contains("Looks good")
     );
+}
+
+#[test]
+fn maps_comment_media_only_against_the_detail_attachment_catalog() {
+    let attachment = AttachmentMetadata::new("10001", "comment-image.png", 2048, Some("image/png"))
+        .expect("attachment metadata");
+    let page: JiraCommentPage = serde_json::from_value(serde_json::json!({
+        "startAt": 0,
+        "total": 1,
+        "comments": [{
+            "id": "20001",
+            "created": "2026-08-16T10:00:00.000+0000",
+            "body": {"type":"doc", "version":1, "content":[{
+                "type":"mediaSingle", "content":[{
+                    "type":"media", "attrs":{"type":"file", "id":"10001"}
+                }]
+            }]}
+        }]
+    }))
+    .expect("comment page");
+
+    let mapped = IssueMapper
+        .map_comment_page_with_attachments(page, std::slice::from_ref(&attachment))
+        .expect("mapped comment page");
+    let comment = &mapped.comments[0];
+    assert!(comment.attachments.is_empty());
+    assert!(matches!(
+        comment.rich_body.as_ref().and_then(|document| document.blocks.first()),
+        Some(RichBlock::Image(image)) if image.attachment_id == "10001"
+            && image.filename == "comment-image.png"
+    ));
+    assert_eq!(comment.body, "[image: comment-image.png]");
+}
+
+#[test]
+fn unmatched_comment_media_remains_safe_and_does_not_leak_attachment_ids() {
+    let catalog = [
+        AttachmentMetadata::new("known", "known.png", 10, Some("image/png"))
+            .expect("attachment metadata"),
+        AttachmentMetadata::new("other", "other.png", 10, Some("image/png"))
+            .expect("attachment metadata"),
+    ];
+    let page: JiraCommentPage = serde_json::from_value(serde_json::json!({
+        "startAt": 0,
+        "total": 1,
+        "comments": [{
+            "id": "20002",
+            "created": "2026-08-16T10:00:00.000+0000",
+            "body": {"type":"doc", "version":1, "content":[{
+                "type":"mediaSingle", "content":[{
+                    "type":"media", "attrs":{"type":"file", "id":"secret-attachment"}
+                }]
+            }]}
+        }]
+    }))
+    .expect("comment page");
+
+    let mapped = IssueMapper
+        .map_comment_page_with_attachments(page, &catalog)
+        .expect("mapped comment page");
+    let comment = &mapped.comments[0];
+    assert_eq!(comment.body, UNAVAILABLE_IMAGE);
+    assert!(!comment.body.contains("secret-attachment"));
+    let serialized = serde_json::to_string(comment).expect("comment serialization");
+    assert!(!serialized.contains("secret-attachment"));
 }
 
 #[test]

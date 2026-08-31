@@ -1,4 +1,4 @@
-use crate::adf::{adf_comment_text, visible_adf, visible_adf_with_attachments};
+use crate::adf::{adf_comment_text, visible_adf_with_attachments};
 use crate::models::{
     EnhancedSearchPage, JiraAttachment, JiraBulkChangelogResponse, JiraComment, JiraCommentPage,
     JiraIssue, JiraUser,
@@ -42,6 +42,7 @@ impl IssueMapper {
         let mut domain_issue = self.map_domain_issue(site_id, issue)?;
         domain_issue.description_text = description;
         domain_issue.rich_description = rich_description;
+        domain_issue.detail_loaded = true;
         Ok(IssueDetailCore::new(domain_issue, attachments))
     }
 
@@ -49,12 +50,20 @@ impl IssueMapper {
         &self,
         page: JiraCommentPage,
     ) -> Result<IssueCommentsPage, MappingError> {
+        self.map_comment_page_with_attachments(page, &[])
+    }
+
+    pub fn map_comment_page_with_attachments(
+        &self,
+        page: JiraCommentPage,
+        attachments: &[AttachmentMetadata],
+    ) -> Result<IssueCommentsPage, MappingError> {
         let start_at = page.start_at;
         let count = page.comments.len();
         let comments = page
             .comments
             .into_iter()
-            .map(|comment| self.map_comment(comment))
+            .map(|comment| map_comment_with_attachments(comment, attachments))
             .collect::<Result<Vec<_>, _>>()?;
         let next_start_at = page
             .total
@@ -256,7 +265,18 @@ fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, Map
 }
 
 fn map_comment(comment: JiraComment) -> Result<IssueComment, MappingError> {
-    let (rich_body, body) = match comment.body.as_ref().and_then(visible_adf) {
+    map_comment_with_attachments(comment, &[])
+}
+
+fn map_comment_with_attachments(
+    comment: JiraComment,
+    attachments: &[AttachmentMetadata],
+) -> Result<IssueComment, MappingError> {
+    let (rich_body, body) = match comment
+        .body
+        .as_ref()
+        .and_then(|value| visible_adf_with_attachments(value, attachments))
+    {
         Some((document, text)) => (Some(document), text),
         None => (
             None,

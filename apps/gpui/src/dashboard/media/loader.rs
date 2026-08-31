@@ -671,6 +671,42 @@ mod tests {
     }
 
     #[test]
+    fn cached_loader_hydrates_description_and_comment_images_without_authenticated_fetch() {
+        let fake = FakeImageService::default();
+        fake.push_cached_response(Ok(Some(png_image("description", 16))));
+        fake.push_cached_response(Ok(Some(png_image("comment", 16))));
+        let states = block_on(fetch_cached_rich_image_states_with_loader(
+            &fake,
+            JiraSiteId::new("site").expect("site"),
+            IssueId::new("issue").expect("issue"),
+            vec![
+                (image("description"), 0, ImageSource::ResolvedAdf),
+                (image("comment"), 1, ImageSource::ResolvedAdf),
+            ],
+            CancellationToken::new(),
+            DiagnosticsSink::disabled(),
+            DiagnosticFlow::SelectedDetail,
+            12,
+        ))
+        .expect("cached detail images");
+
+        assert_eq!(fake.call_count(), 0);
+        for (ordinal, id, surface) in [(0, "description", 0), (1, "comment", 1)] {
+            assert!(matches!(
+                states.get(id),
+                Some(RichImageRenderState::Ready(_))
+            ));
+            assert_eq!(
+                states
+                    .context_for(id, ordinal, surface, ImageSource::ResolvedAdf)
+                    .expect("cached image context")
+                    .surface_ordinal,
+                surface
+            );
+        }
+    }
+
+    #[test]
     fn first_service_failure_is_recorded_once_then_later_candidate_succeeds() {
         let fake = FakeImageService::default();
         fake.push_response(Err(jira_application::ApplicationError::new(

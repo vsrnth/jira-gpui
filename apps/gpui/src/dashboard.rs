@@ -696,7 +696,7 @@ fn detail_view_from_issue(issue: &Issue) -> IssueDetailViewModel {
 }
 
 fn issue_has_cached_detail(issue: &Issue) -> bool {
-    issue.description_text.is_some() || issue.rich_description.is_some()
+    issue.detail_loaded || issue.description_text.is_some() || issue.rich_description.is_some()
 }
 
 fn selection_after_issue_view_rebuild(
@@ -891,6 +891,16 @@ impl Dashboard {
             }
         };
         dashboard.section = section.into();
+        if matches!(section, SampleSection::Issues)
+            && let Some(issue) = dashboard
+                .domain_issues
+                .iter_mut()
+                .find(|issue| issue.key.as_str() == "DESK-179")
+        {
+            issue.description_text = None;
+            issue.rich_description = None;
+            issue.detail_loaded = true;
+        }
         if matches!(section, SampleSection::Team) {
             dashboard.team_members = vec![
                 PersistedTeamMember {
@@ -936,6 +946,7 @@ impl Dashboard {
     /// the test can prove that a selected cached image paints without a loading spinner.
     #[cfg(feature = "ui-automation")]
     pub(crate) fn from_ui_automation_rich_content() -> Self {
+        use crate::presentation::{AttachmentViewModel, CommentViewModel, IssueDetailViewModel};
         use jira_domain::{
             RichBlock, RichDecisionItem, RichDecisionState, RichImage, RichInline, RichStatusColor,
             RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState, RichTextDocument,
@@ -947,6 +958,14 @@ impl Dashboard {
             filename: "cached-fixture.png".to_owned(),
             mime_type: "image/png".to_owned(),
             alt_text: Some("Cached fixture image".to_owned()),
+            width: Some(1),
+            height: Some(1),
+        };
+        let comment_image = RichImage {
+            attachment_id: "comment-fixture-image".to_owned(),
+            filename: "cached-comment-fixture.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            alt_text: Some("Cached comment fixture image".to_owned()),
             width: Some(1),
             height: Some(1),
         };
@@ -1078,11 +1097,46 @@ impl Dashboard {
             ],
             false,
         ));
+        dashboard.detail_state = DetailState::Loaded(IssueDetailViewModel {
+            description: "Rich content fixture".to_owned(),
+            rich_description: issue.rich_description.clone(),
+            comments: vec![CommentViewModel {
+                author: "Fixture author".to_owned(),
+                body: "Cached comment image".to_owned(),
+                rich_body: Some(RichTextDocument::new(
+                    vec![RichBlock::Image(comment_image.clone())],
+                    false,
+                )),
+                created: "2026-08-30 00:00 UTC".to_owned(),
+                updated: None,
+            }],
+            attachments: vec![AttachmentViewModel {
+                id: comment_image.attachment_id.clone(),
+                filename: comment_image.filename.clone(),
+                mime_type: comment_image.mime_type.clone(),
+                size_bytes: 1,
+                size: "1 B".to_owned(),
+            }],
+        });
         dashboard.selected_image_states.insert(
             image.attachment_id,
             crate::rich_text_view::RichImageRenderState::Ready(Arc::new(gpui::Image::from_bytes(
                 gpui::ImageFormat::Png,
                 // A valid 1×1 RGBA PNG. Keeping it inline makes this fixture hermetic.
+                vec![
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
+                    0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+                    0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44,
+                    0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00,
+                    0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+                    0x44, 0xae, 0x42, 0x60, 0x82,
+                ],
+            ))),
+        );
+        dashboard.selected_image_states.insert(
+            comment_image.attachment_id,
+            crate::rich_text_view::RichImageRenderState::Ready(Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
                 vec![
                     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
                     0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,

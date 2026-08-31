@@ -283,6 +283,7 @@ where
         }])],
         false,
     ));
+    detailed.detail_loaded = true;
     assert!(block_on(store.cache_detail_issue(&detailed)).expect("cache detail"));
     assert!(!block_on(store.cache_detail_issue(&detailed)).expect("unchanged detail"));
     assert_eq!(
@@ -307,27 +308,21 @@ where
         .expect("preserved lookup")
         .expect("preserved issue");
     assert_eq!(preserved.summary, "updated baseline");
+    assert!(preserved.detail_loaded);
     assert_eq!(preserved.description_text, detailed.description_text);
     assert_eq!(preserved.rich_description, detailed.rich_description);
 
     let mut cleared = preserved;
     cleared.description_text = None;
     cleared.rich_description = None;
+    cleared.detail_loaded = true;
     assert!(block_on(store.cache_detail_issue(&cleared)).expect("clear detail"));
-    assert_eq!(
-        block_on(store.get_issue(&site_id, &baseline.id))
-            .expect("cleared lookup")
-            .expect("cleared issue")
-            .description_text,
-        None
-    );
-    assert_eq!(
-        block_on(store.get_issue(&site_id, &baseline.id))
-            .expect("cleared rich lookup")
-            .expect("cleared rich issue")
-            .rich_description,
-        None
-    );
+    let cleared_snapshot = block_on(store.get_issue(&site_id, &baseline.id))
+        .expect("cleared lookup")
+        .expect("cleared issue");
+    assert!(cleared_snapshot.detail_loaded);
+    assert_eq!(cleared_snapshot.description_text, None);
+    assert_eq!(cleared_snapshot.rich_description, None);
     assert_eq!(
         block_on(store.issues_for_user_set(&site_id, &user_set_id))
             .expect("membership lookup")

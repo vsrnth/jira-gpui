@@ -325,6 +325,56 @@ fn issue_detail_and_comment_urls_encode_ids_as_path_segments_and_use_expected_qu
 }
 
 #[test]
+fn comment_page_catalog_resolves_media_without_entering_bounded_request_url() {
+    let request = IssueCommentsPageRequest {
+        site_id: JiraSiteId::new("site-a").expect("site"),
+        issue_id: IssueId::new("ENG-42").expect("issue"),
+        attachments: vec![
+            jira_domain::AttachmentMetadata::new(
+                "10001",
+                "comment-image.png",
+                2048,
+                Some("image/png"),
+            )
+            .expect("attachment"),
+        ],
+        start_at: 20,
+        page_cursor: None,
+        page_size: 50,
+    };
+    let url = issue_comments_page_url(
+        Url::parse("https://api.example.test/rest/api/3/issue/ENG-42/comment")
+            .expect("comment endpoint"),
+        &request,
+    )
+    .expect("bounded comment URL");
+    assert_eq!(
+        url.as_str(),
+        "https://api.example.test/rest/api/3/issue/ENG-42/comment?startAt=20&maxResults=50&orderBy=-created"
+    );
+    assert!(!url.as_str().contains("10001"));
+    assert!(!url.as_str().contains("comment-image.png"));
+
+    let page: JiraCommentPage = serde_json::from_value(serde_json::json!({
+        "startAt": 20,
+        "maxResults": 50,
+        "total": 21,
+        "comments": [{
+            "id": "20001",
+            "created": "2026-08-16T10:00:00.000+0000",
+            "body": {"type":"doc", "version":1, "content":[{
+                "type":"mediaSingle", "content":[{
+                    "type":"media", "attrs":{"type":"file", "id":"10001"}
+                }]
+            }]}
+        }]
+    }))
+    .expect("comment page");
+    let mapped = map_issue_comments_page(page, &request.attachments).expect("mapped comment page");
+    assert_eq!(mapped.comments[0].body, "[image: comment-image.png]");
+}
+
+#[test]
 fn recent_comment_url_requests_newest_comments_with_a_bounded_limit() {
     let url = recent_issue_comments_url(
         Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/comment").unwrap(),

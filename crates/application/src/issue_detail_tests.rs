@@ -4,8 +4,8 @@ use std::{
 };
 
 use jira_domain::{
-    Issue, IssueComment, IssueDetailCore, IssueId, IssueKey, IssueType, JiraSiteId, Priority,
-    Project, Status,
+    AttachmentMetadata, Issue, IssueComment, IssueDetailCore, IssueId, IssueKey, IssueType,
+    JiraSiteId, Priority, Project, Status,
 };
 use time::macros::datetime;
 
@@ -174,7 +174,10 @@ fn core() -> IssueDetailCore {
             datetime!(2026-01-01 00:00 UTC),
             None,
         ),
-        Vec::new(),
+        vec![
+            AttachmentMetadata::new("detail-image", "detail.png", 12, Some("image/png"))
+                .expect("attachment"),
+        ],
     )
 }
 
@@ -229,6 +232,7 @@ fn fetches_core_and_all_comment_pages_in_start_at_order() {
     let requests = jira.page_requests.lock().expect("page requests lock");
     assert_eq!(requests[0].start_at, 0);
     assert_eq!(requests[1].start_at, 1);
+    assert_eq!(requests[0].attachments, core().attachments);
 }
 
 #[test]

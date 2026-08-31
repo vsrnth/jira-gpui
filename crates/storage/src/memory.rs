@@ -259,8 +259,7 @@ impl IssueCachePort for InMemoryStore {
 
             for issue in commit.issues {
                 let key = (commit.site_id.clone(), issue.id.clone());
-                let issue = if issue.description_text.is_none() && issue.rich_description.is_none()
-                {
+                let issue = if !issue.detail_loaded {
                     state
                         .issues
                         .get(&key)
@@ -268,6 +267,7 @@ impl IssueCachePort for InMemoryStore {
                             let mut merged = issue.clone();
                             merged.description_text = existing.description_text.clone();
                             merged.rich_description = existing.rich_description.clone();
+                            merged.detail_loaded = existing.detail_loaded;
                             merged
                         })
                         .unwrap_or(issue)

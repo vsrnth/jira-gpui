@@ -83,12 +83,6 @@ fn parse_adf_internal(
     Some(RichTextDocument::new(blocks, state.truncated).with_fallback_images(fallback_images))
 }
 
-pub(super) fn visible_adf(value: &Value) -> Option<(RichTextDocument, String)> {
-    let document = parse_adf(value)?;
-    let text = document.plain_text();
-    (!text.is_empty()).then_some((document, text))
-}
-
 pub(super) fn visible_adf_with_attachments(
     value: &Value,
     attachments: &[AttachmentMetadata],

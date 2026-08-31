@@ -69,6 +69,7 @@ impl IssueDetailService {
                     &IssueCommentsPageRequest {
                         site_id: request.site_id.clone(),
                         issue_id: canonical_issue_id.clone(),
+                        attachments: core.attachments.clone(),
                         start_at: pagination.start_at(),
                         page_cursor: pagination.page_cursor(),
                         page_size: self.config.comment_page_size,

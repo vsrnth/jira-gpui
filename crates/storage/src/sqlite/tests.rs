@@ -252,6 +252,7 @@ fn commits_round_trip_and_are_idempotent() {
         Some("Nina Smith")
     );
     assert_eq!(restored.rich_description, cached_issue.rich_description);
+    assert_eq!(restored.detail_loaded, cached_issue.detail_loaded);
     assert_eq!(restored, cached_issue);
     assert_eq!(
         block_on(store.issues_for_user_set(&site_id, &user_set_id)).expect("members"),
@@ -652,6 +653,7 @@ fn detail_snapshot_survives_reopen_and_can_be_cleared() {
             }])],
             false,
         ));
+        detailed.detail_loaded = true;
         assert!(block_on(store.cache_detail_issue(&detailed)).expect("cache detail"));
     }
     let store = SqliteStore::open(&path).expect("reopen store");
@@ -670,6 +672,7 @@ fn detail_snapshot_survives_reopen_and_can_be_cleared() {
             .as_deref(),
         Some("Persisted rich detail")
     );
+    assert!(cleared.detail_loaded);
     cleared.description_text = None;
     cleared.rich_description = None;
     assert!(block_on(store.cache_detail_issue(&cleared)).expect("clear detail"));
@@ -678,6 +681,7 @@ fn detail_snapshot_survives_reopen_and_can_be_cleared() {
         .expect("cleared exists");
     assert_eq!(restored.description_text, None);
     assert_eq!(restored.rich_description, None);
+    assert!(restored.detail_loaded);
     assert_eq!(
         block_on(store.issues_for_user_set(&site_id, &user_set_id))
             .expect("membership lookup")

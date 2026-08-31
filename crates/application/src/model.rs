@@ -1,6 +1,6 @@
 use jira_domain::{
-    AccountId, Issue, IssueComment, IssueId, IssueKey, JiraSiteId, Status, Timestamp, UpdateEvent,
-    UpdateKind, UserSetId,
+    AccountId, AttachmentMetadata, Issue, IssueComment, IssueId, IssueKey, JiraSiteId, Status,
+    Timestamp, UpdateEvent, UpdateKind, UserSetId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -180,6 +180,9 @@ pub struct IssueDetailRequest {
 pub struct IssueCommentsPageRequest {
     pub site_id: JiraSiteId,
     pub issue_id: IssueId,
+    /// The bounded attachment catalog returned with the issue-detail core. It lets the Jira
+    /// adapter resolve comment media without trusting IDs from another issue or raw URLs.
+    pub attachments: Vec<AttachmentMetadata>,
     pub start_at: usize,
     pub page_cursor: Option<PageCursor>,
     pub page_size: usize,

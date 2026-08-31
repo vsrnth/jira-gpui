@@ -761,16 +761,7 @@ impl JiraHttpClient {
         request: IssueCommentsPageRequest,
         max_response_bytes: usize,
     ) -> Result<IssueCommentsPage, ApplicationError> {
-        let limit = request.page_size.min(100);
-        if limit == 0 {
-            return Err(ApplicationError::invalid_input(
-                "comment page size must be positive",
-            ));
-        }
-        url.query_pairs_mut()
-            .append_pair("startAt", &request.start_at.to_string())
-            .append_pair("maxResults", &limit.to_string())
-            .append_pair("orderBy", "-created");
+        url = issue_comments_page_url(url, &request)?;
         let response = client
             .get(url)
             .basic_auth(credentials.email, Some(credentials.token))
@@ -779,9 +770,7 @@ impl JiraHttpClient {
             .await
             .map_err(transport_error)?;
         let page: JiraCommentPage = read_json(response, max_response_bytes).await?;
-        IssueMapper.map_comment_page(page).map_err(|_| {
-            ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid comment data")
-        })
+        map_issue_comments_page(page, &request.attachments)
     }
 
     async fn recent_issue_comments_request(
@@ -1036,6 +1025,34 @@ impl JiraAttachmentReadPort for JiraHttpClient {
             .await
         })
     }
+}
+
+fn issue_comments_page_url(
+    mut url: Url,
+    request: &IssueCommentsPageRequest,
+) -> Result<Url, ApplicationError> {
+    let limit = request.page_size.min(100);
+    if limit == 0 {
+        return Err(ApplicationError::invalid_input(
+            "comment page size must be positive",
+        ));
+    }
+    url.query_pairs_mut()
+        .append_pair("startAt", &request.start_at.to_string())
+        .append_pair("maxResults", &limit.to_string())
+        .append_pair("orderBy", "-created");
+    Ok(url)
+}
+
+fn map_issue_comments_page(
+    page: JiraCommentPage,
+    attachments: &[jira_domain::AttachmentMetadata],
+) -> Result<IssueCommentsPage, ApplicationError> {
+    IssueMapper
+        .map_comment_page_with_attachments(page, attachments)
+        .map_err(|_| {
+            ApplicationError::new(ErrorKind::Upstream, "Jira returned invalid comment data")
+        })
 }
 
 impl JiraIssueDetailReadPort for JiraHttpClient {

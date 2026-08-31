@@ -276,7 +276,7 @@ pub(super) fn commit_sync(
 }
 
 fn insert_issue(transaction: &Transaction<'_>, issue: &Issue) -> Result<(), ApplicationError> {
-    let issue = if issue.description_text.is_none() && issue.rich_description.is_none() {
+    let issue = if !issue.detail_loaded {
         transaction
             .query_row(
                 "SELECT snapshot FROM issues WHERE site_id = ?1 AND issue_id = ?2",
@@ -291,6 +291,7 @@ fn insert_issue(transaction: &Transaction<'_>, issue: &Issue) -> Result<(), Appl
                 let mut merged = issue.clone();
                 merged.description_text = existing.description_text;
                 merged.rich_description = existing.rich_description;
+                merged.detail_loaded = existing.detail_loaded;
                 merged
             })
             .unwrap_or_else(|| issue.clone())
