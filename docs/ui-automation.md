@@ -263,6 +263,9 @@ performs bounded semantic waits and read-only actions:
   type/status/priority row:
   `change-assignee` is bounded and aligned with stable type and
   priority AX groups. It does not activate refresh or assignee controls.
+- `rich-content` also verifies the idle `Post comment` Button is compact and
+  remains inside its semantic composer/action-row surfaces without spanning
+  the detail pane. It does not click the write control.
 - `rich-content` opens a fixture with a horizontal rule, a valid table, and a
   preloaded PNG image plus canonical Pass/Fail status lozenges. It requires
   the semantic rule/table/image IDs, exact native AX values for the distinct
@@ -305,6 +308,10 @@ result bundle reported `1 passed, 0 failed`:
 This was targeted Issues+Rich Content coverage, not a full-suite rerun. It used
 no network, Jira credentials, Jira writes, or CI, and did not click links,
 refresh, or assignee controls.
+
+The authoritative compact comment-action regression passed on 2026-08-31 at
+`target/ui-automation/comment-action-final-20260831/rich-content/TestResults.xcresult`;
+the saved result reported `Passed, 1 passed, 0 failed`.
 
 The issue-type semantic-color and onboarding verification busy revisions
 (`32ca4b6`, `92ecc5c`) were covered by automation commits `a9410ed`,

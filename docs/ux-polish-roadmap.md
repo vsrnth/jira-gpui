@@ -87,6 +87,12 @@ interaction quality—not a mandate to copy visual treatments.
 - **Issue details Accordion (`48a62a5`)** — the existing DescriptionList now
   lives inside the gpui-component Accordion, expanded by default and
   collapsible without losing the selected issue or metadata.
+- **Comment composer action sizing** — idle, error, and confirmation actions
+  use compact buttons in trailing desktop action rows; local GPUI coverage
+  bounds the idle `Post comment` control inside the detail pane. The
+  authoritative local macOS regression passed on 2026-08-31 at
+  `target/ui-automation/comment-action-final-20260831/rich-content/TestResults.xcresult`
+  with result `Passed, 1 passed, 0 failed`.
 - **Empty ADF table cells (`c24a73f`, `319ddec`)** — omitted paragraph
   content, which official ADF permits and Jira uses for visually blank table
   cells, is preserved as blank content. Malformed non-array paragraph content

@@ -64,6 +64,8 @@ branch; it is not a published release.
 
 ### Changed
 
+- Comment composer actions now use compact, trailing action rows so the idle
+  `Post comment` control keeps intrinsic width inside the issue detail pane.
 - Issue-type icons are associated with the visible type label in issue rows,
   issue-detail metadata, and update cards. Issue keys remain text-only so the
   task check icon cannot be mistaken for a status indicator (`70dfb79`).
