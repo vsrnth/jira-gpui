@@ -10,7 +10,7 @@ use gpui::{
     IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, div, rems,
 };
-use gpui_component::{Icon, IconName, StyledExt as _, button::Button, h_flex};
+use gpui_component::{Icon, IconName, StyledExt as _, button::Button, h_flex, link::Link};
 use std::ops::Range;
 
 pub(super) fn render_inline_line(
@@ -181,7 +181,9 @@ pub(super) fn inline_text_flow(
                 false,
             ),
             RichInline::HardBreak => flow.text.push('\n'),
-            RichInline::Status { .. } | RichInline::AttachmentCard(_) => return None,
+            RichInline::Status { .. }
+            | RichInline::AttachmentCard(_)
+            | RichInline::JiraIssueLink(_) => return None,
         }
         if budget.omitted {
             break;
@@ -232,7 +234,7 @@ fn inline_mark_style(marks: &[RichMark], palette: RichTextPalette) -> HighlightS
                 strikethrough: Some(StrikethroughStyle::default()),
                 ..Default::default()
             },
-            RichMark::Link { .. } => HighlightStyle {
+            RichMark::Link { .. } | RichMark::JiraIssueLink { .. } => HighlightStyle {
                 color: Some(palette.link),
                 underline: Some(UnderlineStyle {
                     color: Some(palette.link),
@@ -246,10 +248,15 @@ fn inline_mark_style(marks: &[RichMark], palette: RichTextPalette) -> HighlightS
 }
 
 fn inline_requires_element(inline: &RichInline) -> bool {
-    matches!(
-        inline,
-        RichInline::Status { .. } | RichInline::AttachmentCard(_)
-    )
+    match inline {
+        RichInline::Status { .. }
+        | RichInline::AttachmentCard(_)
+        | RichInline::JiraIssueLink(_) => true,
+        RichInline::Text { marks, .. } => marks
+            .iter()
+            .any(|mark| matches!(mark, RichMark::Link { .. } | RichMark::JiraIssueLink { .. })),
+        _ => false,
+    }
 }
 
 fn render_inline_text_flow(flow: InlineTextFlow) -> AnyElement {
@@ -278,6 +285,80 @@ pub(super) fn inline_line_count(content: &[RichInline]) -> usize {
         .saturating_add(1)
 }
 
+fn link_mark(mark: &RichMark) -> Option<&RichMark> {
+    matches!(mark, RichMark::Link { .. } | RichMark::JiraIssueLink { .. }).then_some(mark)
+}
+
+fn render_link(
+    text: &str,
+    mark: &RichMark,
+    marks: &[RichMark],
+    context: &RenderContext<'_>,
+    budget: &mut RenderBudget,
+) -> AnyElement {
+    let (href, accessibility_label) = match mark {
+        RichMark::Link { href, title } => (
+            href,
+            title
+                .as_deref()
+                .filter(|title| !title.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Open link: {text}")),
+        ),
+        RichMark::JiraIssueLink {
+            issue_key, href, ..
+        } => (href, format!("Open Jira issue {issue_key}")),
+        _ => unreachable!("render_link requires a parser-approved link mark"),
+    };
+    // Cached RichTextDocument values can be deserialized without the Jira parser;
+    // re-check the browser target at the activation boundary before constructing
+    // the GPUI Link element.
+    if !super::safe_browser_url(href) {
+        return div()
+            .min_w_0()
+            .whitespace_normal()
+            .text_color(context.palette.link)
+            .underline()
+            .text_decoration_color(context.palette.link)
+            .child(budget.text(text))
+            .into_any_element();
+    }
+    let ordinal = render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal());
+    let a11y_href = href.clone();
+    let mut link = Link::new(ElementId::named_usize("rich-text-link", ordinal))
+        .href(href.clone())
+        .min_w_0()
+        .whitespace_normal()
+        .text_color(context.palette.link)
+        .underline()
+        .text_decoration_color(context.palette.link)
+        .child(budget.text(text));
+    for mark in marks {
+        link = match mark {
+            RichMark::Code => link
+                .font_family("monospace")
+                .bg(context.palette.code_surface)
+                .px_1()
+                .rounded(rems(0.125)),
+            RichMark::Emphasis => link.italic(),
+            RichMark::Strong => link.font_bold(),
+            RichMark::Strike => link.line_through(),
+            RichMark::Link { .. } | RichMark::JiraIssueLink { .. } => link,
+        };
+    }
+    div()
+        .id(ElementId::named_usize("rich-text-link-semantic", ordinal))
+        .accessibility_id(format!("rich-text-link-{ordinal}"))
+        .role(gpui::accesskit::Role::Link)
+        .aria_label(accessibility_label)
+        .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+            cx.open_url(&a11y_href);
+        })
+        .min_w_0()
+        .child(link)
+        .into_any_element()
+}
+
 fn render_inline(
     inline: &RichInline,
     context: &RenderContext<'_>,
@@ -285,6 +366,9 @@ fn render_inline(
 ) -> AnyElement {
     match inline {
         RichInline::Text { text, marks } => {
+            if let Some(link) = marks.iter().find_map(link_mark) {
+                return render_link(text, link, marks, context, budget);
+            }
             let mut element = div().min_w_0().whitespace_normal().child(budget.text(text));
             for mark in marks {
                 element = match mark {
@@ -296,12 +380,11 @@ fn render_inline(
                     RichMark::Emphasis => element.italic(),
                     RichMark::Strong => element.font_bold(),
                     RichMark::Strike => element.line_through(),
-                    // Safe hrefs are intentionally not activated here: this
-                    // adapter has no existing opener contract to delegate to.
                     RichMark::Link { .. } => element
                         .text_color(context.palette.link)
                         .underline()
                         .text_decoration_color(context.palette.link),
+                    RichMark::JiraIssueLink { .. } => element,
                 };
             }
             element.into_any_element()
@@ -318,6 +401,17 @@ fn render_inline(
         RichInline::Date { date } => div().min_w_0().child(budget.text(date)).into_any_element(),
         RichInline::Status { text, color } => render_status(text, *color, context, budget),
         RichInline::AttachmentCard(card) => render_attachment_card(card, context, budget),
+        RichInline::JiraIssueLink(link) => render_link(
+            &link.issue_key,
+            &RichMark::JiraIssueLink {
+                issue_key: link.issue_key.clone(),
+                href: link.href.clone(),
+                title: None,
+            },
+            &[],
+            context,
+            budget,
+        ),
         RichInline::Placeholder { label } => div()
             .italic()
             .text_color(context.palette.muted)

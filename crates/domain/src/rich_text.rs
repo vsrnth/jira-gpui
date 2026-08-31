@@ -164,6 +164,17 @@ pub struct RichAttachmentCard {
     pub size_bytes: Option<u64>,
 }
 
+/// A validated Jira Cloud issue browse reference retained for activation by the UI.
+///
+/// Unlike arbitrary ADF links, this narrow type is only produced for an exact Jira
+/// Cloud browse URL by the Jira adapter. Keeping the issue key alongside the target
+/// gives renderers a stable, human-readable accessibility label without reparsing URLs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RichJiraIssueLink {
+    pub issue_key: String,
+    pub href: String,
+}
+
 /// Bounded semantic representation of a Jira ADF table.
 ///
 /// The table, row, and cell types remain explicit so renderers never need to
@@ -242,6 +253,7 @@ pub enum RichInline {
         date: String,
     },
     AttachmentCard(RichAttachmentCard),
+    JiraIssueLink(RichJiraIssueLink),
     Placeholder {
         label: String,
     },
@@ -268,7 +280,15 @@ pub enum RichMark {
     Emphasis,
     Strong,
     Strike,
-    Link { href: String, title: Option<String> },
+    Link {
+        href: String,
+        title: Option<String>,
+    },
+    JiraIssueLink {
+        issue_key: String,
+        href: String,
+        title: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +504,7 @@ fn append_inline_text(content: &[RichInline], output: &mut PlainTextBuilder, dep
                 output.push_str(&card.filename);
                 output.push_str("]");
             }
+            RichInline::JiraIssueLink(link) => output.push_str(&link.issue_key),
         }
     }
 }

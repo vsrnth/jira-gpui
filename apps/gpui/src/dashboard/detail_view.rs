@@ -1,4 +1,5 @@
 use super::*;
+use crate::rich_text_view::safe_browser_url;
 use gpui::rems;
 use gpui_component::{
     Sizable as _, Size, accordion::Accordion, description_list::DescriptionList, list::List,
@@ -358,9 +359,11 @@ impl Dashboard {
                 .text_sm()
                 .child(
                     TextView::markdown("issue-description-markdown-text", markdown_source)
-                        // Jira descriptions are read-only. Keep Markdown links inert,
-                        // matching the existing ADF renderer's non-navigation contract.
-                        .on_link_click(|_, _, _, _| {}),
+                        .on_link_click(|url, _, _, cx| {
+                            if safe_browser_url(url) {
+                                cx.open_url(url);
+                            }
+                        }),
                 )
                 .into_any_element()
         } else {
@@ -475,7 +478,8 @@ impl Dashboard {
                                         priority_badge_accessibility_id,
                                         cx,
                                     )),
-                            ),
+                            )
+                            .child(self.render_idle_assignee_trigger(Some(&issue), cx)),
                     )
                     .when(
                         matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }),
@@ -1079,21 +1083,7 @@ impl Dashboard {
         let busy = self.operation_in_progress;
         let state = self.issue_edit_flow.state().clone();
         let controls = match state {
-            IssueEditState::Idle => h_flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    Button::new("change-assignee")
-                        .secondary()
-                        .outline()
-                        .compact()
-                        .label("Change assignee")
-                        .disabled(busy)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.begin_assignee_chooser(window, cx)
-                        })),
-                )
-                .into_any_element(),
+            IssueEditState::Idle => return div().into_any_element(),
             IssueEditState::LoadingAssignees { .. } => h_flex()
                 .gap_2()
                 .child(Spinner::new())
@@ -1314,10 +1304,33 @@ impl Dashboard {
                 )
                 .into_any_element(),
         };
-        v_flex()
-            .gap_2()
-            .child(div().text_sm().font_semibold().child("Jira issue actions"))
-            .child(controls)
+        controls
+    }
+
+    fn render_idle_assignee_trigger(
+        &self,
+        issue: Option<&IssueViewModel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(issue) = issue else {
+            return div().into_any_element();
+        };
+        if self.workspace.is_none()
+            || self.selected_issue.as_ref() != Some(&issue.id)
+            || !matches!(self.issue_edit_flow.state(), IssueEditState::Idle)
+        {
+            return div().into_any_element();
+        }
+        Button::new("change-assignee")
+            .debug_selector(|| "change-assignee".to_owned())
+            .accessibility_id("change-assignee")
+            .secondary()
+            .outline()
+            .small()
+            .compact()
+            .label("Change assignee")
+            .disabled(self.operation_in_progress)
+            .on_click(cx.listener(|this, _, window, cx| this.begin_assignee_chooser(window, cx)))
             .into_any_element()
     }
 

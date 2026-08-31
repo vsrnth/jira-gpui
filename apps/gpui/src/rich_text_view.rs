@@ -2,8 +2,8 @@
 //!
 //! The domain layer has already discarded raw ADF/JSON and untrusted mention
 //! identifiers, projecting media to bounded image metadata. This module only
-//! turns that safe projection into ordinary GPUI elements; links remain visibly
-//! styled but inert.
+//! turns that safe projection into ordinary GPUI elements. Parser-approved links
+//! are activated only through the application-owned browser opener.
 
 use std::rc::Rc;
 
@@ -13,6 +13,7 @@ use jira_domain::{
     PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
     RichStatusColor, RichTextDocument,
 };
+use url::Url;
 
 use crate::diagnostics::{
     DecodeFallbackReason, DiagnosticEvent, ImageSource as DiagnosticImageSource, ImageStateReason,
@@ -40,6 +41,43 @@ const UNSUPPORTED_CONTENT_SENTINEL: &str = "[unsupported Jira content]";
 const UNSUPPORTED_CONTENT_LABEL: &str = "Some Jira content isn't supported yet.";
 const UNAVAILABLE_IMAGE_SENTINEL: &str = "[Jira image unavailable]";
 const UNAVAILABLE_IMAGE_LABEL: &str = "Image unavailable.";
+const MAX_BROWSER_URL_BYTES: usize = 2_048;
+
+/// Keep browser navigation limited to ordinary bounded HTTP(S) URLs. Jira ADF
+/// links are already validated by the adapter; this second presentation guard
+/// also protects Markdown links, which are parsed by the text component itself.
+pub(crate) fn safe_browser_url(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > MAX_BROWSER_URL_BYTES
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(value) else {
+        return false;
+    };
+    // Reject inputs that the URL parser normalizes into a different target (for
+    // example, a triple-slash URL that is interpreted as a host). This keeps the
+    // activation target faithful to the bounded source string.
+    if parsed.as_str() != value {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    if bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'%'
+            && (index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit())
+    }) {
+        return false;
+    }
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some_and(|host| !host.is_empty())
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RichTextPalette {
@@ -274,7 +312,7 @@ mod tests {
         bounded_attachment_filename, bounded_inline_content, heading_size, image_render_state,
         inline_line_count, inline_text_flow, normalize_attachment_filename,
         presentation_placeholder_label, render_element_ordinal, render_rich_text,
-        render_rich_text_with_actions, rich_image_name,
+        render_rich_text_with_actions, rich_image_name, safe_browser_url,
     };
     use crate::diagnostics::{
         DecodeFallbackReason, DiagnosticEvent, DiagnosticFlow, DiagnosticsSink, ImageSource,
@@ -739,5 +777,32 @@ mod tests {
                 .fallback_images
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn browser_url_guard_allows_bounded_http_urls_only() {
+        for url in [
+            "https://example.test/docs",
+            "http://localhost:8080/path?q=1#section",
+            "https://example.test:8443/docs",
+        ] {
+            assert!(safe_browser_url(url), "expected safe URL: {url}");
+        }
+        for url in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,owned",
+            "https://user:secret@example.test/docs",
+            "https:///missing-host",
+            "https://example.test:bad/docs",
+            "https://example.test/has whitespace",
+            "https://example.test/%zz",
+        ] {
+            assert!(!safe_browser_url(url), "hostile URL was accepted: {url}");
+        }
+        assert!(!safe_browser_url(&format!(
+            "https://example.test/{}",
+            "x".repeat(2_049)
+        )));
     }
 }

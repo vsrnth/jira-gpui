@@ -1,7 +1,7 @@
 use jira_domain::{
     AccountId, AttachmentMetadata, IssueKey, PanelKind, RichAttachmentCard, RichBlock,
-    RichDecisionItem, RichDecisionState, RichImage, RichInline, RichListItem, RichMark,
-    RichStatusColor, RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState,
+    RichDecisionItem, RichDecisionState, RichImage, RichInline, RichJiraIssueLink, RichListItem,
+    RichMark, RichStatusColor, RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState,
     RichTextDocument,
 };
 use serde_json::Value;
@@ -305,6 +305,9 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
             RichInline::Text { text, marks } => {
                 RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
             }
+            RichInline::JiraIssueLink(link) => {
+                RichBlock::Paragraph(vec![RichInline::JiraIssueLink(link)])
+            }
             RichInline::Placeholder { label } => RichBlock::Placeholder { label },
             _ => RichBlock::Placeholder {
                 label: UNSUPPORTED_CONTENT.to_owned(),
@@ -316,6 +319,9 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
             }
             RichInline::Text { text, marks } => {
                 RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
+            }
+            RichInline::JiraIssueLink(link) => {
+                RichBlock::Paragraph(vec![RichInline::JiraIssueLink(link)])
             }
             RichInline::Placeholder { label } => RichBlock::Placeholder { label },
             _ => RichBlock::Placeholder {
@@ -1342,11 +1348,8 @@ fn parse_inline_attachment_card(
             marks: Vec::new(),
         };
     }
-    jira_browse_issue_key(url)
-        .map(|text| RichInline::Text {
-            text,
-            marks: Vec::new(),
-        })
+    jira_browse_issue_link(url)
+        .map(RichInline::JiraIssueLink)
         .unwrap_or(RichInline::Placeholder {
             label: UNSUPPORTED_CONTENT.to_owned(),
         })
@@ -1501,7 +1504,7 @@ pub(super) fn attachment_id_from_inline_card_url(value: &str) -> Option<String> 
     .then(|| candidate.to_owned())
 }
 
-fn jira_browse_issue_key(value: &str) -> Option<String> {
+fn jira_browse_issue_link(value: &str) -> Option<RichJiraIssueLink> {
     if value.len() > MAX_LINK_HREF_BYTES {
         return None;
     }
@@ -1522,7 +1525,7 @@ fn jira_browse_issue_key(value: &str) -> Option<String> {
     }
     let host = parsed.host_str()?.to_ascii_lowercase();
     let subdomain = host.strip_suffix(".atlassian.net")?;
-    if subdomain.is_empty() || subdomain.split('.').any(str::is_empty) {
+    if subdomain.is_empty() || subdomain.contains('.') || subdomain.split('.').any(str::is_empty) {
         return None;
     }
     let mut segments = parsed.path_segments()?;
@@ -1533,9 +1536,15 @@ fn jira_browse_issue_key(value: &str) -> Option<String> {
     if segments.next().is_some() {
         return None;
     }
+    if parsed.path().ends_with('/') {
+        return None;
+    }
     IssueKey::new(candidate.to_owned())
         .ok()
-        .map(|issue_key| issue_key.to_string())
+        .map(|issue_key| RichJiraIssueLink {
+            issue_key: issue_key.to_string(),
+            href: value.to_owned(),
+        })
 }
 
 fn confluence_card_url(value: &str) -> bool {
@@ -1610,7 +1619,15 @@ fn parse_marks(values: Option<&Vec<Value>>) -> Vec<RichMark> {
                         .and_then(Value::as_str)
                         .filter(|title| title.len() <= MAX_LINK_TITLE_BYTES)
                         .map(str::to_owned);
-                    Some(RichMark::Link { href, title })
+                    if let Some(link) = jira_browse_issue_link(&href) {
+                        Some(RichMark::JiraIssueLink {
+                            issue_key: link.issue_key,
+                            href: link.href,
+                            title,
+                        })
+                    } else {
+                        Some(RichMark::Link { href, title })
+                    }
                 }
                 _ => None,
             }
@@ -1667,7 +1684,7 @@ fn safe_uri(value: &str) -> Option<String> {
     let authority_end = value[authority_start..]
         .find(['/', '?', '#'])
         .map_or(value.len(), |offset| authority_start + offset);
-    if value[authority_start..authority_end].contains('@') {
+    if authority_start == authority_end || value[authority_start..authority_end].contains('@') {
         return None;
     }
     if !matches!(parsed.scheme(), "http" | "https")

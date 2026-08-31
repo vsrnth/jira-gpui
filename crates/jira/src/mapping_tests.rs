@@ -649,7 +649,7 @@ fn maps_jira_browse_cards_but_keeps_external_hosts_unsupported() {
     assert!(matches!(
         &detail.issue.rich_description.unwrap().blocks[0],
         RichBlock::Paragraph(content)
-            if matches!(content.as_slice(), [RichInline::Text { text, marks }] if text == "ENG-43" && marks.is_empty())
+            if matches!(content.as_slice(), [RichInline::JiraIssueLink(link)] if link.issue_key == "ENG-43" && link.href == "https://acme.atlassian.net/browse/ENG-43")
     ));
 
     let mut external: JiraIssue = serde_json::from_str(include_str!(
@@ -720,9 +720,9 @@ fn maps_inline_cards_without_placeholder_punctuation_and_wraps_block_cards() {
         RichBlock::Paragraph(content)
             if matches!(content.as_slice(), [
                 RichInline::Text { text: before, .. },
-                RichInline::Text { text: key, marks },
+                RichInline::JiraIssueLink(link),
                 RichInline::Text { text: after, .. }
-            ] if before == "Before " && key == "ENG-43" && marks.is_empty() && after == " after")
+            ] if before == "Before " && link.issue_key == "ENG-43" && link.href == "https://acme.atlassian.net/browse/ENG-43" && after == " after")
     ));
 
     let block = serde_json::json!({
@@ -737,7 +737,7 @@ fn maps_inline_cards_without_placeholder_punctuation_and_wraps_block_cards() {
     assert!(matches!(
         &parsed.blocks[0],
         RichBlock::Paragraph(content)
-            if matches!(content.as_slice(), [RichInline::Text { text, marks }] if text == "OPS-7" && marks.is_empty())
+            if matches!(content.as_slice(), [RichInline::JiraIssueLink(link)] if link.issue_key == "OPS-7" && link.href == "https://acme.atlassian.net/browse/OPS-7")
     ));
 
     let uppercase_host = serde_json::json!({
@@ -757,11 +757,13 @@ fn rejects_noncanonical_or_non_url_jira_cards() {
         "http://acme.atlassian.net/browse/ENG-43",
         "https://atlassian.net/browse/ENG-43",
         "https://acme.atlassian.net.evil.test/browse/ENG-43",
+        "https://nested.acme.atlassian.net/browse/ENG-43",
         "https://user:secret@acme.atlassian.net/browse/ENG-43",
         "https://acme.atlassian.net:443/browse/ENG-43",
         "https://acme.atlassian.net/browse/ENG-43?view=full",
         "https://acme.atlassian.net/browse/ENG-43#details",
         "https://acme.atlassian.net/browse/ENG-43/comments",
+        "https://acme.atlassian.net/browse/ENG-43/",
         "https://acme.atlassian.net/browse/eng-43",
     ];
     for url in rejected_urls {
@@ -1849,6 +1851,69 @@ fn malformed_and_oversized_links_drop_only_the_mark() {
         panic!("expected paragraph")
     };
     assert!(inlines.iter().all(|inline| matches!(inline, RichInline::Text { marks, .. } if marks.is_empty() || marks.iter().all(|mark| matches!(mark, RichMark::Link { title: None, .. })) )));
+}
+
+#[test]
+fn validated_browse_marks_get_ticket_semantics_while_other_http_links_remain_generic() {
+    let document = serde_json::json!({
+        "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+            {"type":"text", "text":"ticket", "marks":[{"type":"link", "attrs":{"href":"https://acme.atlassian.net/browse/ENG-43", "title":"ticket title"}}]},
+            {"type":"text", "text":"external", "marks":[{"type":"link", "attrs":{"href":"https://example.test/docs"}}]},
+            {"type":"text", "text":"lookalike", "marks":[{"type":"link", "attrs":{"href":"https://acme.atlassian.net.evil.test/browse/ENG-43"}}]}
+        ]}]
+    });
+    let parsed = parse_adf(&document).expect("valid ADF");
+    let RichBlock::Paragraph(inlines) = &parsed.blocks[0] else {
+        panic!("expected paragraph")
+    };
+    assert!(matches!(
+        &inlines[0],
+        RichInline::Text { marks, .. }
+            if matches!(&marks[0], RichMark::JiraIssueLink { issue_key, href, title }
+                if issue_key == "ENG-43"
+                    && href == "https://acme.atlassian.net/browse/ENG-43"
+                    && title.as_deref() == Some("ticket title"))
+    ));
+    assert!(matches!(
+        &inlines[1],
+        RichInline::Text { marks, .. }
+            if matches!(&marks[0], RichMark::Link { href, .. } if href == "https://example.test/docs")
+    ));
+    assert!(matches!(
+        &inlines[2],
+        RichInline::Text { marks, .. }
+            if matches!(&marks[0], RichMark::Link { href, .. } if href == "https://acme.atlassian.net.evil.test/browse/ENG-43")
+    ));
+}
+
+#[test]
+fn hostile_link_marks_never_survive_as_activatable_links() {
+    let hostile = [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "data:text/html,owned",
+        "https://user:secret@example.test/docs",
+        "https:///missing-host",
+        "https://example.test:bad/docs",
+    ];
+    for href in hostile {
+        let document = serde_json::json!({
+            "type":"doc", "version":1, "content":[{"type":"paragraph","content":[
+                {"type":"text", "text":"hostile", "marks":[{"type":"link", "attrs":{"href":href}}]}
+            ]}]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF");
+        let RichBlock::Paragraph(inlines) = &parsed.blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert!(
+            matches!(
+                inlines.as_slice(),
+                [RichInline::Text { marks, .. }] if marks.is_empty()
+            ),
+            "hostile href survived: {href}"
+        );
+    }
 }
 
 #[test]

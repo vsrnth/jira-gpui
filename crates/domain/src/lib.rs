@@ -19,8 +19,9 @@ pub use issue_detail::{
 };
 pub use rich_text::{
     HORIZONTAL_RULE_LABEL, PanelKind, RichAttachmentCard, RichBlock, RichDecisionItem,
-    RichDecisionState, RichImage, RichInline, RichListItem, RichMark, RichStatusColor, RichTable,
-    RichTableCell, RichTableRow, RichTaskItem, RichTaskState, RichTextDocument,
+    RichDecisionState, RichImage, RichInline, RichJiraIssueLink, RichListItem, RichMark,
+    RichStatusColor, RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState,
+    RichTextDocument,
 };
 pub use update_event::{
     ChangeValue, NotificationDelivery, UpdateEvent, UpdateKind, UpdateReadState,

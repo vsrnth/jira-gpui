@@ -39,6 +39,7 @@ jira-storage = { path = "../../crates/storage" }
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
+url.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland"] }
