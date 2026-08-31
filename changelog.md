@@ -93,6 +93,15 @@ branch; it is not a published release.
   busy state while Jira credentials are verified and the connection is
   configured. Its fields and actions remain inert until verification finishes
   (`92ecc5c`).
+- Refresh completion now uses concise “Updated · … issues · … new updates”
+  copy, and the official Lucide refresh-cw icon is exposed as one icon-only
+  “Refresh Jira” action beside the username/profile when expanded and stacked
+  below the profile in the collapsed Sidebar rail (`ae330af`, `d1edeca`,
+  `c6176d3`).
+- Issue details place change-assignee in the type/status/priority metadata
+  row, while safe bounded HTTP(S) links and canonical Jira browse links open
+  only in the system browser after an explicit click; credentials and unsafe
+  schemes are rejected (`0073ea7`).
 
 ### Security
 
@@ -111,6 +120,9 @@ branch; it is not a published release.
   raw data.
 - Workspace labels only expose a validated site slug or hostname fallback;
   credentials, paths, queries, and fragments are not displayed.
+- Rich-content links accept only safe bounded HTTP(S) targets or canonical
+  Jira browse links; unsafe schemes and credential-bearing targets never
+  become clickable browser actions.
 
 ### Testing
 
@@ -149,6 +161,16 @@ branch; it is not a published release.
   candidate at
   `target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 - Added local GPUI geometry coverage for update-card unread-dot alignment.
+- Added targeted local-only macOS coverage for concise refresh status,
+  expanded/collapsed Sidebar refresh geometry, issue-detail type/priority AX
+  groups and assignee placement, and safe rich-content links. The Issues and
+  Rich Content result bundles each passed (`1 passed, 0 failed`) at
+  `target/ui-automation/detail-footer-links-issues10-20260831/issues/TestResults.xcresult`
+  and
+  `target/ui-automation/detail-footer-links-rich2-20260831/rich-content/TestResults.xcresult`.
+  This was a targeted Issues+Rich Content run, not a full-suite rerun; it used
+  no network, Jira credentials, or Jira writes, and did not click links,
+  refresh, or assignee controls (`ae330af`, `d1edeca`, `0073ea7`, `c6176d3`).
 - Added local GPUI and macOS semantic coverage for all five priority labels,
   collapsed-sidebar centering, cached empty descriptions, comment image
   readiness, and the absence of a detail spinner on repeated issue selection

@@ -257,6 +257,12 @@ performs bounded semantic waits and read-only actions:
   five stable priority identities and labels, and reselects an issue with a
   genuinely empty cached description to ensure it remains ready without a
   loading spinner while background refresh is deferred.
+- `issues` also verifies concise post-refresh status copy, the single
+  icon-only `Refresh Jira` Sidebar action beside the username/profile when
+  expanded and stacked below the profile in the collapsed rail, and the detail
+  type/status/priority row:
+  `change-assignee` is bounded and aligned with stable type and
+  priority AX groups. It does not activate refresh or assignee controls.
 - `rich-content` opens a fixture with a horizontal rule, a valid table, and a
   preloaded PNG image plus canonical Pass/Fail status lozenges. It requires
   the semantic rule/table/image IDs, exact native AX values for the distinct
@@ -269,6 +275,11 @@ performs bounded semantic waits and read-only actions:
   decision`), expanded and nested-expanded content (`Expanded`, `Details`, and
   `More details`), and the inline emoji/date value `✅ 2026-08-30`. It never
   accesses Jira or persistent storage.
+- `rich-content` also includes a safe generic HTTP(S) link and a
+  canonical Jira browse link. It verifies Link roles, bounded geometry, stable
+  IDs, exact labels (`Open link: fixture documentation` and
+  `Open Jira issue ENG-43`), and no Link role for a rejected hostile
+  scheme. It never clicks links or opens a browser.
 - `settings` starts on the fixture's Settings/Appearance screen and verifies
   that the full `Desktop notifications` label stays within the
   expanded sidebar, activates the nested `Use Dark appearance` CheckBox, and
@@ -279,6 +290,17 @@ performs bounded semantic waits and read-only actions:
   vertical tolerance. `team` verifies the `team-table` container.
 
 ### Latest validated run
+
+The targeted local-only Issues and Rich Content verification for the refresh
+footer, issue-detail metadata, and rich links passed on 2026-08-31. Each
+result bundle reported `1 passed, 0 failed`:
+
+- `target/ui-automation/detail-footer-links-issues10-20260831/issues/TestResults.xcresult`
+- `target/ui-automation/detail-footer-links-rich2-20260831/rich-content/TestResults.xcresult`
+
+This was targeted Issues+Rich Content coverage, not a full-suite rerun. It used
+no network, Jira credentials, Jira writes, or CI, and did not click links,
+refresh, or assignee controls.
 
 The issue-type semantic-color and onboarding verification busy revisions
 (`32ca4b6`, `92ecc5c`) were covered by automation commits `a9410ed`,
@@ -369,9 +391,10 @@ image is:
 
 `target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 
-The tests deliberately do not activate status transitions, assignee changes,
-comments, saved-login deletion, notification tests, attachment downloads, or
-any other Jira write. Site/email are fixed synthetic test data that may appear
+The tests deliberately do not click refresh, links, or assignee controls, and
+do not activate status transitions, comments, saved-login deletion,
+notification tests, attachment downloads, or any other Jira write. Site/email
+are fixed synthetic test data that may appear
 only in local XCTest diagnostics; no API token is supplied or read.
 
 ### ADF and accordion verification

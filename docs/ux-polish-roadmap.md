@@ -148,6 +148,24 @@ interaction quality—not a mandate to copy visual treatments.
   `target/ui-automation/settings-after-testmanager-reset-20260831/settings/TestResults.xcresult`,
   whose saved summary reported `1 passed, 0 failed`. The initial all-in-one
   run was not wholly green because of that Settings stall.
+- **Refresh/sidebar polish (`ae330af`, `d1edeca`, `c6176d3`)** — refresh completion uses concise
+  “Updated · … issues · … new updates” copy, and the official Lucide
+  refresh-cw action is a single icon-only “Refresh Jira” control beside the
+  profile. Expanded and collapsed Sidebar layouts keep it bounded,
+  non-overlapping, and stacked below the profile in the compact rail.
+- **Issue detail and rich links (`0073ea7`)** — change-assignee shares
+  the type/status/priority metadata row; detail type and priority groups retain
+  stable AX semantics. Safe bounded HTTP(S) links and canonical Jira browse
+  links open only in the system browser after explicit clicks, with
+  credential-bearing and unsafe schemes rejected.
+- **Targeted local verification** — Issues and Rich Content each passed
+  (`1 passed, 0 failed`) at
+  `target/ui-automation/detail-footer-links-issues10-20260831/issues/TestResults.xcresult`
+  and
+  `target/ui-automation/detail-footer-links-rich2-20260831/rich-content/TestResults.xcresult`.
+  This targeted Issues+Rich Content run was not a full-suite rerun and used
+  no network, Jira credentials, Jira writes, or CI; links, refresh, and
+  assignee controls were not clicked.
 
 The ADF status follow-up was verified separately through the local
 `rich-content` scenario on 2026-08-30. It asserted exact native AX values for
