@@ -1214,6 +1214,67 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
 }
 
 #[gpui::test]
+fn team_only_cached_detail_renders_without_spinner_and_survives_background_failure(
+    cx: &mut gpui::TestAppContext,
+) {
+    let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
+        JiraSiteId::new("site").expect("site"),
+        None,
+        Arc::new(EmptyJira),
+        Arc::new(jira_storage::SqliteStore::in_memory().expect("store")),
+    ))
+    .expect("workspace");
+    let mut team_issue = sample_issues().into_iter().next().expect("issue");
+    let issue_id = team_issue.id.clone();
+    team_issue.description_text = Some("Persisted Team Tracker detail".to_owned());
+    team_issue.detail_loaded = true;
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.status_transition_reads_suppressed = true;
+    dashboard.workspace = Some(Arc::new(workspace));
+    dashboard.domain_issues.clear();
+    dashboard.issues.clear();
+    dashboard.team_issues = vec![team_issue];
+    dashboard.section = Section::Team;
+
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.select_issue(issue_id.clone(), cx, true);
+            assert!(matches!(
+                dashboard.detail_state,
+                DetailState::Refreshing { .. }
+            ));
+            assert!(!matches!(
+                dashboard.detail_state,
+                DetailState::Loading { .. }
+            ));
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issue-detail-loading").is_none());
+    assert!(visual.debug_bounds("issue-detail-description").is_some());
+    assert!(visual.debug_bounds("issue-detail-error").is_some());
+    cx.read_entity(&dashboard_entity, |dashboard, _| {
+        assert!(matches!(dashboard.detail_state, DetailState::Error { .. }));
+        let selected = dashboard
+            .team_issues
+            .iter()
+            .find(|candidate| candidate.id == issue_id)
+            .expect("cached Team Tracker issue");
+        assert_eq!(
+            selected.description_text.as_deref(),
+            Some("Persisted Team Tracker detail")
+        );
+    });
+}
+
+#[gpui::test]
 fn empty_cached_detail_renders_without_spinner_and_survives_background_failure(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -2476,6 +2537,7 @@ fn filtered_selected_issue_resolves_header_from_domain_cache() {
         Some(&selected.id),
         &visible,
         &domain_issues,
+        &[],
         None,
         &users,
     )
@@ -2483,6 +2545,49 @@ fn filtered_selected_issue_resolves_header_from_domain_cache() {
 
     assert_eq!(view.id, selected.id);
     assert_eq!(view.key, selected.key.to_string());
+}
+
+#[test]
+fn fetched_detail_updates_matching_domain_and_team_snapshots() {
+    let issue = sample_issues().into_iter().next().expect("issue");
+    let mut fetched = issue.clone();
+    fetched.description_text = Some("Fetched detailed description".to_owned());
+    fetched.detail_loaded = true;
+    let mut domain_issues = vec![issue.clone()];
+    let mut team_issues = vec![issue];
+
+    assert!(update_issue_snapshots(
+        &fetched,
+        &mut domain_issues,
+        &mut team_issues,
+    ));
+    assert_eq!(domain_issues, vec![fetched.clone()]);
+    assert_eq!(team_issues, vec![fetched]);
+}
+
+#[test]
+fn cached_detail_resolver_finds_team_copy_when_primary_copy_has_no_detail() {
+    let mut domain_issue = sample_issues().into_iter().next().expect("issue");
+    let mut team_issue = domain_issue.clone();
+    domain_issue.description_text = None;
+    domain_issue.rich_description = None;
+    domain_issue.detail_loaded = false;
+    team_issue.description_text = Some("Team-only cached detail".to_owned());
+    team_issue.detail_loaded = true;
+    let issue_id = team_issue.id.clone();
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.domain_issues = vec![domain_issue];
+    dashboard.team_issues = vec![team_issue];
+    dashboard.selected_issue = Some(issue_id.clone());
+    dashboard.selected_issue_core = None;
+
+    let resolved = dashboard
+        .selected_issue_with_cached_detail(Some(&issue_id))
+        .expect("Team copy should provide cached detail");
+    assert_eq!(
+        resolved.description_text.as_deref(),
+        Some("Team-only cached detail")
+    );
 }
 
 #[test]

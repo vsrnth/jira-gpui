@@ -453,16 +453,10 @@ impl Dashboard {
             self.selected_issue.as_ref(),
             &self.issues,
             &self.domain_issues,
+            &self.team_issues,
             self.selected_issue_core.as_ref(),
             &self.users,
         )
-        .or_else(|| {
-            let selected = self.selected_issue.as_ref()?;
-            self.team_issues
-                .iter()
-                .find(|issue| &issue.id == selected)
-                .map(|issue| IssueViewModel::from_domain(issue, &self.users))
-        })
     }
 
     pub(super) fn comment_target_issue(&self) -> Option<&Issue> {
@@ -474,6 +468,7 @@ impl Dashboard {
                 selected_issue_from_sources(
                     Some(id),
                     &self.domain_issues,
+                    &self.team_issues,
                     self.selected_issue_core.as_ref(),
                 )
             }),

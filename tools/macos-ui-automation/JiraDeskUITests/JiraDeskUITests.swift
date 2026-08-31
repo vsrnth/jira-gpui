@@ -806,7 +806,22 @@ final class JiraDeskUITests: XCTestCase {
         try launchFixture(scenario: "team")
         let team = try require(app.descendants(matching: .any)["nav-team"], "nav-team")
         team.click()
-        _ = try require(app.descendants(matching: .any)["team-table"], "team-table")
+        let table = try require(app.descendants(matching: .any)["team-table"], "team-table")
+        let detail = try require(
+            app.descendants(matching: .any)["issue-detail-description"],
+            "issue-detail-description"
+        )
+        let detailSemanticText = [detail.label, detail.title, detail.value as? String ?? ""]
+            .joined(separator: " ")
+        XCTAssertTrue(
+            detailSemanticText.contains("Cached Team Tracker detail"),
+            "fixture Team Tracker selection should expose its cached description"
+        )
+        let detailLoading = app.descendants(matching: .any)["issue-detail-loading"]
+        XCTAssertFalse(detailLoading.exists, "cached Team Tracker detail should not show a spinner")
+        XCTAssertTrue(table.frame.width > 300, "Team Tracker table should retain a usable width")
+        XCTAssertTrue(detail.frame.width > 260, "Team Tracker detail should retain a usable width")
+        XCTAssertTrue(table.frame.maxX <= detail.frame.minX + 2, "Team Tracker panes should not overlap")
     }
 
     private func launchFixture(scenario: String) throws {

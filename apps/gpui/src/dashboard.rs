@@ -624,6 +624,7 @@ fn selected_issue_view_from_sources(
     selected_issue: Option<&IssueId>,
     visible_issues: &[IssueViewModel],
     domain_issues: &[Issue],
+    team_issues: &[Issue],
     selected_issue_core: Option<&Issue>,
     users: &[User],
 ) -> Option<IssueViewModel> {
@@ -639,6 +640,12 @@ fn selected_issue_view_from_sources(
                 .map(|issue| IssueViewModel::from_domain(issue, users))
         })
         .or_else(|| {
+            team_issues
+                .iter()
+                .find(|issue| &issue.id == selected)
+                .map(|issue| IssueViewModel::from_domain(issue, users))
+        })
+        .or_else(|| {
             selected_issue_core
                 .filter(|issue| &issue.id == selected)
                 .map(|issue| IssueViewModel::from_domain(issue, users))
@@ -648,13 +655,34 @@ fn selected_issue_view_from_sources(
 fn selected_issue_from_sources<'a>(
     selected_issue: Option<&IssueId>,
     domain_issues: &'a [Issue],
+    team_issues: &'a [Issue],
     selected_issue_core: Option<&'a Issue>,
 ) -> Option<&'a Issue> {
     let selected = selected_issue?;
     domain_issues
         .iter()
         .find(|issue| &issue.id == selected)
+        .or_else(|| team_issues.iter().find(|issue| &issue.id == selected))
         .or_else(|| selected_issue_core.filter(|issue| &issue.id == selected))
+}
+
+fn update_issue_snapshots(
+    issue: &Issue,
+    domain_issues: &mut [Issue],
+    team_issues: &mut [Issue],
+) -> bool {
+    let mut found = false;
+    let mut changed = false;
+    for cached in domain_issues.iter_mut().chain(team_issues.iter_mut()) {
+        if cached.id == issue.id {
+            found = true;
+            if cached != issue {
+                *cached = issue.clone();
+                changed = true;
+            }
+        }
+    }
+    !found || changed
 }
 
 fn detail_view_from_issue(issue: &Issue) -> IssueDetailViewModel {
@@ -913,6 +941,18 @@ impl Dashboard {
                 .map(|member| member.identifier.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+            #[cfg(feature = "ui-automation")]
+            if let Some(issue) = dashboard.team_issues.first_mut() {
+                issue.description_text = Some("Cached Team Tracker detail".to_owned());
+                issue.rich_description = None;
+                issue.detail_loaded = true;
+                let issue_id = issue.id.clone();
+                let detail = detail_view_from_issue(issue);
+                dashboard.domain_issues.clear();
+                dashboard.issues.clear();
+                dashboard.selected_issue = Some(issue_id.clone());
+                dashboard.detail_state = DetailState::Refreshing { issue_id, detail };
+            }
         }
         dashboard
     }
@@ -2002,10 +2042,7 @@ impl Dashboard {
 
         let cancellation = ticket.cancellation().clone();
         let cached_detail = self
-            .domain_issues
-            .iter()
-            .find(|issue| issue.id == issue_id)
-            .filter(|issue| issue_has_cached_detail(issue))
+            .selected_issue_with_cached_detail(Some(&issue_id))
             .map(detail_view_from_issue);
         let cached_image_catalog = cached_detail
             .as_ref()
@@ -2108,19 +2145,12 @@ impl Dashboard {
                     if !this.selected_detail_ticket_is_current(&ticket) {
                         return None;
                     }
-                    let issue_changed = this
-                        .domain_issues
-                        .iter()
-                        .find(|cached| cached.id == issue_id)
-                        .is_none_or(|cached| cached != &issue);
+                    let issue_changed = update_issue_snapshots(
+                        &issue,
+                        &mut this.domain_issues,
+                        &mut this.team_issues,
+                    );
                     if issue_changed {
-                        if let Some(cached) = this
-                            .domain_issues
-                            .iter_mut()
-                            .find(|cached| cached.id == issue_id)
-                        {
-                            *cached = issue.clone();
-                        }
                         this.issues = issue_views_for_filter_with_offset(
                             &this.domain_issues,
                             &this.users,
@@ -2128,6 +2158,7 @@ impl Dashboard {
                             &this.search_query,
                             this.timestamp_offset,
                         );
+                        this.refresh_team_table(cx);
                     }
                     this.selected_issue_core = Some(issue.clone());
                     this.detail_state = DetailState::Loaded(view);
@@ -2198,6 +2229,22 @@ impl Dashboard {
         });
         self.detail_task = Some(task);
         cx.notify();
+    }
+
+    fn selected_issue_with_cached_detail(
+        &self,
+        selected_issue: Option<&IssueId>,
+    ) -> Option<&Issue> {
+        let selected_issue = selected_issue?;
+        self.domain_issues
+            .iter()
+            .chain(self.team_issues.iter())
+            .find(|issue| &issue.id == selected_issue && issue_has_cached_detail(issue))
+            .or_else(|| {
+                self.selected_issue_core
+                    .as_ref()
+                    .filter(|issue| &issue.id == selected_issue && issue_has_cached_detail(issue))
+            })
     }
 
     fn open_update_issue(&mut self, issue_id: IssueId, mobile: bool, cx: &mut Context<Self>) {
@@ -2546,6 +2593,7 @@ impl Dashboard {
         let Some(issue) = selected_issue_from_sources(
             self.selected_issue.as_ref(),
             &self.domain_issues,
+            &self.team_issues,
             self.selected_issue_core.as_ref(),
         )
         .cloned() else {

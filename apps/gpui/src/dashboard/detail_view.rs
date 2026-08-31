@@ -166,14 +166,9 @@ impl Dashboard {
     }
 
     fn selected_issue_detail_view(&self) -> Option<IssueViewModel> {
-        selected_issue_from_sources(
-            self.selected_issue.as_ref(),
-            &self.domain_issues,
-            self.selected_issue_core.as_ref(),
-        )
-        .filter(|issue| issue_has_cached_detail(issue))
-        .map(|issue| IssueViewModel::from_domain(issue, &self.users))
-        .or_else(|| self.selected_issue_view())
+        self.selected_issue_with_cached_detail(self.selected_issue.as_ref())
+            .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+            .or_else(|| self.selected_issue_view())
     }
 
     pub(super) fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
