@@ -1556,6 +1556,83 @@ fn maps_acceptance_and_regression_tables_without_unsupported_content() {
 }
 
 #[test]
+fn accepts_empty_paragraphs_without_truncation_or_unsupported_content() {
+    let document = serde_json::json!({
+        "type": "doc",
+        "version": 1,
+        "content": [{"type": "paragraph"}]
+    });
+
+    let parsed = parse_adf(&document).expect("missing paragraph content is valid ADF");
+    assert!(!parsed.truncated);
+    assert!(matches!(
+        parsed.blocks.as_slice(),
+        [RichBlock::Paragraph(content)] if content.is_empty()
+    ));
+    assert!(!parsed.plain_text().contains(UNSUPPORTED_CONTENT));
+}
+
+#[test]
+fn accepts_blank_table_cells_and_keeps_visible_columns() {
+    let document = serde_json::json!({
+        "type": "doc",
+        "version": 1,
+        "content": [{
+            "type": "table",
+            "content": [
+                {"type": "tableRow", "content": [
+                    {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pass/Fail"}]}]},
+                    {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Comments"}]}]}
+                ]},
+                {"type": "tableRow", "content": [
+                    {"type": "tableCell", "content": [{"type": "paragraph"}]},
+                    {"type": "tableCell", "content": [{"type": "paragraph"}]}
+                ]},
+                {"type": "tableRow", "content": [
+                    {"type": "tableCell", "content": [{"type": "paragraph"}]},
+                    {"type": "tableCell", "content": [{"type": "paragraph"}]}
+                ]},
+                {"type": "tableRow", "content": [
+                    {"type": "tableCell", "content": [{"type": "paragraph"}]},
+                    {"type": "tableCell", "content": [{"type": "paragraph"}]}
+                ]}
+            ]
+        }]
+    });
+
+    let parsed = parse_adf(&document).expect("blank table paragraphs are valid ADF");
+    assert!(!parsed.truncated);
+    assert_eq!(parsed.plain_text(), "Pass/Fail | Comments |  |  |");
+    assert!(!parsed.plain_text().contains(UNSUPPORTED_CONTENT));
+    let RichBlock::Table(table) = &parsed.blocks[0] else {
+        panic!("expected table")
+    };
+    assert_eq!(table.rows.len(), 4);
+    assert!(table.rows[1..].iter().all(|row| row.cells.len() == 2
+        && row.cells.iter().all(|cell| matches!(
+            cell.content.as_slice(),
+            [RichBlock::Paragraph(content)] if content.is_empty()
+        ))));
+}
+
+#[test]
+fn rejects_non_array_paragraph_content_without_relaxing_malformed_handling() {
+    for content in [serde_json::Value::Null, serde_json::json!("not-an-array")] {
+        let document = serde_json::json!({
+            "type": "doc",
+            "version": 1,
+            "content": [{"type": "paragraph", "content": content}]
+        });
+        let parsed = parse_adf(&document).expect("valid ADF root");
+        assert!(parsed.truncated);
+        assert!(matches!(
+            parsed.blocks.as_slice(),
+            [RichBlock::Placeholder { label }] if label == UNSUPPORTED_CONTENT
+        ));
+    }
+}
+
+#[test]
 fn oversized_table_rows_and_cells_are_bounded_and_marked_truncated() {
     let rows = (0..65)
         .map(|_| {
@@ -1707,7 +1784,6 @@ fn malformed_and_oversized_links_drop_only_the_mark() {
 fn malformed_recognized_nodes_emit_placeholders_and_truncation() {
     let document = serde_json::json!({
         "type":"doc", "version":1, "content":[
-            {"type":"paragraph"},
             {"type":"heading", "content": [{"type":"text"}]},
             {"type":"bulletList", "content": [{"type":"listItem"}]}
         ]

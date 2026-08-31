@@ -190,9 +190,12 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
         .unwrap_or_default();
     let content = object.get("content").and_then(Value::as_array);
     let block = match kind {
-        "paragraph" => match content {
-            Some(content) => RichBlock::Paragraph(parse_inlines(content, depth + 1, state)),
-            None => malformed_block(state),
+        "paragraph" => match object.get("content") {
+            None => RichBlock::Paragraph(Vec::new()),
+            Some(content) => match content.as_array() {
+                Some(content) => RichBlock::Paragraph(parse_inlines(content, depth + 1, state)),
+                None => malformed_block(state),
+            },
         },
         "heading" => match content {
             Some(content) => RichBlock::Heading {
