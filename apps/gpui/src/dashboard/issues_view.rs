@@ -41,13 +41,25 @@ impl Dashboard {
             .into_any_element()
     }
 
-    pub(super) fn priority_badge(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn priority_badge(
+        &self,
+        label: String,
+        accessibility_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (icon, tone) = priority_semantics(&label);
         let color = self.priority_color(tone, cx);
+        let accessibility_id = accessibility_id.into();
         h_flex()
+            .id(accessibility_id.clone())
+            .accessibility_id(accessibility_id)
+            .debug_selector(|| "priority-badge".to_owned())
+            .role(gpui::accesskit::Role::TextRun)
+            .aria_label(format!("Priority: {label}"))
             .min_w_0()
+            .items_center()
             .gap_1()
-            .child(Icon::new(icon).text_color(color))
+            .child(Icon::new(icon).size_4().flex_shrink_0().text_color(color))
             .child(div().min_w_0().truncate().child(label))
             .into_any_element()
     }
@@ -574,7 +586,11 @@ impl Dashboard {
                                             .truncate()
                                             .child(format!("{} ·", issue.assignee)),
                                     )
-                                    .child(self.priority_badge(issue.priority.clone(), cx)),
+                                    .child(self.priority_badge(
+                                        issue.priority.clone(),
+                                        format!("priority-badge-list-{}", issue.key),
+                                        cx,
+                                    )),
                             )
                             .child(
                                 div()

@@ -177,6 +177,7 @@ impl Dashboard {
         };
         let project = issue.project.clone();
         let key = issue.key.clone();
+        let priority_badge_accessibility_id = format!("priority-badge-detail-{key}");
         let detail_key_accessibility_id = issue_detail_key_accessibility_id(&key);
         let detail_key_label = format!("Selected Jira issue {key}");
         let summary = issue.summary.clone();
@@ -325,7 +326,11 @@ impl Dashboard {
                                     .min_w_0()
                                     .items_center()
                                     .text_sm()
-                                    .child(self.priority_badge(priority, cx)),
+                                    .child(self.priority_badge(
+                                        priority,
+                                        priority_badge_accessibility_id,
+                                        cx,
+                                    )),
                             ),
                     )
                     .when(

@@ -26,6 +26,25 @@ impl IconNamed for IssueTypeIcon {
     }
 }
 
+/// A semantic priority icon from either the app-owned or component asset
+/// catalog. The component catalog supplies single chevrons; the app owns the
+/// Jira-specific double chevrons and equal mark that are not available there.
+pub enum PriorityIcon {
+    /// A priority icon owned by this application.
+    App(AppIconName),
+    /// A generic icon supplied by gpui-component.
+    Component(IconName),
+}
+
+impl IconNamed for PriorityIcon {
+    fn path(self) -> SharedString {
+        match self {
+            Self::App(icon) => icon.path(),
+            Self::Component(icon) => icon.path(),
+        }
+    }
+}
+
 /// A semantic priority level that the dashboard can resolve to theme colors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PriorityTone {
@@ -62,14 +81,26 @@ pub fn issue_type_icon(label: &str) -> IssueTypeIcon {
 }
 
 /// Maps a Jira priority label to an embedded icon and a theme-independent semantic tone.
-pub fn priority_semantics(label: &str) -> (IconName, PriorityTone) {
+pub fn priority_semantics(label: &str) -> (PriorityIcon, PriorityTone) {
     match normalize(label).as_str() {
-        "highest" => (IconName::ArrowUp, PriorityTone::Critical),
-        "high" => (IconName::ArrowUp, PriorityTone::Elevated),
-        "medium" => (IconName::Minus, PriorityTone::Neutral),
-        "low" => (IconName::ArrowDown, PriorityTone::Low),
-        "lowest" => (IconName::ArrowDown, PriorityTone::Minimal),
-        _ => (IconName::Minus, PriorityTone::Unknown),
+        "highest" => (
+            PriorityIcon::App(AppIconName::ChevronsUp),
+            PriorityTone::Critical,
+        ),
+        "high" => (
+            PriorityIcon::Component(IconName::ChevronUp),
+            PriorityTone::Elevated,
+        ),
+        "medium" => (PriorityIcon::App(AppIconName::Equal), PriorityTone::Neutral),
+        "low" => (
+            PriorityIcon::Component(IconName::ChevronDown),
+            PriorityTone::Low,
+        ),
+        "lowest" => (
+            PriorityIcon::App(AppIconName::ChevronsDown),
+            PriorityTone::Minimal,
+        ),
+        _ => (PriorityIcon::App(AppIconName::Equal), PriorityTone::Unknown),
     }
 }
 
@@ -132,30 +163,30 @@ mod tests {
     #[test]
     fn maps_every_supported_priority_to_icon_and_tone() {
         let (icon, tone) = priority_semantics(" Highest ");
-        assert_eq!(path(icon), "icons/arrow-up.svg");
+        assert_eq!(path(icon), "icons/chevrons-up.svg");
         assert_eq!(tone, PriorityTone::Critical);
 
         let (icon, tone) = priority_semantics("HIGH");
-        assert_eq!(path(icon), "icons/arrow-up.svg");
+        assert_eq!(path(icon), "icons/chevron-up.svg");
         assert_eq!(tone, PriorityTone::Elevated);
 
         let (icon, tone) = priority_semantics("Medium");
-        assert_eq!(path(icon), "icons/minus.svg");
+        assert_eq!(path(icon), "icons/equal.svg");
         assert_eq!(tone, PriorityTone::Neutral);
 
         let (icon, tone) = priority_semantics("low");
-        assert_eq!(path(icon), "icons/arrow-down.svg");
+        assert_eq!(path(icon), "icons/chevron-down.svg");
         assert_eq!(tone, PriorityTone::Low);
 
         let (icon, tone) = priority_semantics("LOWEST");
-        assert_eq!(path(icon), "icons/arrow-down.svg");
+        assert_eq!(path(icon), "icons/chevrons-down.svg");
         assert_eq!(tone, PriorityTone::Minimal);
     }
 
     #[test]
     fn unknown_priorities_use_a_neutral_fallback() {
         let (icon, tone) = priority_semantics("Not configured");
-        assert_eq!(path(icon), "icons/minus.svg");
+        assert_eq!(path(icon), "icons/equal.svg");
         assert_eq!(tone, PriorityTone::Unknown);
     }
 }

@@ -21,10 +21,13 @@ impl RenderOnce for AppIconName {
 /// The composite asset source used by every native Jira Desk entry point.
 pub struct AppAssets;
 
-const APP_ICON_PATHS: [&str; 3] = [
+const APP_ICON_PATHS: [&str; 6] = [
     "icons/bug.svg",
     "icons/book-open-text.svg",
     "icons/list-checks.svg",
+    "icons/chevrons-up.svg",
+    "icons/equal.svg",
+    "icons/chevrons-down.svg",
 ];
 
 impl AppAssets {
@@ -36,6 +39,13 @@ impl AppAssets {
             ))),
             "icons/list-checks.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/list-checks.svg"
+            ))),
+            "icons/chevrons-up.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/chevrons-up.svg"
+            ))),
+            "icons/equal.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/equal.svg"))),
+            "icons/chevrons-down.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/chevrons-down.svg"
             ))),
             _ => None,
         }

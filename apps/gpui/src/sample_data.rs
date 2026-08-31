@@ -26,7 +26,7 @@ pub fn sample_issues() -> Vec<Issue> {
             summary: "Surface Jira update notifications in the desktop feed",
             status: "In Progress",
             status_category: "In progress",
-            priority: "High",
+            priority: "Lowest",
             assignee: "amina",
             labels: &["notifications", "phase-1"],
             updated_at: datetime!(2026-08-16 10:42 UTC),
@@ -56,7 +56,7 @@ pub fn sample_issues() -> Vec<Issue> {
             summary: "Reconcile issues removed from a saved user set",
             status: "In Review",
             status_category: "In progress",
-            priority: "Medium",
+            priority: "Low",
             assignee: "marco",
             labels: &["sync", "cache"],
             updated_at: datetime!(2026-08-15 18:04 UTC),
@@ -224,4 +224,26 @@ fn update(
 
 fn site_id() -> JiraSiteId {
     JiraSiteId::new("sample-site").expect("sample Jira site ID must be valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::sample_issues;
+
+    #[test]
+    fn sample_issues_cover_each_jira_priority_once() {
+        let issues = sample_issues();
+        let priorities: BTreeSet<_> = issues
+            .iter()
+            .filter_map(|issue| issue.priority.name.as_deref())
+            .collect();
+
+        assert_eq!(issues.len(), 5);
+        assert_eq!(
+            priorities,
+            BTreeSet::from(["Highest", "High", "Medium", "Low", "Lowest"])
+        );
+    }
 }
