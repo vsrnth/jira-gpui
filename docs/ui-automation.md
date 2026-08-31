@@ -206,6 +206,21 @@ directory from `Bundle(for:)` and launches the exact app with
 needed, and paths containing spaces remain ordinary URL/path values. XCUITest
 owns the launched process and terminates it during test teardown.
 
+### Summarize a preserved result bundle
+
+Use `xcresulttool` to inspect one retained scenario result without scraping
+`xcodebuild` output. The command returns structured pass/fail JSON:
+
+```bash
+/bin/zsh -lc 'xcrun xcresulttool get test-results summary --path target/ui-automation/cache-priority-full-20260831/rich-content/TestResults.xcresult'
+```
+
+For another local run, replace the run ID and scenario in the path:
+
+```bash
+/bin/zsh -lc 'xcrun xcresulttool get test-results summary --path target/ui-automation/<run-id>/<scenario>/TestResults.xcresult'
+```
+
 ### Scenarios and artifacts
 
 The fixture host accepts exactly `onboarding`, `issues`, `rich-content`, `updates`,
