@@ -150,9 +150,14 @@ branch; it is not a published release.
   detection, including rejection of ambiguous inline syntax and Markdown/HTML
   images. Added deterministic local macOS rich-content assertions for rendered
   headings, delimiter absence, and bounded Markdown description geometry
-  (`b6e8812`). The revised real-window scenario is pending execution after
-  three machine-level XCTest automation-mode initialization timeouts; this
-  does not supersede the earlier six-scenario passing run.
+  (`b6e8812`). Commit `1cf2f7a` stabilizes those semantic queries against the
+  actual macOS AX contract. The authoritative real-window rich-content run
+  passed on 2026-08-31 at
+  `target/ui-automation/markdown-description-verified-20260831/rich-content/TestResults.xcresult`
+  with `Passed, 1 passed, 0 failed`; its `rich-content-final` candidate
+  screenshot is retained in the result bundle. Earlier automation-mode timeout
+  roots remain diagnostic history only and do not supersede the earlier
+  six-scenario passing run.
 - The consolidated local-only macOS XCUITest suite passed all six scenarios on
   2026-08-31 at `target/ui-automation/cache-priority-final-20260831`; each
   `xcresulttool` summary reported `1 passed, 0 failed`. Commit `295484c`

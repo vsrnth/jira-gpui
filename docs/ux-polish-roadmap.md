@@ -117,9 +117,10 @@ interaction quality—not a mandate to copy visual treatments.
   gpui-component's Markdown TextView, while canonical ADF remains on the
   native renderer. Markdown links remain inert and Markdown/HTML image syntax
   is rejected so all Jira images stay on the authenticated persistent cache
-  path. Rust coverage passes; the revised local macOS rich-content scenario
-  has been added but still needs a successful real-window execution after
-  machine-level XCTest automation-mode initialization timeouts.
+  path. Rust coverage passes. Commit `1cf2f7a` stabilizes the local macOS
+  semantic queries against the actual AX contract; the revised rich-content
+  scenario passed in the authoritative real-window run at
+  `target/ui-automation/markdown-description-verified-20260831/rich-content/TestResults.xcresult`.
 - **Local regression coverage (`295484c`)** — the consolidated local macOS
   XCUITest suite passed all six scenarios on 2026-08-31 at
   `target/ui-automation/cache-priority-final-20260831`, with each
@@ -148,16 +149,21 @@ rerun of the complete six-scenario suite. Results are retained at
 the candidate image is
 `target/ui-automation/adf-accordion-20260830-pass2-rich-content/rich-content-candidate.png`.
 
-The text-only ADF Markdown revision (`b6e8812`) has deterministic Rust coverage
-and local-only XCUITest assertions for rendered headings, delimiter absence, and
-bounded description geometry. The XCUITest project self-test and bundle build
-passed on 2026-08-31, but three real-window `rich-content` attempts stopped
-before test execution with `Timed out while enabling automation mode`. The
-retained attempt roots are
+The text-only ADF Markdown revision (`b6e8812`, stabilized by `1cf2f7a`) has
+deterministic Rust coverage and local-only XCUITest assertions for rendered
+headings, delimiter absence, and bounded description geometry. The authoritative
+real-window `rich-content` run passed on 2026-08-31 at
+`target/ui-automation/markdown-description-verified-20260831/rich-content/TestResults.xcresult`;
+its saved `xcresulttool` summary reported `Passed, 1 passed, 0 failed`, and it
+retained the `rich-content-final` candidate screenshot. Earlier attempts stopped
+before test execution with `Timed out while enabling automation mode`; their
+retained roots are
 `target/ui-automation/markdown-description-final-20260831`,
 `target/ui-automation/markdown-description-retry-20260831`, and
 `target/ui-automation/markdown-description-after-testmanager-reset-20260831`.
-This pending revision does not supersede the earlier six-scenario passing run.
+These earlier roots are diagnostic history only. The verified Markdown/canonical
+ADF scenario now passes and does not supersede the separate earlier six-scenario
+passing run.
 
 ## Completed coherent commits
 
@@ -227,6 +233,8 @@ This pending revision does not supersede the earlier six-scenario passing run.
   cells while retaining safe malformed-content fallback behavior.
 - `319ddec` — verify blank-cell semantics and aligned table geometry in the
   local macOS rich-content fixture.
+- `1cf2f7a` — stabilize Markdown/canonical ADF rich-content UI assertions
+  against the actual macOS accessibility contract.
 - `1df6588` — standardize the five Jira priority icons and semantic labels.
 - `66071eb` — center collapsed-sidebar workspace and toggle controls.
 - `3b19107` — persist loaded empty details and cache comment ADF image bytes.
