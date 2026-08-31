@@ -8,6 +8,9 @@ branch; it is not a published release.
 
 ### Added
 
+- Team Tracker selections now reuse the persistent issue-detail cache: cached
+  descriptions paint immediately while the guarded background refresh runs, and
+  refreshed snapshots stay consistent with the Issues tab.
 - Jira ADF tables now have a bounded, transport-neutral representation with
   rows, cells, and header-cell semantics. The GPUI rich-text view renders them
   as readable bordered tables and projects their contents to plain text

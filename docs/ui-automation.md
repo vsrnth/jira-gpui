@@ -287,7 +287,11 @@ performs bounded semantic waits and read-only actions:
   icon and sidebar toggle centered in the collapsed rail.
 - `updates` navigates to its read-only surface and compares the accessibility
   frames of `update-unread-dot-0` and `update-metadata-0` with a bounded
-  vertical tolerance. `team` verifies the `team-table` container.
+  vertical tolerance. `team` verifies the `team-table` container, the cached
+  Team Tracker description, spinner-free detail state, and bounded,
+  non-overlapping table/detail panes. The fixture primes the selected Team
+  ticket locally; Rust GPUI tests cover the live asynchronous refresh and
+  failure path.
 
 ### Latest validated run
 
@@ -321,6 +325,13 @@ reported `1 passed, 0 failed` for each scenario: `onboarding`, `issues`,
 the earlier intermediate host-timeout attempts. Commit `295484c` stabilizes
 issue-row priority, empty-description cache, and collapsed workspace header
 accessibility semantics.
+
+The authoritative local-only Team Tracker detail-cache run passed on
+2026-08-31 after resetting the stalled per-user testmanager services:
+`target/ui-automation/team-detail-cache-20260831/team/TestResults-after-testmanager-reset.xcresult`.
+Its `xcresulttool` summary reported `Passed, 1 passed, 0 failed`. The first two
+attempts timed out before test execution while enabling automation mode; this
+passing bundle supersedes them.
 
 ### Markdown description verification
 

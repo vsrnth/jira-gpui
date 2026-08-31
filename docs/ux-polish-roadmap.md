@@ -209,6 +209,16 @@ issues, rich-content, updates, team, and settings each reported
 `Passed, 1 passed, 0 failed`. This supersedes the targeted-only Markdown
 validation as the final evidence for these two commits.
 
+The Team Tracker detail-cache regression is covered by focused GPUI tests and
+the local-only `team` fixture. Team-only cached tickets now use the same
+cache-first Refreshing state and background-refresh safeguards as Issues.
+The authoritative Team run passed on 2026-08-31 after resetting the stalled
+per-user testmanager services at
+`target/ui-automation/team-detail-cache-20260831/team/TestResults-after-testmanager-reset.xcresult`;
+its `xcresulttool` summary reported `Passed, 1 passed, 0 failed`. The first two
+attempts timed out before test execution while enabling automation mode; this
+passing bundle supersedes them.
+
 ## Completed coherent commits
 
 - `780a9e5` — remove redundant title headings.
