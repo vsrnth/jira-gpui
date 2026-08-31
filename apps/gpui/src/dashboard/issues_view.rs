@@ -1,5 +1,14 @@
 use super::*;
 
+fn issue_row_accessible_label(
+    key: &str,
+    issue_type: &str,
+    summary: &str,
+    priority: &str,
+) -> String {
+    format!("Open {key} ({issue_type}): {summary} · Priority: {priority}")
+}
+
 impl Dashboard {
     pub(super) fn issue_key_label(
         &self,
@@ -457,9 +466,11 @@ impl Dashboard {
         let accessibility_issue_id = format!("issue-row-{}", issue.key);
         let is_remote_result = !label.is_empty();
         let mobile = layout.is_mobile();
-        let accessible_label = format!(
-            "Open {} ({}): {}",
-            issue.key, issue.issue_type, issue.summary
+        let accessible_label = issue_row_accessible_label(
+            &issue.key,
+            &issue.issue_type,
+            &issue.summary,
+            &issue.priority,
         );
         div()
             .id(format!("issue-row-{}", issue.id))
@@ -604,5 +615,18 @@ impl Dashboard {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::issue_row_accessible_label;
+
+    #[test]
+    fn issue_row_accessible_label_retains_identity_and_priority() {
+        assert_eq!(
+            issue_row_accessible_label("DESK-179", "Task", "Improve caching", "Highest"),
+            "Open DESK-179 (Task): Improve caching · Priority: Highest"
+        );
     }
 }

@@ -24,6 +24,29 @@ fn issue_detail_key_accessibility_id(key: &str) -> String {
     format!("issue-detail-key-{key}")
 }
 
+const MAX_DESCRIPTION_ACCESSIBLE_VALUE_BYTES: usize = 512;
+
+fn bounded_description_accessible_value(description: &str) -> String {
+    let description = description.trim();
+    let description = if description.is_empty() {
+        "No description supplied."
+    } else {
+        description
+    };
+    if description.len() <= MAX_DESCRIPTION_ACCESSIBLE_VALUE_BYTES {
+        return description.to_owned();
+    }
+
+    let ellipsis = '…';
+    let mut end = MAX_DESCRIPTION_ACCESSIBLE_VALUE_BYTES.saturating_sub(ellipsis.len_utf8());
+    while end > 0 && !description.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = description[..end].to_owned();
+    bounded.push(ellipsis);
+    bounded
+}
+
 impl Dashboard {
     fn rich_text_palette(&self, cx: &mut Context<Self>) -> RichTextPalette {
         RichTextPalette {
@@ -196,6 +219,7 @@ impl Dashboard {
             }
             _ => issue.rich_description.clone(),
         };
+        let description_accessible_value = bounded_description_accessible_value(&description);
         let detail_issue_id = match &self.remote_lookup {
             RemoteLookupState::Loaded { issue, .. } => Some(issue.id.clone()),
             _ if matches!(
@@ -352,7 +376,12 @@ impl Dashboard {
             .child(self.render_issue_edit_controls(Some(&issue), layout, cx))
             .child(
                 v_flex()
+                    .id("issue-detail-description")
+                    .accessibility_id("issue-detail-description")
                     .debug_selector(|| "issue-detail-description".to_owned())
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label(format!("Description: {description_accessible_value}"))
+                    .aria_value(description_accessible_value)
                     .gap_2()
                     .child(div().text_sm().font_semibold().child("Description"))
                     .child(
@@ -1301,7 +1330,7 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::issue_detail_key_accessibility_id;
+    use super::{bounded_description_accessible_value, issue_detail_key_accessibility_id};
 
     #[test]
     fn issue_detail_key_accessibility_id_is_stable_and_keyed() {
@@ -1313,5 +1342,21 @@ mod tests {
             issue_detail_key_accessibility_id("IX-2109"),
             "issue-detail-key-IX-2109"
         );
+    }
+
+    #[test]
+    fn bounded_description_accessible_value_preserves_empty_copy_and_caps_long_text() {
+        assert_eq!(
+            bounded_description_accessible_value(""),
+            "No description supplied."
+        );
+        assert_eq!(
+            bounded_description_accessible_value("  Plain description  "),
+            "Plain description"
+        );
+
+        let bounded = bounded_description_accessible_value(&"a".repeat(513));
+        assert_eq!(bounded.len(), super::MAX_DESCRIPTION_ACCESSIBLE_VALUE_BYTES);
+        assert!(bounded.ends_with('…'));
     }
 }
