@@ -719,6 +719,8 @@ pub struct Dashboard {
     issue_details_open: bool,
     sync_message: String,
     workspace: Option<Arc<LiveWorkspace>>,
+    #[cfg(feature = "ui-automation")]
+    ui_automation_show_assignee: bool,
     users: Vec<User>,
     workspace_name: String,
     workspace_members: String,
@@ -915,6 +917,18 @@ impl Dashboard {
         dashboard
     }
 
+    /// Primes the inert automation fixture with the post-refresh copy and metadata control
+    /// needed by local accessibility coverage. No live workspace or write path is installed.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn prepare_for_ui_automation(&mut self) {
+        self.sync_message = format!(
+            "Updated · {} issues · {} new updates",
+            self.issues.len(),
+            self.update_groups.len()
+        );
+        self.ui_automation_show_assignee = true;
+    }
+
     /// Builds the rich-content fixture used exclusively by the local macOS accessibility tests.
     /// It starts from the ordinary deterministic issue fixture, then preloads one valid image so
     /// the test can prove that a selected cached image paints without a loading spinner.
@@ -922,8 +936,9 @@ impl Dashboard {
     pub(crate) fn from_ui_automation_rich_content() -> Self {
         use crate::presentation::{AttachmentViewModel, CommentViewModel, IssueDetailViewModel};
         use jira_domain::{
-            RichBlock, RichDecisionItem, RichDecisionState, RichImage, RichInline, RichStatusColor,
-            RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState, RichTextDocument,
+            RichBlock, RichDecisionItem, RichDecisionState, RichImage, RichInline,
+            RichJiraIssueLink, RichMark, RichStatusColor, RichTable, RichTableCell, RichTableRow,
+            RichTaskItem, RichTaskState, RichTextDocument,
         };
 
         let mut dashboard = Self::from_sample_data();
@@ -1028,6 +1043,38 @@ impl Dashboard {
                 sentence(&["Epic: ", "ENG-43"]),
                 sentence(&["Per the ", "ENG-43", ", after"]),
                 text("OPS-7"),
+                RichBlock::Paragraph(vec![
+                    RichInline::Text {
+                        text: "Links: ".to_owned(),
+                        marks: Vec::new(),
+                    },
+                    RichInline::Text {
+                        text: "fixture documentation".to_owned(),
+                        marks: vec![RichMark::Link {
+                            href: "https://example.invalid/fixture-guide".to_owned(),
+                            title: None,
+                        }],
+                    },
+                    RichInline::Text {
+                        text: " · ".to_owned(),
+                        marks: Vec::new(),
+                    },
+                    RichInline::JiraIssueLink(RichJiraIssueLink {
+                        issue_key: "ENG-43".to_owned(),
+                        href: "https://sample.atlassian.net/browse/ENG-43".to_owned(),
+                    }),
+                    RichInline::Text {
+                        text: " · ".to_owned(),
+                        marks: Vec::new(),
+                    },
+                    RichInline::Text {
+                        text: "hostile scheme".to_owned(),
+                        marks: vec![RichMark::Link {
+                            href: "javascript:alert(1)".to_owned(),
+                            title: None,
+                        }],
+                    },
+                ]),
                 text("Rich content fixture"),
                 RichBlock::horizontal_rule(),
                 RichBlock::Table(table),
@@ -1171,6 +1218,8 @@ impl Dashboard {
             issue_details_open: true,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
             workspace: None,
+            #[cfg(feature = "ui-automation")]
+            ui_automation_show_assignee: false,
             users,
             workspace_name: "Platform team".to_owned(),
             workspace_members: "Amina, Devon, Marco".to_owned(),
@@ -1281,6 +1330,8 @@ impl Dashboard {
             issue_details_open: true,
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
+            #[cfg(feature = "ui-automation")]
+            ui_automation_show_assignee: false,
             users,
             workspace_name: "Jira projects".to_owned(),
             workspace_members: if initial_authenticated_account.is_some() {

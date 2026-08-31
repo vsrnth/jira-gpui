@@ -182,9 +182,12 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                         UiAutomationScenario::Onboarding | UiAutomationScenario::OnboardingBusy => {
                             None
                         }
-                        UiAutomationScenario::Issues => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Issues),
-                        ),
+                        UiAutomationScenario::Issues => {
+                            let mut dashboard =
+                                Dashboard::from_sample_data_for_section(SampleSection::Issues);
+                            dashboard.prepare_for_ui_automation();
+                            Some(dashboard)
+                        }
                         UiAutomationScenario::RichContent => {
                             Some(Dashboard::from_ui_automation_rich_content())
                         }

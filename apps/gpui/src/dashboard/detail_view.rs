@@ -444,6 +444,7 @@ impl Dashboard {
                                 h_flex()
                                     .debug_selector(|| "issue-detail-type-surface".to_owned())
                                     .id("issue-detail-type-surface")
+                                    .accessibility_id("issue-detail-type-surface")
                                     .h_6()
                                     .min_w_0()
                                     .items_center()
@@ -453,7 +454,7 @@ impl Dashboard {
                                     .bg(cx.theme().secondary)
                                     .text_sm()
                                     .text_color(self.issue_type_color(type_semantics.tone, cx))
-                                    .role(gpui::accesskit::Role::TextRun)
+                                    .role(gpui::accesskit::Role::Group)
                                     .aria_label(format!("Issue type: {issue_type}"))
                                     .child(
                                         Icon::new(type_semantics.icon)
@@ -473,7 +474,7 @@ impl Dashboard {
                                     .min_w_0()
                                     .items_center()
                                     .text_sm()
-                                    .child(self.priority_badge(
+                                    .child(self.priority_badge_group(
                                         priority,
                                         priority_badge_accessibility_id,
                                         cx,
@@ -1082,8 +1083,8 @@ impl Dashboard {
         }
         let busy = self.operation_in_progress;
         let state = self.issue_edit_flow.state().clone();
-        let controls = match state {
-            IssueEditState::Idle => return div().into_any_element(),
+        match state {
+            IssueEditState::Idle => div().into_any_element(),
             IssueEditState::LoadingAssignees { .. } => h_flex()
                 .gap_2()
                 .child(Spinner::new())
@@ -1303,8 +1304,7 @@ impl Dashboard {
                         }),
                 )
                 .into_any_element(),
-        };
-        controls
+        }
     }
 
     fn render_idle_assignee_trigger(
@@ -1315,7 +1315,11 @@ impl Dashboard {
         let Some(issue) = issue else {
             return div().into_any_element();
         };
-        if self.workspace.is_none()
+        #[cfg(feature = "ui-automation")]
+        let workspace_available = self.workspace.is_some() || self.ui_automation_show_assignee;
+        #[cfg(not(feature = "ui-automation"))]
+        let workspace_available = self.workspace.is_some();
+        if !workspace_available
             || self.selected_issue.as_ref() != Some(&issue.id)
             || !matches!(self.issue_edit_flow.state(), IssueEditState::Idle)
         {

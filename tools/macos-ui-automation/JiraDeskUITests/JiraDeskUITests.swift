@@ -168,6 +168,97 @@ final class JiraDeskUITests: XCTestCase {
 
     func testIssues() throws {
         try launchFixture(scenario: "issues")
+
+        let sidebar = try require(
+            app.descendants(matching: .any)["dashboard-sidebar"],
+            "dashboard-sidebar"
+        )
+        let sidebarActions = try require(
+            app.descendants(matching: .any)["sidebar-profile-actions"],
+            "sidebar-profile-actions"
+        )
+        let profile = try require(
+            app.descendants(matching: .any)["sidebar-profile"],
+            "sidebar-profile"
+        )
+        let syncStatus = try require(
+            app.descendants(matching: .any)["sidebar-sync-status"],
+            "sidebar-sync-status"
+        )
+        let expectedRefreshCopy = "Updated · 5 issues · 3 new updates"
+        let refreshCopyCandidates = [
+            syncStatus.label,
+            syncStatus.title,
+            syncStatus.value as? String ?? "",
+        ]
+        XCTAssertTrue(
+            refreshCopyCandidates.contains(expectedRefreshCopy),
+            "fixture refresh status should expose the concise post-refresh copy"
+        )
+        for rejectedCopy in [
+            "Refresh complete",
+            "desktop notification",
+            "accepted by desktop service",
+            "local update",
+        ] {
+            XCTAssertFalse(
+                refreshCopyCandidates.contains(where: { $0.localizedCaseInsensitiveContains(rejectedCopy) }),
+                "refresh status must not regress to legacy copy: \(rejectedCopy)"
+            )
+        }
+
+        let refreshNodes = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "sidebar-refresh")
+        )
+        XCTAssertEqual(refreshNodes.count, 1, "expanded sidebar should expose one refresh action")
+        let refresh = try require(app.buttons["sidebar-refresh"], "sidebar-refresh")
+        XCTAssertEqual(
+            [refresh.label, refresh.title, refresh.value as? String ?? ""].first(where: { !$0.isEmpty }),
+            "Refresh Jira",
+            "sidebar refresh should retain its stable action label"
+        )
+        XCTAssertGreaterThan(refresh.frame.width, 0)
+        XCTAssertLessThanOrEqual(refresh.frame.width, 24, "sidebar refresh should be icon-sized")
+        XCTAssertGreaterThan(refresh.frame.height, 0)
+        XCTAssertLessThanOrEqual(refresh.frame.height, 24, "sidebar refresh should be icon-sized")
+        XCTAssertTrue(sidebarActions.frame.contains(refresh.frame), "refresh should remain in profile actions")
+        XCTAssertTrue(sidebarActions.frame.contains(profile.frame), "profile should remain in profile actions")
+        XCTAssertFalse(refresh.frame.intersects(profile.frame), "refresh and profile should not overlap")
+        XCTAssertGreaterThan(refresh.frame.minX, profile.frame.maxX, "refresh should be to the right of profile")
+        XCTAssertLessThanOrEqual(
+            abs(refresh.frame.midY - profile.frame.midY),
+            4,
+            "refresh should align with the profile center line"
+        )
+
+        let sidebarToggle = try require(
+            app.descendants(matching: .any)["sidebar-toggle"],
+            "sidebar-toggle"
+        )
+        sidebarToggle.click()
+        let collapsedRefreshNodes = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "sidebar-refresh")
+        )
+        XCTAssertEqual(collapsedRefreshNodes.count, 1, "collapsed sidebar should not duplicate refresh")
+        let collapsedRefresh = try require(app.buttons["sidebar-refresh"], "sidebar-refresh after collapse")
+        let collapsedProfile = try require(
+            app.descendants(matching: .any)["sidebar-profile"],
+            "sidebar-profile after collapse"
+        )
+        XCTAssertLessThanOrEqual(collapsedRefresh.frame.width, 24, "collapsed refresh should be icon-sized")
+        XCTAssertLessThanOrEqual(collapsedRefresh.frame.height, 24, "collapsed refresh should be icon-sized")
+        XCTAssertFalse(
+            collapsedRefresh.frame.intersects(collapsedProfile.frame),
+            "collapsed refresh and profile should not overlap"
+        )
+        XCTAssertTrue(sidebar.frame.contains(collapsedRefresh.frame), "collapsed refresh should stay in the sidebar")
+        XCTAssertTrue(sidebar.frame.contains(collapsedProfile.frame), "collapsed profile should stay in the sidebar")
+        XCTAssertGreaterThan(
+            collapsedRefresh.frame.minY,
+            collapsedProfile.frame.maxY,
+            "collapsed refresh should be vertically below the profile"
+        )
+
         for (key, expectedType) in [
             ("DESK-184", "Story"),
             ("DESK-179", "Task"),
@@ -241,6 +332,60 @@ final class JiraDeskUITests: XCTestCase {
             object: detail
         )
         XCTAssertTrue(XCTWaiter.wait(for: [detailExpectation], timeout: 8) == .completed)
+
+        let typeSurface = try require(
+            app.descendants(matching: .any)["issue-detail-type-surface"],
+            "issue-detail-type-surface"
+        )
+        let typeSemanticText = [
+            typeSurface.label,
+            typeSurface.title,
+            typeSurface.value as? String ?? "",
+        ]
+        XCTAssertTrue(
+            typeSemanticText.contains("Issue type: Task"),
+            "detail metadata should expose the exact issue type semantically"
+        )
+        let statusTrigger = try require(
+            app.descendants(matching: .any)["issue-status-trigger"],
+            "issue-status-trigger"
+        )
+        let priorityBadge = try require(
+            app.descendants(matching: .any)["priority-badge-detail-DESK-179"],
+            "priority-badge-detail-DESK-179"
+        )
+        let prioritySemanticText = [
+            priorityBadge.label,
+            priorityBadge.title,
+            priorityBadge.value as? String ?? "",
+        ]
+        XCTAssertTrue(
+            prioritySemanticText.contains("Priority: Highest"),
+            "detail metadata should expose the exact priority semantically"
+        )
+        let assignee = try require(
+            app.descendants(matching: .any)["change-assignee"],
+            "change-assignee"
+        )
+        let metadataControls = [typeSurface, statusTrigger, priorityBadge, assignee]
+        for (index, control) in metadataControls.enumerated() {
+            XCTAssertGreaterThan(control.frame.width, 0, "metadata control \(index) should have visible width")
+            XCTAssertGreaterThan(control.frame.height, 0, "metadata control \(index) should have visible height")
+            XCTAssertLessThan(control.frame.width, 500, "metadata control \(index) should remain bounded")
+            XCTAssertLessThan(control.frame.height, 100, "metadata control \(index) should remain bounded")
+            XCTAssertTrue(detail.frame.contains(control.frame), "metadata control \(index) should be in issue detail")
+            if index > 0 {
+                XCTAssertLessThanOrEqual(
+                    abs(control.frame.midY - metadataControls[0].frame.midY),
+                    8,
+                    "metadata controls should share one bounded row"
+                )
+            }
+        }
+        let legacyActionsHeading = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@ OR title == %@", "Jira issue actions", "Jira issue actions")
+        )
+        XCTAssertEqual(legacyActionsHeading.count, 0, "legacy Jira issue actions heading should be absent")
 
         let emptyDescription = try require(
             app.descendants(matching: .any)["issue-detail-description"],
@@ -369,6 +514,50 @@ final class JiraDeskUITests: XCTestCase {
                 "Markdown description should not expose source delimiter: \(rejected)"
             )
         }
+        let issueDetail = try require(
+            app.descendants(matching: .any)["issue-detail"],
+            "issue-detail"
+        )
+        let richLinkNodes = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-link-")
+        )
+        XCTAssertEqual(richLinkNodes.count, 2, "rich fixture should expose only its two safe link identifiers")
+        let richLinks = app.links.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-link-")
+        )
+        XCTAssertEqual(richLinks.count, 2, "rich fixture should expose two semantic Link roles")
+        let expectedLinkLabels: Set<String> = [
+            "Open link: fixture documentation",
+            "Open Jira issue ENG-43",
+        ]
+        var observedLinkLabels = [String]()
+        for index in 0..<richLinks.count {
+            let link = try require(
+                richLinks.element(boundBy: index),
+                "rich link \(index)"
+            )
+            let semanticCandidates = [
+                link.label,
+                link.title,
+                link.value as? String ?? "",
+            ].filter { !$0.isEmpty }
+            let matchingLabels = semanticCandidates.filter { expectedLinkLabels.contains($0) }
+            XCTAssertEqual(matchingLabels.count, 1, "rich link \(index) should expose one expected semantic label")
+            if let matchingLabel = matchingLabels.first {
+                observedLinkLabels.append(matchingLabel)
+            }
+            XCTAssertEqual(link.elementType, .link, "safe rich content should expose a Link role")
+            XCTAssertGreaterThan(link.frame.width, 20, "safe link should have meaningful width")
+            XCTAssertGreaterThan(link.frame.height, 10, "safe link should have meaningful height")
+            XCTAssertLessThan(link.frame.width, 600, "safe link width should remain bounded")
+            XCTAssertLessThan(link.frame.height, 100, "safe link height should remain bounded")
+            XCTAssertTrue(issueDetail.frame.contains(link.frame), "safe link should remain inside issue detail")
+        }
+        XCTAssertEqual(Set(observedLinkLabels), expectedLinkLabels, "safe rich links should expose the expected labels")
+        let hostileLinks = richLinkNodes.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "rich-text-link-", "hostile scheme")
+        )
+        XCTAssertEqual(hostileLinks.count, 0, "hostile schemes must not expose a clickable Link role")
         _ = try require(
             app.descendants(matching: .any)["rich-text-horizontal-rule"],
             "rich-text-horizontal-rule"

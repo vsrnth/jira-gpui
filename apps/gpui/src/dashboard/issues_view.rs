@@ -70,6 +70,25 @@ impl Dashboard {
         accessibility_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.priority_badge_with_role(label, accessibility_id, gpui::accesskit::Role::TextRun, cx)
+    }
+
+    pub(super) fn priority_badge_group(
+        &self,
+        label: String,
+        accessibility_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.priority_badge_with_role(label, accessibility_id, gpui::accesskit::Role::Group, cx)
+    }
+
+    fn priority_badge_with_role(
+        &self,
+        label: String,
+        accessibility_id: impl Into<String>,
+        role: gpui::accesskit::Role,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (icon, tone) = priority_semantics(&label);
         let color = self.priority_color(tone, cx);
         let accessibility_id = accessibility_id.into();
@@ -77,7 +96,7 @@ impl Dashboard {
             .id(accessibility_id.clone())
             .accessibility_id(accessibility_id)
             .debug_selector(|| "priority-badge".to_owned())
-            .role(gpui::accesskit::Role::TextRun)
+            .role(role)
             .aria_label(format!("Priority: {label}"))
             .min_w_0()
             .items_center()

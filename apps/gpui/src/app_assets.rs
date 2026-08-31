@@ -21,10 +21,11 @@ impl RenderOnce for AppIconName {
 /// The composite asset source used by every native Jira Desk entry point.
 pub struct AppAssets;
 
-const APP_ICON_PATHS: [&str; 6] = [
+const APP_ICON_PATHS: [&str; 7] = [
     "icons/bug.svg",
     "icons/book-open-text.svg",
     "icons/list-checks.svg",
+    "icons/refresh-cw.svg",
     "icons/chevrons-up.svg",
     "icons/equal.svg",
     "icons/chevrons-down.svg",
@@ -39,6 +40,9 @@ impl AppAssets {
             ))),
             "icons/list-checks.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/list-checks.svg"
+            ))),
+            "icons/refresh-cw.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/refresh-cw.svg"
             ))),
             "icons/chevrons-up.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/chevrons-up.svg"
@@ -96,6 +100,21 @@ mod tests {
             .load("icons/file.svg")
             .expect("component icon should load");
         assert!(component_icon.is_some());
+    }
+
+    #[test]
+    fn refresh_icon_uses_the_app_owned_lucide_path() {
+        assert_eq!(AppIconName::RefreshCw.path(), "icons/refresh-cw.svg");
+        let asset = AppAssets
+            .load("icons/refresh-cw.svg")
+            .expect("refresh icon should load")
+            .expect("refresh icon should be app-owned");
+        assert!(
+            asset
+                .as_ref()
+                .windows(b"M21 12a9".len())
+                .any(|window| window == b"M21 12a9")
+        );
     }
 
     #[test]

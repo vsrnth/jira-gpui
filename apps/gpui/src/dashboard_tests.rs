@@ -701,20 +701,26 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
         collapsed_refresh.origin.y + collapsed_refresh.size.height
             <= collapsed_profile_actions.origin.y + collapsed_profile_actions.size.height
     );
+    let rail_center = collapsed_sidebar.origin.x + collapsed_sidebar.size.width / 2.;
     assert!(
-        (f32::from(
-            collapsed_refresh.origin.y + collapsed_refresh.size.height / 2.
-                - (collapsed_profile.origin.y + collapsed_profile.size.height / 2.)
-        ))
-        .abs()
-            <= 1.5
+        collapsed_refresh.origin.y >= collapsed_profile.origin.y + collapsed_profile.size.height,
+        "collapsed identity and refresh controls must not overlap: profile={collapsed_profile:?}, refresh={collapsed_refresh:?}"
+    );
+    let collapsed_profile_center = collapsed_profile.origin.x + collapsed_profile.size.width / 2.;
+    let collapsed_refresh_center = collapsed_refresh.origin.x + collapsed_refresh.size.width / 2.;
+    assert!(
+        (f32::from(collapsed_profile_center) - f32::from(rail_center)).abs() <= 1.5,
+        "collapsed identity should be centered in the rail: profile={collapsed_profile:?}, sidebar={collapsed_sidebar:?}"
+    );
+    assert!(
+        (f32::from(collapsed_refresh_center) - f32::from(rail_center)).abs() <= 1.5,
+        "collapsed refresh should be centered in the rail: refresh={collapsed_refresh:?}, sidebar={collapsed_sidebar:?}"
     );
     assert!(collapsed_profile_actions.origin.x >= collapsed_sidebar.origin.x);
     assert!(
         collapsed_profile_actions.origin.x + collapsed_profile_actions.size.width
             <= collapsed_sidebar.origin.x + collapsed_sidebar.size.width
     );
-    let rail_center = collapsed_sidebar.origin.x + collapsed_sidebar.size.width / 2.;
     let workspace_icon_center =
         collapsed_workspace_icon.origin.x + collapsed_workspace_icon.size.width / 2.;
     let toggle_button_center =

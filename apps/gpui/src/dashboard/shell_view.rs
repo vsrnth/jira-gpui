@@ -1,9 +1,11 @@
 use super::*;
 use std::rc::Rc;
 
+use crate::app_assets::AppIconName;
 use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
+use gpui::MouseButton;
 use gpui_component::{
-    Collapsible as _, Sizable as _,
+    Collapsible as _,
     sidebar::{
         Sidebar, SidebarCollapsible, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenuItem,
         SidebarToggleButton,
@@ -334,6 +336,7 @@ impl Dashboard {
             .id("sidebar-profile")
             .debug_selector(|| "sidebar-profile".to_owned())
             .accessibility_id("sidebar-profile")
+            .role(gpui::accesskit::Role::Group)
             .aria_label(profile_label.clone())
             .min_w_0()
             .items_center()
@@ -371,6 +374,7 @@ impl Dashboard {
                         div()
                             .id("sidebar-sync-status")
                             .debug_selector(|| "sidebar-sync-status".to_owned())
+                            .accessibility_id("sidebar-sync-status")
                             .role(gpui::accesskit::Role::Status)
                             .w_full()
                             .min_w_0()
@@ -392,11 +396,21 @@ impl Dashboard {
                     h_flex()
                         .id("sidebar-profile-actions")
                         .debug_selector(|| "sidebar-profile-actions".to_owned())
+                        .accessibility_id("sidebar-profile-actions")
+                        .role(gpui::accesskit::Role::Group)
+                        .aria_label("Account and refresh actions")
                         .w_full()
                         .min_w_0()
                         .items_center()
+                        .when(collapsed, |this| {
+                            this.flex_col().h(gpui::rems(5.)).gap_1().justify_center()
+                        })
                         .when(!collapsed, |this| this.gap_1())
-                        .child(profile.flex_1())
+                        .child(if collapsed {
+                            profile.into_any_element()
+                        } else {
+                            profile.flex_1().into_any_element()
+                        })
                         .when(self.refresh_visible(), |this| {
                             this.child(self.render_refresh_action(
                                 "sidebar-refresh",
@@ -581,7 +595,7 @@ impl Dashboard {
         let tooltip = label.to_owned();
 
         if icon_only || sidebar_action {
-            let button_id = format!("{id}-button");
+            let dashboard_for_a11y = cx.entity().downgrade();
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
@@ -597,33 +611,45 @@ impl Dashboard {
                 .justify_center()
                 .rounded(cx.theme().radius)
                 .text_color(cx.theme().sidebar_foreground)
+                .when(self.operation_in_progress, |this| this.opacity(0.8))
                 .hover(|style| {
+                    style
+                        .bg(cx.theme().sidebar_accent)
+                        .text_color(cx.theme().sidebar_accent_foreground)
+                })
+                .active(|style| {
                     style
                         .bg(cx.theme().sidebar_accent)
                         .text_color(cx.theme().sidebar_accent_foreground)
                 })
                 .focus(|style| style.border_1().border_color(cx.theme().primary))
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.begin_refresh(window, cx);
-                }))
+                .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+                    if let Some(dashboard) = dashboard_for_a11y.upgrade() {
+                        dashboard.update(cx, |this, cx| {
+                            this.begin_refresh(window, cx);
+                        });
+                    }
+                })
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.begin_refresh(window, cx);
+                    }),
+                )
                 .on_key_down(cx.listener(|this, event, window, cx| {
                     if is_activation_key(event) {
                         window.prevent_default();
                         this.begin_refresh(window, cx);
                     }
                 }))
-                .child(
-                    Button::new(button_id)
-                        .compact()
-                        .when(icon_only, |this| this.xsmall().size_4())
-                        .when(!icon_only, |this| this.small())
-                        .ghost()
-                        .icon(IconName::Redo2)
-                        .role(gpui_component::RoleOverride::Presentational)
-                        .tab_stop(false)
-                        .loading(self.operation_in_progress),
-                )
+                .child(if self.operation_in_progress {
+                    Icon::new(IconName::Loader).size_3().into_any_element()
+                } else {
+                    Icon::new(AppIconName::RefreshCw)
+                        .size_3()
+                        .into_any_element()
+                })
                 .into_any_element()
         } else {
             Button::new(id)
