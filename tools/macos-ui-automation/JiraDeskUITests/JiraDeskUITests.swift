@@ -56,6 +56,24 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertTrue(storyRow.title.contains("(Story)"), "known Story row should retain its issue-type identity")
         let row = try require(app.descendants(matching: .any)["issue-row-DESK-179"], "issue-row-DESK-179")
         XCTAssertTrue(row.title.contains("(Task)"), "known Task row should retain its issue-type identity")
+        for (key, expectedPriority) in [
+            ("DESK-179", "Highest"),
+            ("DESK-171", "High"),
+            ("DESK-163", "Medium"),
+            ("DESK-176", "Low"),
+            ("DESK-184", "Lowest"),
+        ] {
+            let priority = try require(
+                app.descendants(matching: .any)["priority-badge-list-\(key)"],
+                "priority-badge-list-\(key)"
+            )
+            let semanticPriority = priority.label.isEmpty ? priority.title : priority.label
+            XCTAssertEqual(
+                semanticPriority,
+                "Priority: \(expectedPriority)",
+                "\(key) should expose its exact Jira priority semantically"
+            )
+        }
         let workspaceHeader = try require(
             app.descendants(matching: .any)["sidebar-workspace-header"],
             "sidebar-workspace-header"
@@ -78,6 +96,27 @@ final class JiraDeskUITests: XCTestCase {
             object: detail
         )
         XCTAssertTrue(XCTWaiter.wait(for: [detailExpectation], timeout: 8) == .completed)
+
+        let emptyDescription = try require(
+            app.staticTexts["No description supplied."],
+            "No description supplied."
+        )
+        XCTAssertTrue(
+            emptyDescription.exists,
+            "detail-loaded empty descriptions should show explicit empty copy"
+        )
+        let detailLoading = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Loading issue details…")
+        ).firstMatch
+        XCTAssertFalse(detailLoading.exists, "cached empty detail should not show a detail spinner")
+
+        storyRow.click()
+        row.click()
+        _ = try require(
+            app.staticTexts["No description supplied."],
+            "No description supplied. after reselect"
+        )
+        XCTAssertFalse(detailLoading.exists, "reselecting cached empty detail should remain spinner-free")
 
         let details = try require(
             app.descendants(matching: .any)["issue-detail-details"],
@@ -182,6 +221,10 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertEqual(emptyCell.value as? String ?? "", "", "first empty cell should remain blank")
         XCTAssertEqual(secondEmptyCell.value as? String ?? "", "", "second empty cell should remain blank")
         _ = try require(app.descendants(matching: .any)["rich-image-fixture-image"], "rich-image-fixture-image")
+        _ = try require(
+            app.descendants(matching: .any)["rich-image-comment-fixture-image"],
+            "rich-image-comment-fixture-image"
+        )
 
         let loading = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Loading image…")
@@ -326,6 +369,27 @@ final class JiraDeskUITests: XCTestCase {
         let toggle = try require(app.descendants(matching: .any)["sidebar-toggle"], "sidebar-toggle")
         toggle.click()
         XCTAssertFalse(sidebarMenu.frame.width > 100, "collapsed sidebar should use the icon-only rail")
+        let workspaceIcon = try require(
+            app.descendants(matching: .any)["sidebar-workspace-icon"],
+            "sidebar-workspace-icon"
+        )
+        let collapsedToggle = try require(
+            app.descendants(matching: .any)["sidebar-toggle"],
+            "sidebar-toggle after collapse"
+        )
+        XCTAssertTrue(
+            sidebar.frame.contains(workspaceIcon.frame),
+            "collapsed workspace icon should remain inside the sidebar rail"
+        )
+        XCTAssertTrue(
+            sidebar.frame.contains(collapsedToggle.frame),
+            "collapsed sidebar toggle should remain inside the sidebar rail"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(workspaceIcon.frame.midX - collapsedToggle.frame.midX),
+            2.0,
+            "collapsed workspace icon and toggle should share a center line"
+        )
     }
 
     func testUpdates() throws {
