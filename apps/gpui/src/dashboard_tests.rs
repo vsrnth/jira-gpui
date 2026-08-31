@@ -621,10 +621,32 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     let refresh = visual
         .debug_bounds("sidebar-refresh")
         .expect("expanded sidebar should expose refresh action");
+    let profile_actions = visual
+        .debug_bounds("sidebar-profile-actions")
+        .expect("expanded sidebar should expose profile actions row");
     let profile = visual
         .debug_bounds("sidebar-profile")
         .expect("expanded sidebar should expose account footer");
-    assert!(refresh.origin.y < profile.origin.y);
+    assert!(refresh.size.width <= px(24.));
+    assert!(refresh.size.height <= px(24.));
+    assert!(refresh.origin.x >= profile_actions.origin.x);
+    assert!(
+        refresh.origin.x + refresh.size.width
+            <= profile_actions.origin.x + profile_actions.size.width
+    );
+    assert!(refresh.origin.y >= profile_actions.origin.y);
+    assert!(
+        refresh.origin.y + refresh.size.height
+            <= profile_actions.origin.y + profile_actions.size.height
+    );
+    assert!(
+        (f32::from(
+            refresh.origin.y + refresh.size.height / 2.
+                - (profile.origin.y + profile.size.height / 2.)
+        ))
+        .abs()
+            <= 1.5
+    );
     assert!(profile.origin.x >= sidebar.origin.x);
     assert!(profile.origin.x + profile.size.width <= sidebar.origin.x + sidebar.size.width);
     assert!(visual.debug_bounds("sidebar-profile-label").is_some());
@@ -658,6 +680,40 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     let collapsed_toggle_button = visual
         .debug_bounds("sidebar-toggle-button")
         .expect("collapsed toggle button should expose its control bounds");
+    let collapsed_profile_actions = visual
+        .debug_bounds("sidebar-profile-actions")
+        .expect("collapsed sidebar should expose profile actions row");
+    let collapsed_profile = visual
+        .debug_bounds("sidebar-profile")
+        .expect("collapsed sidebar should expose identity control");
+    let collapsed_refresh = visual
+        .debug_bounds("sidebar-refresh")
+        .expect("collapsed sidebar should expose refresh action");
+    assert!(collapsed_refresh.size.width <= px(24.));
+    assert!(collapsed_refresh.size.height <= px(24.));
+    assert!(collapsed_refresh.origin.x >= collapsed_sidebar.origin.x);
+    assert!(
+        collapsed_refresh.origin.x + collapsed_refresh.size.width
+            <= collapsed_sidebar.origin.x + collapsed_sidebar.size.width
+    );
+    assert!(collapsed_refresh.origin.y >= collapsed_profile_actions.origin.y);
+    assert!(
+        collapsed_refresh.origin.y + collapsed_refresh.size.height
+            <= collapsed_profile_actions.origin.y + collapsed_profile_actions.size.height
+    );
+    assert!(
+        (f32::from(
+            collapsed_refresh.origin.y + collapsed_refresh.size.height / 2.
+                - (collapsed_profile.origin.y + collapsed_profile.size.height / 2.)
+        ))
+        .abs()
+            <= 1.5
+    );
+    assert!(collapsed_profile_actions.origin.x >= collapsed_sidebar.origin.x);
+    assert!(
+        collapsed_profile_actions.origin.x + collapsed_profile_actions.size.width
+            <= collapsed_sidebar.origin.x + collapsed_sidebar.size.width
+    );
     let rail_center = collapsed_sidebar.origin.x + collapsed_sidebar.size.width / 2.;
     let workspace_icon_center =
         collapsed_workspace_icon.origin.x + collapsed_workspace_icon.size.width / 2.;

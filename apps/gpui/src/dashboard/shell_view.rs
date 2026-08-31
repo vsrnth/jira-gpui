@@ -330,28 +330,31 @@ impl Dashboard {
         };
 
         let profile_label = self.sidebar_profile_label();
-        let profile = SidebarFooter::new().child(
-            h_flex()
-                .id("sidebar-profile")
-                .debug_selector(|| "sidebar-profile".to_owned())
-                .accessibility_id("sidebar-profile")
-                .aria_label(profile_label.clone())
-                .min_w_0()
-                .items_center()
-                .gap_2()
-                .child(Icon::new(IconName::CircleUser).size_4())
-                .when(!collapsed, |this| {
-                    this.child(
-                        div()
-                            .id("sidebar-profile-label")
-                            .debug_selector(|| "sidebar-profile-label".to_owned())
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .child(profile_label.clone()),
-                    )
-                }),
-        );
+        let profile = h_flex()
+            .id("sidebar-profile")
+            .debug_selector(|| "sidebar-profile".to_owned())
+            .accessibility_id("sidebar-profile")
+            .aria_label(profile_label.clone())
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .when(collapsed, |this| this.gap_0())
+            .child(
+                Icon::new(IconName::CircleUser)
+                    .size_4()
+                    .when(collapsed, |this| this.size_3()),
+            )
+            .when(!collapsed, |this| {
+                this.child(
+                    div()
+                        .id("sidebar-profile-label")
+                        .debug_selector(|| "sidebar-profile-label".to_owned())
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .child(profile_label.clone()),
+                )
+            });
 
         let footer = v_flex()
             .id("sidebar-footer-content")
@@ -384,10 +387,26 @@ impl Dashboard {
                     )
                 },
             )
-            .when(self.refresh_visible(), |this| {
-                this.child(self.render_refresh_action("sidebar-refresh", collapsed, !collapsed, cx))
-            })
-            .child(profile);
+            .child(
+                SidebarFooter::new().child(
+                    h_flex()
+                        .id("sidebar-profile-actions")
+                        .debug_selector(|| "sidebar-profile-actions".to_owned())
+                        .w_full()
+                        .min_w_0()
+                        .items_center()
+                        .when(!collapsed, |this| this.gap_1())
+                        .child(profile.flex_1())
+                        .when(self.refresh_visible(), |this| {
+                            this.child(self.render_refresh_action(
+                                "sidebar-refresh",
+                                collapsed,
+                                true,
+                                cx,
+                            ))
+                        }),
+                ),
+            );
 
         div()
             .id("dashboard-sidebar-shell")
@@ -561,7 +580,8 @@ impl Dashboard {
         let label = refresh_action_label(self.operation_in_progress);
         let tooltip = label.to_owned();
 
-        if icon_only {
+        if icon_only || sidebar_action {
+            let button_id = format!("{id}-button");
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
@@ -569,8 +589,9 @@ impl Dashboard {
                 .role(gpui::accesskit::Role::Button)
                 .aria_label(tooltip.clone())
                 .tab_index(0)
-                .size_8()
                 .flex_shrink_0()
+                .when(icon_only, |this| this.size_4())
+                .when(!icon_only, |this| this.size_6())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -592,11 +613,17 @@ impl Dashboard {
                         this.begin_refresh(window, cx);
                     }
                 }))
-                .child(if self.operation_in_progress {
-                    Spinner::new().xsmall().into_any_element()
-                } else {
-                    Icon::new(IconName::Redo2).size_4().into_any_element()
-                })
+                .child(
+                    Button::new(button_id)
+                        .compact()
+                        .when(icon_only, |this| this.xsmall().size_4())
+                        .when(!icon_only, |this| this.small())
+                        .ghost()
+                        .icon(IconName::Redo2)
+                        .role(gpui_component::RoleOverride::Presentational)
+                        .tab_stop(false)
+                        .loading(self.operation_in_progress),
+                )
                 .into_any_element()
         } else {
             Button::new(id)
