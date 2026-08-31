@@ -269,16 +269,13 @@ read-only actions:
 
 ### Latest validated run
 
-The cache/priority regression run was prepared locally on 2026-08-31. The
-deterministic offscreen five-case GPUI matrix captured successfully at
-`target/ui-lab/cache-priority-20260831`, including Issues and Settings
-candidate images. This does not imply that the separate real-window XCUITest
-run passed: its test bodies were blocked by the host timeout described below.
-The XCUITest bundle and self-test compiled successfully, but real UI execution was
-blocked before test bodies ran by repeated `Timed out while enabling automation
-mode` failures. Consequently these scenarios are not claimed as passed. The
-preserved diagnostic roots are `target/ui-automation/cache-priority-20260831`
-and `target/ui-automation/cache-priority-retry-20260831`.
+The final consolidated local macOS XCUITest suite passed on 2026-08-31 at
+`target/ui-automation/cache-priority-final-20260831`. The `xcresulttool` summary
+reported `1 passed, 0 failed` for each scenario: `onboarding`, `issues`,
+`rich-content`, `updates`, `team`, and `settings`. This final pass supersedes
+the earlier intermediate host-timeout attempts. Commit `295484c` stabilizes
+issue-row priority, empty-description cache, and collapsed workspace header
+accessibility semantics.
 
 The complete six-scenario local suite passed on 2026-08-29. Its artifacts are
 retained under `target/ui-automation/final-20260829`:
@@ -370,11 +367,8 @@ The 2026-08-31 fixture additions are local-only and deterministic. They use
 synthetic issue data, no Jira credentials, no network, no Jira writes, and no
 CI execution. Assertions cover the persistent `detail_loaded` marker for empty
 descriptions, cache-first comment image bytes, exact five-level priority labels
-and identifiers, and collapsed-sidebar control geometry. The XCUITest project
-and its self-test passed compilation, while both attempted real-window runs
-stopped before the test bodies because macOS repeatedly timed out enabling
-automation mode. Keep the two diagnostic roots above when investigating that
-host-level failure; they do not constitute passing results.
+and identifiers, and collapsed-sidebar control geometry. These behaviors are
+covered by the final six-scenario pass recorded above.
 
 Each run is written below `target/ui-automation/<run-id>` by default (the
 directory is ignored by Git). Each scenario contains:

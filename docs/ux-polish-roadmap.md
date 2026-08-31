@@ -112,13 +112,12 @@ interaction quality—not a mandate to copy visual treatments.
   successfully fetched empty description is persisted as loaded, so reopening
   it does not show a spinner; comment ADF images resolve through the exact
   issue attachment catalog and reuse persistent cache-first image bytes.
-- **Local regression coverage (`6379508`)** — deterministic macOS assertions
-  cover the empty-detail cache path, comment image readiness, priority identity,
-  and collapsed-sidebar alignment. The bundle/self-test compiled on 2026-08-31;
-  host automation mode timed out before test bodies in both attempts, so no
-  passing real-window result is claimed. Diagnostics remain at
-  `target/ui-automation/cache-priority-20260831` and
-  `target/ui-automation/cache-priority-retry-20260831`.
+- **Local regression coverage (`295484c`)** — the consolidated local macOS
+  XCUITest suite passed all six scenarios on 2026-08-31 at
+  `target/ui-automation/cache-priority-final-20260831`, with each
+  `xcresulttool` summary reporting `1 passed, 0 failed`. It stabilizes issue-row
+  priority, empty-description cache, and collapsed workspace header
+  accessibility semantics, superseding earlier intermediate timeout attempts.
 
 The ADF status follow-up was verified separately through the local
 `rich-content` scenario on 2026-08-30. It asserted exact native AX values for
@@ -269,17 +268,19 @@ recorded in **Current status** above are complete and validated.
 12. **Completed — Detail/media cache and Jira priority polish:** Persist the
     loaded state of genuinely empty details, refresh cached detail and comment
     media in the background, standardize all five priority icons, and align
-    collapsed-sidebar controls. Local macOS coverage was added; compilation
-    and self-test passed, while real-window execution remains pending a host
-    fix for `Timed out while enabling automation mode`.
+    collapsed-sidebar controls. The consolidated local macOS suite passed all
+    six scenarios on 2026-08-31 in
+    `target/ui-automation/cache-priority-final-20260831` (`295484c`).
 
 ## Latest UI verification
 
 The deterministic offscreen five-case GPUI matrix was captured successfully on
 2026-08-31 at `target/ui-lab/cache-priority-20260831`, including Issues and
-Settings candidate images. This is distinct from the real-window XCUITest
-verification: that run compiled and self-tested but was blocked before test
-bodies by the host's `Timed out while enabling automation mode` failure.
+Settings candidate images. The final consolidated local macOS XCUITest suite
+also passed all six scenarios on 2026-08-31 at
+`target/ui-automation/cache-priority-final-20260831`; each scenario reported
+`1 passed, 0 failed` in its `xcresulttool` summary. This supersedes earlier
+intermediate timeout attempts.
 
 The previously accepted five-case macOS visual matrix was regenerated after
 the status Popover, sizing audit, and Team Resizable migration by following

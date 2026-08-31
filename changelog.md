@@ -138,10 +138,16 @@ branch; it is not a published release.
   collapsed-sidebar centering, cached empty descriptions, comment image
   readiness, and the absence of a detail spinner on repeated issue selection
   (`6379508`).
+- The consolidated local-only macOS XCUITest suite passed all six scenarios on
+  2026-08-31 at `target/ui-automation/cache-priority-final-20260831`; each
+  `xcresulttool` summary reported `1 passed, 0 failed`. Commit `295484c`
+  stabilizes issue-row priority, empty-description cache, and collapsed
+  workspace header accessibility semantics, superseding earlier intermediate
+  timeout attempts.
 - Captured the deterministic offscreen five-case GPUI matrix successfully on
   2026-08-31 at `target/ui-lab/cache-priority-20260831`, including the Issues
   and Settings candidate images. This capture result is separate from the
-  real-window XCUITest run, which was blocked by the host automation timeout.
+  final consolidated real-window XCUITest run recorded above.
 - Added deterministic local shell regression coverage for the bounded DMG
   retry behavior, including transient success, non-transient failure, retry
   exhaustion, partial-DMG cleanup, and diagnostic preservation:
