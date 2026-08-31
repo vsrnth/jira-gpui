@@ -34,6 +34,10 @@ branch; it is not a published release.
 - Issue metadata is now grouped in a native gpui-component Accordion around the
   existing DescriptionList. It is expanded by default and can be collapsed and
   reopened while preserving the selected issue (`48a62a5`).
+- Valid empty ADF paragraphs with omitted `content` are preserved as blank
+  content. This handles Jira's visually blank table cells while malformed
+  non-array paragraph content and structurally invalid empty `tableCell`
+  content retain the safe unsupported-content fallback (`c24a73f`).
 - Jira issue-type semantics now cover common Jira and JSM labels and aliases,
   including story, task and sub-task variants, bug/defect, epic, initiative,
   spike, improvement/new feature, incident/problem, change, and service
@@ -74,6 +78,10 @@ branch; it is not a published release.
 - Common ADF parsing is bounded by depth, item, text, and nesting limits. Invalid
   task, decision, expand, emoji, date, and smart-card nodes retain the safe
   unsupported-content fallback; raw ADF attributes are not rendered.
+- Empty paragraph and table-cell handling distinguishes official valid ADF from
+  malformed structures: omitted paragraph content is blank, while non-array
+  paragraph content and structurally invalid empty cells never become rendered
+  raw data.
 - Workspace labels only expose a validated site slug or hostname fallback;
   credentials, paths, queries, and fragments are not displayed.
 
@@ -95,6 +103,14 @@ branch; it is not a published release.
   `target/ui-automation/accordion-ax-fix-3/issues/TestResults.xcresult` and
   `target/ui-automation/adf-accordion-pass2/rich-content/TestResults.xcresult`.
   This was not a rerun of the complete six-scenario suite.
+- Added fixture-based local macOS rich-content coverage for blank ADF table
+  cells: exact blank accessibility label/value, positive and aligned cell
+  geometry within 2 points, and no unsupported-content fallback. The passing
+  result is `target/ui-automation/adf-empty-cells-20260831-pass2/rich-content/TestResults.xcresult`
+  with candidate image
+  `target/ui-automation/adf-empty-cells-20260831-pass2/blank-cells-candidate.png`
+  (`319ddec`). This run used no network, Jira credentials, Jira writes, or CI
+  and was rich-content-only rather than a full-suite rerun.
 - Added local semantic verification for stretched uneven-height ADF tables,
   table/row/cell geometry, and canonical smart-card issue-key rendering. The
   fixture-only macOS artifact is

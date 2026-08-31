@@ -313,6 +313,24 @@ The retained rich-content candidate image is
 These are local development artifacts; they are not baselines and this was not
 a fresh rerun of the complete six-scenario suite.
 
+### Empty ADF cell verification
+
+Official ADF permits a paragraph node with its `content` property omitted. Jira
+uses that form for visually blank table cells, so the parser preserves it as a
+blank paragraph. Malformed non-array paragraph content and structurally invalid
+empty `tableCell` content continue to use the safe unsupported-content
+fallback.
+
+The local fixture adds an exact blank accessibility label/value assertion,
+positive table-cell geometry with aligned edges within 2 points, and a
+no-unsupported-content assertion. This is fixture-based, local-only coverage:
+it uses no network, Jira credentials, Jira writes, or CI execution. The passing
+rich-content result is retained at
+`target/ui-automation/adf-empty-cells-20260831-pass2/rich-content/TestResults.xcresult`;
+the candidate image is
+`target/ui-automation/adf-empty-cells-20260831-pass2/blank-cells-candidate.png`.
+This rich-content-only run does not replace or claim a fresh full-suite run.
+
 Each run is written below `target/ui-automation/<run-id>` by default (the
 directory is ignored by Git). Each scenario contains:
 

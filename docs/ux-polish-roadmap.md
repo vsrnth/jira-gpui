@@ -83,6 +83,12 @@ interaction quality—not a mandate to copy visual treatments.
 - **Issue details Accordion (`48a62a5`)** — the existing DescriptionList now
   lives inside the gpui-component Accordion, expanded by default and
   collapsible without losing the selected issue or metadata.
+- **Empty ADF table cells (`c24a73f`, `319ddec`)** — omitted paragraph
+  content, which official ADF permits and Jira uses for visually blank table
+  cells, is preserved as blank content. Malformed non-array paragraph content
+  and structurally invalid empty table-cell content retain the safe fallback.
+  Local rich-content coverage verifies blank accessibility values and aligned
+  table-cell geometry within 2 points.
 - **Sidebar workspace identity (`70dfb79`)** — the expanded native Sidebar is 15 rem
   (240 px), and workspace identity is reduced to a safe organization label.
 - **Update-card unread alignment (`70dfb79`)** — the unread dot is aligned with the first
@@ -181,6 +187,10 @@ the candidate image is
   semantics.
 - `852ce4a` — add local macOS assertions for common ADF values and Accordion
   collapse/reopen geometry.
+- `c24a73f` — preserve valid empty ADF paragraphs used by blank Jira table
+  cells while retaining safe malformed-content fallback behavior.
+- `319ddec` — verify blank-cell semantics and aligned table geometry in the
+  local macOS rich-content fixture.
 
 ## Ordered plan
 
@@ -228,6 +238,11 @@ recorded in **Current status** above are complete and validated.
     in a default-expanded Accordion. Focused local macOS verification passed on
     2026-08-30; the full six-scenario suite remains represented by the
     2026-08-29 run above and was not rerun for this slice.
+11. **Completed — Valid empty ADF paragraphs:** Preserve official ADF
+    paragraphs with omitted content as blank Jira table cells, while keeping
+    malformed paragraph and structurally invalid empty-cell input on the safe
+    fallback path. Rich-content-only local macOS verification passed on
+    2026-08-31; it did not rerun the complete six-scenario suite.
 
 ## Latest UI verification
 
