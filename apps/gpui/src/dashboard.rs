@@ -1049,8 +1049,7 @@ impl Dashboard {
             .domain_issues
             .first_mut()
             .expect("sample issue fixture");
-        issue.description_text = Some("Rich content fixture".to_owned());
-        issue.rich_description = Some(RichTextDocument::new(
+        let canonical_document = RichTextDocument::new(
             vec![
                 sentence(&["Epic: ", "ENG-43"]),
                 sentence(&["Per the ", "ENG-43", ", after"]),
@@ -1096,17 +1095,26 @@ impl Dashboard {
                 ]),
             ],
             false,
-        ));
+        );
+        let markdown_source = "## Parent\n\nIX-2108. Follow-up to IX-2226 (centralized audio formats).\n\n## Problem\n\n`UploadedRecordingsProcessing::RecordingFilePreparer#s3_filename` keeps the declared file type visible.\n\n### The API bug\n\nThe ingestion API already knows the filename and should not guess its extension.";
+        let markdown_document = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: markdown_source.to_owned(),
+                marks: Vec::new(),
+            }])],
+            false,
+        );
+        issue.description_text = Some(markdown_source.to_owned());
+        issue.rich_description = Some(markdown_document.clone());
+        let mut comment_blocks = canonical_document.blocks.clone();
+        comment_blocks.push(RichBlock::Image(comment_image.clone()));
         dashboard.detail_state = DetailState::Loaded(IssueDetailViewModel {
-            description: "Rich content fixture".to_owned(),
+            description: markdown_source.to_owned(),
             rich_description: issue.rich_description.clone(),
             comments: vec![CommentViewModel {
                 author: "Fixture author".to_owned(),
                 body: "Cached comment image".to_owned(),
-                rich_body: Some(RichTextDocument::new(
-                    vec![RichBlock::Image(comment_image.clone())],
-                    false,
-                )),
+                rich_body: Some(RichTextDocument::new(comment_blocks, false)),
                 created: "2026-08-30 00:00 UTC".to_owned(),
                 updated: None,
             }],

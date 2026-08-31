@@ -186,6 +186,28 @@ final class JiraDeskUITests: XCTestCase {
 
     func testRichContent() throws {
         try launchFixture(scenario: "rich-content")
+        let markdownSurface = try require(
+            app.descendants(matching: .any)["issue-description-markdown"],
+            "issue-description-markdown"
+        )
+        XCTAssertGreaterThan(markdownSurface.frame.width, 0, "Markdown description should have a visible width")
+        XCTAssertGreaterThan(markdownSurface.frame.height, 80, "Markdown description should lay out multiple rendered lines")
+        let renderedParent = app.staticTexts.matching(
+            NSPredicate(format: "value == %@", "Parent")
+        ).firstMatch
+        XCTAssertTrue(renderedParent.exists, "Markdown heading should expose its rendered text semantically")
+        let renderedProblem = app.staticTexts.matching(
+            NSPredicate(format: "value == %@", "Problem")
+        ).firstMatch
+        XCTAssertTrue(renderedProblem.exists, "Markdown body should expose the rendered Problem heading semantically")
+        let rawHeading = app.staticTexts.matching(
+            NSPredicate(format: "value CONTAINS %@", "## Parent")
+        ).firstMatch
+        XCTAssertFalse(rawHeading.exists, "Markdown heading delimiters must not be exposed as visible text")
+        let rawCode = app.staticTexts.matching(
+            NSPredicate(format: "value CONTAINS %@", "`UploadedRecordingsProcessing")
+        ).firstMatch
+        XCTAssertFalse(rawCode.exists, "Markdown inline-code delimiters must not be exposed as visible text")
         _ = try require(
             app.descendants(matching: .any)["rich-text-horizontal-rule"],
             "rich-text-horizontal-rule"
@@ -269,12 +291,12 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertEqual(taskItems.count, 2, "fixture table cell should expose TODO and DONE task items")
         let todoTask = try require(
-            app.descendants(matching: .any)["rich-text-task-item-9-0"],
-            "rich-text-task-item-9-0"
+            taskItems.matching(NSPredicate(format: "value == %@", "Todo task")).firstMatch,
+            "Todo task item"
         )
         let doneTask = try require(
-            app.descendants(matching: .any)["rich-text-task-item-9-1"],
-            "rich-text-task-item-9-1"
+            taskItems.matching(NSPredicate(format: "value == %@", "Done task")).firstMatch,
+            "Done task item"
         )
         XCTAssertEqual(todoTask.value as? String, "Todo task", "TODO state should remain semantic")
         XCTAssertEqual(doneTask.value as? String, "Done task", "DONE state should remain semantic")
@@ -284,23 +306,27 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertEqual(decisionItems.count, 2, "fixture should expose decided and undecided decisions")
         let decided = try require(
-            app.descendants(matching: .any)["rich-text-decision-item-15-0"],
-            "rich-text-decision-item-15-0"
+            decisionItems.matching(NSPredicate(format: "value == %@", "Decided decision")).firstMatch,
+            "Decided decision item"
         )
         let undecided = try require(
-            app.descendants(matching: .any)["rich-text-decision-item-15-1"],
-            "rich-text-decision-item-15-1"
+            decisionItems.matching(NSPredicate(format: "value == %@", "Undecided decision")).firstMatch,
+            "Undecided decision item"
         )
         XCTAssertEqual(decided.value as? String, "Decided decision")
         XCTAssertEqual(undecided.value as? String, "Undecided decision")
 
         let expand = try require(
-            app.descendants(matching: .any)["rich-text-expand-18"],
-            "rich-text-expand-18"
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "rich-text-expand-", "Details")
+            ).firstMatch,
+            "Details expand"
         )
         let nestedExpand = try require(
-            app.descendants(matching: .any)["rich-text-nested-expand-19"],
-            "rich-text-nested-expand-19"
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "rich-text-nested-expand-", "More details")
+            ).firstMatch,
+            "More details expand"
         )
         XCTAssertEqual(expand.value as? String, "Expanded")
         XCTAssertEqual(nestedExpand.value as? String, "Expanded")
@@ -308,8 +334,10 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertEqual(nestedExpand.label.isEmpty ? nestedExpand.title : nestedExpand.label, "More details")
 
         let emojiDate = try require(
-            app.descendants(matching: .any)["rich-text-paragraph-21"],
-            "rich-text-paragraph-21"
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@", "rich-text-paragraph-", "✅ 2026-08-30")
+            ).firstMatch,
+            "emoji/date paragraph"
         )
         XCTAssertTrue(
             emojiDate.identifier.hasPrefix("rich-text-paragraph-"),
@@ -317,16 +345,19 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertEqual(emojiDate.value as? String, "✅ 2026-08-30")
 
-        for (identifier, expected) in [
-            ("rich-text-paragraph-0", "Epic: ENG-43"),
-            ("rich-text-paragraph-1", "Per the ENG-43, after"),
-            ("rich-text-paragraph-2", "OPS-7"),
+        for expected in [
+            "Epic: ENG-43",
+            "Per the ENG-43, after",
+            "OPS-7",
         ] {
-            let paragraph = try require(app.staticTexts[identifier], identifier)
+            let paragraph = try require(
+                app.staticTexts.matching(NSPredicate(format: "value == %@", expected)).firstMatch,
+                "rich paragraph (expected)"
+            )
             XCTAssertEqual(
                 paragraph.value as? String,
                 expected,
-                "\(identifier) should expose exact rich paragraph value"
+                "rich paragraph should expose exact value"
             )
         }
 

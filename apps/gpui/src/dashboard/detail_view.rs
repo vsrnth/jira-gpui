@@ -2,8 +2,9 @@ use super::*;
 use gpui::rems;
 use gpui_component::{
     Sizable as _, Size, accordion::Accordion, description_list::DescriptionList, list::List,
-    popover::Popover,
+    popover::Popover, text::TextView,
 };
+use jira_domain::{RichBlock, RichInline, RichTextDocument};
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
     div()
@@ -25,6 +26,8 @@ fn issue_detail_key_accessibility_id(key: &str) -> String {
 }
 
 const MAX_DESCRIPTION_ACCESSIBLE_VALUE_BYTES: usize = 512;
+const MAX_MARKDOWN_DESCRIPTION_BYTES: usize = 64 * 1024;
+const MAX_MARKDOWN_DESCRIPTION_BLOCKS: usize = 256;
 
 fn bounded_description_accessible_value(description: &str) -> String {
     let description = description.trim();
@@ -45,6 +48,97 @@ fn bounded_description_accessible_value(description: &str) -> String {
     let mut bounded = description[..end].to_owned();
     bounded.push(ellipsis);
     bounded
+}
+
+/// Returns a Markdown source only for the legacy Jira shape that stores a complete
+/// Markdown document as text inside otherwise structureless ADF paragraphs.
+///
+/// Canonical ADF remains owned by the rich renderer: any non-text inline, mark,
+/// media candidate, truncation, or non-paragraph block keeps this path disabled.
+/// The syntax check requires an unmistakable block-level construct so ordinary
+/// prose containing a hash or backtick is never reinterpreted as Markdown.
+fn markdown_description_source(document: &RichTextDocument) -> Option<String> {
+    if document.truncated
+        || !document.fallback_images.is_empty()
+        || document.blocks.is_empty()
+        || document.blocks.len() > MAX_MARKDOWN_DESCRIPTION_BLOCKS
+    {
+        return None;
+    }
+
+    let mut source = String::new();
+    for (index, block) in document.blocks.iter().enumerate() {
+        let RichBlock::Paragraph(inlines) = block else {
+            return None;
+        };
+        if index > 0 {
+            source.push_str("\n\n");
+        }
+        for inline in inlines {
+            match inline {
+                RichInline::Text { text, marks } if marks.is_empty() => source.push_str(text),
+                RichInline::HardBreak => source.push('\n'),
+                _ => return None,
+            }
+            if source.len() > MAX_MARKDOWN_DESCRIPTION_BYTES {
+                return None;
+            }
+        }
+    }
+
+    let source = source.trim().to_owned();
+    if source.is_empty()
+        || contains_markdown_image_syntax(&source)
+        || !contains_strong_markdown_syntax(&source)
+    {
+        return None;
+    }
+    Some(source)
+}
+
+fn contains_markdown_image_syntax(source: &str) -> bool {
+    source.contains("![") || source.to_ascii_lowercase().contains("<img")
+}
+
+fn contains_strong_markdown_syntax(source: &str) -> bool {
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let heading = trimmed
+            .strip_prefix('#')
+            .map(|rest| rest.trim_start_matches('#'))
+            .is_some_and(|rest| rest.starts_with(' '));
+        let list = ["- ", "* ", "+ "]
+            .iter()
+            .any(|marker| trimmed.starts_with(marker))
+            || trimmed.split_once(". ").is_some_and(|(prefix, _)| {
+                !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit())
+            });
+        let quote = trimmed.starts_with("> ");
+        let rule = matches!(trimmed, "---" | "***" | "___");
+        let fenced = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        if heading || list || quote || rule || fenced {
+            return true;
+        }
+    }
+    false
+}
+
+fn markdown_accessible_text(source: &str) -> String {
+    let visible = source
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let without_heading = trimmed
+                .strip_prefix('#')
+                .map(|rest| rest.trim_start_matches('#'))
+                .filter(|rest| rest.starts_with(' '))
+                .map(str::trim_start)
+                .unwrap_or(trimmed);
+            without_heading.replace('`', "")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    bounded_description_accessible_value(&visible)
 }
 
 impl Dashboard {
@@ -219,7 +313,13 @@ impl Dashboard {
             }
             _ => issue.rich_description.clone(),
         };
-        let description_accessible_value = bounded_description_accessible_value(&description);
+        let markdown_source = rich_description
+            .as_ref()
+            .and_then(markdown_description_source);
+        let description_accessible_value = markdown_source
+            .as_deref()
+            .map(markdown_accessible_text)
+            .unwrap_or_else(|| bounded_description_accessible_value(&description));
         let detail_issue_id = match &self.remote_lookup {
             RemoteLookupState::Loaded { issue, .. } => Some(issue.id.clone()),
             _ if matches!(
@@ -247,19 +347,36 @@ impl Dashboard {
                 }
             })
         });
-        let description_content = rich_description
-            .as_ref()
-            .map(|document| {
-                render_rich_text_with_actions(
-                    document,
-                    self.rich_text_palette(cx),
-                    self.active_image_states(),
-                    0,
-                    ImageSource::ResolvedAdf,
-                    inline_attachment_action.clone(),
+        let description_content = if let Some(markdown_source) = markdown_source {
+            div()
+                .id("issue-description-markdown")
+                .accessibility_id("issue-description-markdown")
+                .role(gpui::accesskit::Role::Group)
+                .aria_label("Markdown description")
+                .min_w_0()
+                .text_sm()
+                .child(
+                    TextView::markdown("issue-description-markdown-text", markdown_source)
+                        // Jira descriptions are read-only. Keep Markdown links inert,
+                        // matching the existing ADF renderer's non-navigation contract.
+                        .on_link_click(|_, _, _, _| {}),
                 )
-            })
-            .unwrap_or_else(|| div().text_sm().child(description).into_any_element());
+                .into_any_element()
+        } else {
+            rich_description
+                .as_ref()
+                .map(|document| {
+                    render_rich_text_with_actions(
+                        document,
+                        self.rich_text_palette(cx),
+                        self.active_image_states(),
+                        0,
+                        ImageSource::ResolvedAdf,
+                        inline_attachment_action.clone(),
+                    )
+                })
+                .unwrap_or_else(|| div().text_sm().child(description).into_any_element())
+        };
         let assignee = issue.assignee.clone();
         let reporter = issue.reporter.clone();
         let status_category = issue.status_category.clone();
@@ -1330,7 +1447,12 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_description_accessible_value, issue_detail_key_accessibility_id};
+    use jira_domain::{RichBlock, RichInline, RichMark, RichTextDocument};
+
+    use super::{
+        bounded_description_accessible_value, issue_detail_key_accessibility_id,
+        markdown_accessible_text, markdown_description_source,
+    };
 
     #[test]
     fn issue_detail_key_accessibility_id_is_stable_and_keyed() {
@@ -1358,5 +1480,63 @@ mod tests {
         let bounded = bounded_description_accessible_value(&"a".repeat(513));
         assert_eq!(bounded.len(), super::MAX_DESCRIPTION_ACCESSIBLE_VALUE_BYTES);
         assert!(bounded.ends_with('…'));
+    }
+
+    #[test]
+    fn markdown_description_requires_block_syntax_and_preserves_source() {
+        let source = "## Problem\n\nUse `RecordingFilePreparer#s3_filename`.";
+        let document = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: source.to_owned(),
+                marks: Vec::new(),
+            }])],
+            false,
+        );
+        assert_eq!(
+            markdown_description_source(&document).as_deref(),
+            Some(source)
+        );
+        assert_eq!(
+            markdown_accessible_text(source),
+            "Problem\n\nUse RecordingFilePreparer#s3_filename."
+        );
+    }
+
+    #[test]
+    fn markdown_description_rejects_ambiguous_prose_markdown_and_images() {
+        let document = |text: &str| {
+            RichTextDocument::new(
+                vec![RichBlock::Paragraph(vec![RichInline::Text {
+                    text: text.to_owned(),
+                    marks: Vec::new(),
+                }])],
+                false,
+            )
+        };
+        assert!(
+            markdown_description_source(&document("Hash # in ordinary prose with `code`."))
+                .is_none()
+        );
+        assert!(
+            markdown_description_source(&document(
+                "See ![diagram](https://example.invalid/a.png)\n\n## Details"
+            ))
+            .is_none()
+        );
+        assert!(
+            markdown_description_source(&document(
+                "<IMG src=\"https://example.invalid/a.png\">\n\n## Details"
+            ))
+            .is_none()
+        );
+
+        let marked = RichTextDocument::new(
+            vec![RichBlock::Paragraph(vec![RichInline::Text {
+                text: "## Details".to_owned(),
+                marks: vec![RichMark::Strong],
+            }])],
+            false,
+        );
+        assert!(markdown_description_source(&marked).is_none());
     }
 }
