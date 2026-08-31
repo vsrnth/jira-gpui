@@ -64,6 +64,10 @@ interaction quality—not a mandate to copy visual treatments.
   types retain generic embedded icons. Icons are attached to type labels across issue rows,
   issue detail metadata, and update cards; issue keys remain text-only and common Jira/JSM
   aliases are covered.
+- **Issue-type semantic colors (`32ca4b6`)** — Story, Task, Bug/defect, and Epic
+  use blue, green, red, and purple tones respectively; unknown and less common
+  types remain neutral. Deterministic local-only macOS coverage is recorded with
+  `a9410ed`, `290ea0e`, `ac22576`, and `d5d76bb`.
 - **ADF rule and table support (`a8a051b`, `cf0884b`)** — bounded semantic
   tables and standalone horizontal rules are parsed, rendered, and projected
   to plain text, including stretched uneven-height rows and native table,
@@ -130,6 +134,20 @@ interaction quality—not a mandate to copy visual treatments.
   `xcresulttool` summary reporting `1 passed, 0 failed`. It stabilizes issue-row
   priority, empty-description cache, and collapsed workspace header
   accessibility semantics, superseding earlier intermediate timeout attempts.
+- **Onboarding verification busy state (`92ecc5c`)** — the connection dialog
+  presents stable verification/configuration status and keeps its credentials
+  fields and actions inert while the asynchronous check is in flight.
+  Deterministic local-only macOS coverage was added and stabilized by
+  `a9410ed`, `290ea0e`, `11ab2d2`, `ac22576`, and `d5d76bb`.
+- **Issue-type colors and onboarding busy validation** — the local-only run at
+  `target/ui-automation/onboarding-colors-final-full-20260831` passed
+  `onboarding`, `onboarding-busy`, `issues`, `rich-content`, `updates`, and
+  `team`; each saved summary reported `1 passed, 0 failed`. Settings initially
+  encountered a local testmanager service activation stall and passed after
+  per-user service recovery at
+  `target/ui-automation/settings-after-testmanager-reset-20260831/settings/TestResults.xcresult`,
+  whose saved summary reported `1 passed, 0 failed`. The initial all-in-one
+  run was not wholly green because of that Settings stall.
 
 The ADF status follow-up was verified separately through the local
 `rich-content` scenario on 2026-08-30. It asserted exact native AX values for
@@ -248,6 +266,12 @@ validation as the final evidence for these two commits.
 - `3b19107` — persist loaded empty details and cache comment ADF image bytes.
 - `6379508` — add local semantic regression coverage for cache, media,
   priorities, and collapsed-sidebar alignment.
+- `92ecc5c` — show onboarding verification progress and keep the connection
+  form inert while credentials are verified and configured.
+- `32ca4b6` — apply semantic colors to common Jira issue types.
+- `a9410ed`, `290ea0e`, `11ab2d2`, `ac22576`, `d5d76bb` — add and stabilize
+  deterministic local macOS coverage for onboarding busy behavior and issue
+  type-color surfaces.
 
 ## Ordered plan
 

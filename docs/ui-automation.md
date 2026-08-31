@@ -175,8 +175,11 @@ Run the complete local smoke suite, or one scenario:
 ```bash
 tools/macos-ui-automation/run.sh --suite
 tools/macos-ui-automation/run.sh --scenario onboarding
+tools/macos-ui-automation/run.sh --scenario onboarding-busy
 tools/macos-ui-automation/run.sh --scenario issues
 tools/macos-ui-automation/run.sh --scenario rich-content
+tools/macos-ui-automation/run.sh --scenario updates
+tools/macos-ui-automation/run.sh --scenario team
 tools/macos-ui-automation/run.sh --scenario settings
 ```
 
@@ -223,9 +226,9 @@ For another local run, replace the run ID and scenario in the path:
 
 ### Scenarios and artifacts
 
-The fixture host accepts exactly `onboarding`, `issues`, `rich-content`, `updates`,
-`team`, and `settings`. The XCUITest target performs bounded semantic waits and
-read-only actions:
+The fixture host accepts exactly `onboarding`, `onboarding-busy`, `issues`,
+`rich-content`, `updates`, `team`, and `settings`. The XCUITest target
+performs bounded semantic waits and read-only actions:
 
 - `onboarding` opens the connection dialog, selects each field by its exact
   accessibility ID, clicks it for editor focus, and enters the synthetic site
@@ -236,8 +239,16 @@ read-only actions:
   fields, confirms the fixture Connect control is present without activating
   it, and cancels the dialog. XCTest diagnostics may display the synthetic
   site/email values in local logs or attachments; they are never sent to Jira.
+- `onboarding-busy` opens the production connection dialog in its deterministic
+  verification-in-progress state. It checks the stable busy status copy and
+  bounded status geometry, then attempts to interact with the site, email,
+  token, remember, Cancel, and Connect controls. The fields and actions must
+  remain inert, the status and dialog must remain present, and no dashboard may
+  open. The fixture supplies no credentials or token, and this scenario uses no
+  keychain, network, Jira, persistence, or Jira writes.
 - `issues` selects the deterministic fixture row `issue-row-DESK-179` and
-  verifies Story/Task type identity, the normalized `sample` workspace label,
+  verifies Story/Task/Bug/Epic type identity and their rendered semantic color
+  surfaces, the normalized `sample` workspace label,
   and bounded-waits for the `issue-detail` accessible title/label to become
   exactly `Issue detail for DESK-179`. It also verifies the semantic
   `issue-detail-details-trigger` control, confirms that the Details accordion
@@ -268,6 +279,18 @@ read-only actions:
   vertical tolerance. `team` verifies the `team-table` container.
 
 ### Latest validated run
+
+The issue-type semantic-color and onboarding verification busy revisions
+(`32ca4b6`, `92ecc5c`) were covered by automation commits `a9410ed`,
+`290ea0e`, `11ab2d2`, `ac22576`, and `d5d76bb`. The local-only run at
+`target/ui-automation/onboarding-colors-final-full-20260831` passed
+`onboarding`, `onboarding-busy`, `issues`, `rich-content`, `updates`, and
+`team`; each saved summary reported `1 passed, 0 failed`. Settings initially
+encountered a local testmanager service activation stall and passed after
+per-user service recovery at
+`target/ui-automation/settings-after-testmanager-reset-20260831/settings/TestResults.xcresult`,
+whose saved summary reported `1 passed, 0 failed`. The initial all-in-one run
+was not wholly green because of that Settings stall.
 
 The final consolidated local macOS XCUITest suite passed on 2026-08-31 at
 `target/ui-automation/cache-priority-final-20260831`. The `xcresulttool` summary

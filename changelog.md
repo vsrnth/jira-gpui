@@ -42,6 +42,9 @@ branch; it is not a published release.
   including story, task and sub-task variants, bug/defect, epic, initiative,
   spike, improvement/new feature, incident/problem, change, and service
   request. Unknown types keep a neutral fallback icon.
+- Jira issue-type indicators now use semantic tones for Story (blue), Task
+  (green), Bug/defect (red), and Epic (purple), while unknown and less common
+  types remain neutral (`32ca4b6`).
 - Common issue types now use app-owned Lucide assets: Story → `book-open-text`,
   Task/standard task → `list-checks`, and Bug/defect → `bug`. The composite
   app `AssetSource` serves these paths while delegating the rest of the icon
@@ -86,6 +89,10 @@ branch; it is not a published release.
 - Markdown links in the text-only fallback are inert, and Markdown/HTML image
   syntax is rejected so Jira images continue to use the authenticated,
   persistent attachment-cache path (`b6e8812`).
+- The onboarding verification dialog now presents a prominent, accessible
+  busy state while Jira credentials are verified and the connection is
+  configured. Its fields and actions remain inert until verification finishes
+  (`92ecc5c`).
 
 ### Security
 
@@ -171,6 +178,17 @@ branch; it is not a published release.
   stabilizes issue-row priority, empty-description cache, and collapsed
   workspace header accessibility semantics, superseding earlier intermediate
   timeout attempts.
+- Added deterministic local-only macOS coverage for issue-type semantic colors
+  and onboarding verification busy behavior (`a9410ed`, `290ea0e`, `11ab2d2`,
+  `ac22576`, `d5d76bb`). The `onboarding`, `onboarding-busy`, `issues`,
+  `rich-content`, `updates`, and `team` scenarios each passed at
+  `target/ui-automation/onboarding-colors-final-full-20260831`; each saved
+  summary reported `1 passed, 0 failed`. Settings initially encountered a
+  local testmanager service activation stall, then passed after per-user
+  service recovery at
+  `target/ui-automation/settings-after-testmanager-reset-20260831/settings/TestResults.xcresult`,
+  whose saved summary reported `1 passed, 0 failed`. The initial all-in-one
+  run was not wholly green because of that Settings stall.
 - Captured the deterministic offscreen five-case GPUI matrix successfully on
   2026-08-31 at `target/ui-lab/cache-priority-20260831`, including the Issues
   and Settings candidate images. This capture result is separate from the
