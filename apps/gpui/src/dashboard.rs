@@ -983,7 +983,7 @@ impl Dashboard {
                         },
                         RichTableCell {
                             header: true,
-                            content: vec![text("Value")],
+                            content: vec![text("Pass/Fail")],
                         },
                     ],
                 },
@@ -1009,6 +1009,18 @@ impl Dashboard {
                                     },
                                 ]),
                             ],
+                        },
+                    ],
+                },
+                RichTableRow {
+                    cells: vec![
+                        RichTableCell {
+                            header: false,
+                            content: vec![RichBlock::Paragraph(Vec::new())],
+                        },
+                        RichTableCell {
+                            header: false,
+                            content: vec![RichBlock::Paragraph(Vec::new())],
                         },
                     ],
                 },

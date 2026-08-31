@@ -147,6 +147,14 @@ final class JiraDeskUITests: XCTestCase {
             app.descendants(matching: .any)["rich-text-table-cell-1-1"],
             "rich-text-table-cell-1-1"
         )
+        let emptyCell = try require(
+            app.descendants(matching: .any)["rich-text-table-cell-2-0"],
+            "rich-text-table-cell-2-0"
+        )
+        let secondEmptyCell = try require(
+            app.descendants(matching: .any)["rich-text-table-cell-2-1"],
+            "rich-text-table-cell-2-1"
+        )
         XCTAssertLessThanOrEqual(
             abs(shortCell.frame.minY - multilineCell.frame.minY),
             2.0,
@@ -157,6 +165,22 @@ final class JiraDeskUITests: XCTestCase {
             2.0,
             "uneven table cells should share a bottom edge"
         )
+        XCTAssertGreaterThan(emptyCell.frame.height, 0, "empty table cells should retain a bounded cell surface")
+        XCTAssertGreaterThan(secondEmptyCell.frame.height, 0, "second empty table cell should retain a bounded cell surface")
+        XCTAssertLessThanOrEqual(
+            abs(emptyCell.frame.minY - secondEmptyCell.frame.minY),
+            2.0,
+            "empty table cells should share a top edge"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(emptyCell.frame.maxY - secondEmptyCell.frame.maxY),
+            2.0,
+            "empty table cells should share a bottom edge"
+        )
+        XCTAssertEqual(emptyCell.label, "", "first empty cell should have no visible fallback text")
+        XCTAssertEqual(secondEmptyCell.label, "", "second empty cell should have no visible fallback text")
+        XCTAssertEqual(emptyCell.value as? String ?? "", "", "first empty cell should remain blank")
+        XCTAssertEqual(secondEmptyCell.value as? String ?? "", "", "second empty cell should remain blank")
         _ = try require(app.descendants(matching: .any)["rich-image-fixture-image"], "rich-image-fixture-image")
 
         let loading = app.descendants(matching: .any).matching(
@@ -204,23 +228,23 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertEqual(decisionItems.count, 2, "fixture should expose decided and undecided decisions")
         let decided = try require(
-            app.descendants(matching: .any)["rich-text-decision-item-13-0"],
-            "rich-text-decision-item-13-0"
+            app.descendants(matching: .any)["rich-text-decision-item-15-0"],
+            "rich-text-decision-item-15-0"
         )
         let undecided = try require(
-            app.descendants(matching: .any)["rich-text-decision-item-13-1"],
-            "rich-text-decision-item-13-1"
+            app.descendants(matching: .any)["rich-text-decision-item-15-1"],
+            "rich-text-decision-item-15-1"
         )
         XCTAssertEqual(decided.value as? String, "Decided decision")
         XCTAssertEqual(undecided.value as? String, "Undecided decision")
 
         let expand = try require(
-            app.descendants(matching: .any)["rich-text-expand-16"],
-            "rich-text-expand-16"
+            app.descendants(matching: .any)["rich-text-expand-18"],
+            "rich-text-expand-18"
         )
         let nestedExpand = try require(
-            app.descendants(matching: .any)["rich-text-nested-expand-17"],
-            "rich-text-nested-expand-17"
+            app.descendants(matching: .any)["rich-text-nested-expand-19"],
+            "rich-text-nested-expand-19"
         )
         XCTAssertEqual(expand.value as? String, "Expanded")
         XCTAssertEqual(nestedExpand.value as? String, "Expanded")
@@ -228,8 +252,8 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertEqual(nestedExpand.label.isEmpty ? nestedExpand.title : nestedExpand.label, "More details")
 
         let emojiDate = try require(
-            app.descendants(matching: .any)["rich-text-paragraph-19"],
-            "rich-text-paragraph-19"
+            app.descendants(matching: .any)["rich-text-paragraph-21"],
+            "rich-text-paragraph-21"
         )
         XCTAssertTrue(
             emojiDate.identifier.hasPrefix("rich-text-paragraph-"),

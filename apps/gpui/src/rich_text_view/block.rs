@@ -638,6 +638,18 @@ mod tests {
                             },
                         ],
                     },
+                    RichTableRow {
+                        cells: vec![
+                            RichTableCell {
+                                header: false,
+                                content: vec![RichBlock::Paragraph(Vec::new())],
+                            },
+                            RichTableCell {
+                                header: false,
+                                content: vec![RichBlock::Paragraph(Vec::new())],
+                            },
+                        ],
+                    },
                 ],
             })],
             false,
@@ -662,6 +674,12 @@ mod tests {
         let multiline_cell = visual
             .debug_bounds("rich-text-table-cell-1-1")
             .expect("multiline table cell should expose stable geometry");
+        let empty_cell = visual
+            .debug_bounds("rich-text-table-cell-2-0")
+            .expect("empty table cell should expose stable geometry");
+        let second_empty_cell = visual
+            .debug_bounds("rich-text-table-cell-2-1")
+            .expect("second empty table cell should expose stable geometry");
         assert!(
             (f32::from(short_cell.origin.y) - f32::from(multiline_cell.origin.y)).abs() <= 2.,
             "table cells should share a top edge: short={short_cell:?}, multiline={multiline_cell:?}"
@@ -672,6 +690,19 @@ mod tests {
             .abs()
                 <= 2.,
             "table cells should share a bottom edge: short={short_cell:?}, multiline={multiline_cell:?}"
+        );
+        assert!(empty_cell.size.height > gpui::px(0.));
+        assert!(second_empty_cell.size.height > gpui::px(0.));
+        assert!(
+            (f32::from(empty_cell.origin.y) - f32::from(second_empty_cell.origin.y)).abs() <= 2.,
+            "empty table cells should share a top edge: first={empty_cell:?}, second={second_empty_cell:?}"
+        );
+        assert!(
+            (f32::from(empty_cell.origin.y + empty_cell.size.height)
+                - f32::from(second_empty_cell.origin.y + second_empty_cell.size.height))
+            .abs()
+                <= 2.,
+            "empty table cells should share a bottom edge: first={empty_cell:?}, second={second_empty_cell:?}"
         );
     }
 
