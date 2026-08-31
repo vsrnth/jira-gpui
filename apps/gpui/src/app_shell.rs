@@ -80,7 +80,8 @@ impl AppearancePreference {
 const REMEMBER_CREDENTIALS_DEFAULT: bool = true;
 const REMEMBER_CREDENTIALS_LABEL: &str = "Remember securely in system keyring";
 const CHECKING_KEYRING_STATUS: &str = "Checking system keyring…";
-const VERIFYING_SCOPED_TOKEN_STATUS: &str = "Resolving Jira site and verifying scoped token…";
+const VERIFYING_CREDENTIALS_STATUS: &str =
+    "Verifying Jira credentials and configuring your Jira connection…";
 const JIRA_SITE_LABEL: &str = "Jira site";
 const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
 const SCOPED_TOKEN_PLACEHOLDER: &str = "Paste your scoped Jira API token";
@@ -122,6 +123,25 @@ impl ConnectionReadiness {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OnboardingBusyPolicy {
+    inputs_disabled: bool,
+    remember_disabled: bool,
+    submit_disabled: bool,
+    cancel_disabled: bool,
+    trigger_disabled: bool,
+}
+
+fn onboarding_busy_policy(connecting: bool) -> OnboardingBusyPolicy {
+    OnboardingBusyPolicy {
+        inputs_disabled: connecting,
+        remember_disabled: connecting,
+        submit_disabled: connecting,
+        cancel_disabled: connecting,
+        trigger_disabled: connecting,
+    }
+}
+
 /// Keeps the onboarding gate local, deterministic, and independent of the network request.
 fn connection_readiness(base_url: &str, email: &str, api_token: &str) -> ConnectionReadiness {
     let api_token = api_token.trim();
@@ -141,6 +161,14 @@ fn should_show_validation_guidance(
     user_started_entering: bool,
 ) -> bool {
     !connecting && (validation_attempted || user_started_entering)
+}
+
+/// Keeps a busy onboarding form visibly and accessibly occupied even if an async transition has
+/// not supplied a more specific status yet.
+fn onboarding_status(connecting: bool, status: Option<&str>) -> Option<String> {
+    status
+        .map(str::to_owned)
+        .or_else(|| connecting.then(|| VERIFYING_CREDENTIALS_STATUS.to_owned()))
 }
 
 fn validation_guidance(readiness: ConnectionReadiness) -> Option<String> {
@@ -415,7 +443,7 @@ impl AppShell {
                 Ok(Some(saved)) => {
                     let (base_url, email, api_token) = saved.into_parts();
                     let _ = this.update(cx, |this, cx| {
-                        this.connection_status = Some(VERIFYING_SCOPED_TOKEN_STATUS.to_owned());
+                        this.connection_status = Some(VERIFYING_CREDENTIALS_STATUS.to_owned());
                         cx.notify();
                     });
                     let result =
@@ -492,7 +520,7 @@ impl AppShell {
         drop(old_api_token);
         self.api_token_subscription = Some(Self::submit_subscription(&self.api_token, window, cx));
         self.connection_error = None;
-        self.connection_status = Some(VERIFYING_SCOPED_TOKEN_STATUS.to_owned());
+        self.connection_status = Some(VERIFYING_CREDENTIALS_STATUS.to_owned());
         self.connecting = true;
 
         cx.spawn(async move |this, cx| {
@@ -548,6 +576,7 @@ impl AppShell {
         accessibility_id: &'static str,
         content_type: Option<InputContentType>,
         help: Option<&'static str>,
+        disabled: bool,
         state: &Entity<InputState>,
         muted_foreground: gpui::Hsla,
     ) -> impl IntoElement {
@@ -560,6 +589,7 @@ impl AppShell {
                     .when_some(content_type, |this, content_type| {
                         this.content_type(content_type)
                     })
+                    .disabled(disabled)
                     .accessibility_id(accessibility_id)
                     .aria_label(label),
             )
@@ -577,6 +607,9 @@ impl AppShell {
         cx: &mut gpui::App,
     ) -> DialogContent {
         let shell = view.read(cx);
+        let busy_policy = onboarding_busy_policy(shell.connecting);
+        let connection_status =
+            onboarding_status(shell.connecting, shell.connection_status.as_deref());
         let readiness = connection_readiness(
             &base_url.read(cx).unmask_value(),
             &email.read(cx).unmask_value(),
@@ -681,6 +714,7 @@ impl AppShell {
                         "onboarding-jira-site",
                         None,
                         Some("Use your-team or a full HTTPS Atlassian Cloud URL."),
+                        busy_policy.inputs_disabled,
                         base_url,
                         cx.theme().muted_foreground,
                     ))
@@ -689,6 +723,7 @@ impl AppShell {
                         "onboarding-atlassian-email",
                         Some(InputContentType::EmailAddress),
                         None,
+                        busy_policy.inputs_disabled,
                         email,
                         cx.theme().muted_foreground,
                     ))
@@ -699,8 +734,9 @@ impl AppShell {
                             .child(
                                 Input::new(api_token)
                                     .w_full()
-                                    .mask_toggle()
+                                    .when(!busy_policy.inputs_disabled, |this| this.mask_toggle())
                                     .content_type(InputContentType::Password)
+                                    .disabled(busy_policy.inputs_disabled)
                                     .accessibility_id("onboarding-api-token")
                                     .aria_label(SCOPED_TOKEN_LABEL),
                             )
@@ -714,6 +750,7 @@ impl AppShell {
                     .child(
                         Checkbox::new("remember-jira-login")
                             .checked(shell.remember_credentials)
+                            .disabled(busy_policy.remember_disabled)
                             .on_click(move |checked, _, cx| {
                                 remember_view.update(cx, |this, cx| {
                                     this.remember_credentials = *checked;
@@ -730,7 +767,7 @@ impl AppShell {
                                     .child(REMEMBER_CREDENTIALS_LABEL),
                             ),
                     )
-                    .when_some(shell.connection_status.as_ref(), |this, status| {
+                    .when_some(connection_status, |this, status| {
                         this.child(
                             h_flex()
                                 .id("connection-status")
@@ -740,9 +777,17 @@ impl AppShell {
                                 .min_w_0()
                                 .items_center()
                                 .gap_2()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().primary.opacity(0.5))
+                                .bg(cx.theme().primary.opacity(0.08))
+                                .px_3()
+                                .py_2()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .when(shell.connecting, |this| this.child(Spinner::new().xsmall()))
+                                .when(shell.connecting, |this| {
+                                    this.child(Spinner::new().small().color(cx.theme().primary))
+                                })
                                 .child(div().min_w_0().child(status.clone())),
                         )
                     })
@@ -757,25 +802,36 @@ impl AppShell {
                 DialogFooter::new()
                     .px_4()
                     .pb_4()
-                    .child(
-                        div().w(rems(ONBOARDING_DIALOG_ACTION_WIDTH_REMS)).child(
-                            DialogClose::new().child(
-                                Button::new("cancel-jira-connection")
-                                    .w_full()
-                                    .label("Cancel")
-                                    .accessibility_id("onboarding-connect-dialog-cancel")
-                                    .debug_selector(|| {
-                                        "onboarding-connect-dialog-cancel".to_owned()
-                                    })
-                                    .outline(),
-                            ),
-                        ),
-                    )
+                    .child(div().w(rems(ONBOARDING_DIALOG_ACTION_WIDTH_REMS)).child(
+                        if busy_policy.cancel_disabled {
+                            Button::new("cancel-jira-connection")
+                                .w_full()
+                                .label("Cancel")
+                                .accessibility_id("onboarding-connect-dialog-cancel")
+                                .debug_selector(|| "onboarding-connect-dialog-cancel".to_owned())
+                                .outline()
+                                .disabled(true)
+                                .into_any_element()
+                        } else {
+                            DialogClose::new()
+                                .child(
+                                    Button::new("cancel-jira-connection")
+                                        .w_full()
+                                        .label("Cancel")
+                                        .accessibility_id("onboarding-connect-dialog-cancel")
+                                        .debug_selector(|| {
+                                            "onboarding-connect-dialog-cancel".to_owned()
+                                        })
+                                        .outline(),
+                                )
+                                .into_any_element()
+                        },
+                    ))
                     .child(
                         Button::new("connect-jira-submit")
                             .w(rems(ONBOARDING_DIALOG_ACTION_WIDTH_REMS))
                             .label(if shell.connecting {
-                                "Connecting…"
+                                "Verifying…"
                             } else {
                                 "Connect"
                             })
@@ -783,7 +839,7 @@ impl AppShell {
                             .accessibility_id("onboarding-connect-dialog-submit")
                             .debug_selector(|| "onboarding-connect-dialog-submit".to_owned())
                             .disabled(
-                                shell.connecting
+                                busy_policy.submit_disabled
                                     || !shell.connection_enabled
                                     || !readiness.is_ready(),
                             )
@@ -806,11 +862,15 @@ impl AppShell {
             let base_url = base_url.clone();
             let email = email.clone();
             let api_token = api_token.clone();
-            dialog.p_0().content(move |content, _, cx| {
-                Self::build_connection_dialog_content(
-                    content, &view, &base_url, &email, &api_token, cx,
-                )
-            })
+            let cancel_guard_view = view.clone();
+            dialog
+                .on_cancel(move |_, _, cx| !cancel_guard_view.read(cx).connecting)
+                .p_0()
+                .content(move |content, _, cx| {
+                    Self::build_connection_dialog_content(
+                        content, &view, &base_url, &email, &api_token, cx,
+                    )
+                })
         });
     }
 
@@ -826,7 +886,7 @@ impl AppShell {
     fn render_connection_form(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = layout_for_width(f32::from(window.viewport_size().width));
         let mobile = layout.is_mobile();
-        let connecting = self.connecting;
+        let busy_policy = onboarding_busy_policy(self.connecting);
 
         let welcome = v_flex()
             .min_w_0()
@@ -865,7 +925,7 @@ impl AppShell {
                     .primary()
                     .accessibility_id("onboarding-connect-trigger")
                     .debug_selector(|| "onboarding-connect-trigger".to_owned())
-                    .disabled(connecting)
+                    .disabled(busy_policy.trigger_disabled)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_connection_dialog(window, cx);
                     })),
@@ -953,10 +1013,11 @@ mod tests {
         AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, JIRA_SITE_LABEL,
         KEYRING_STORAGE_COPY, REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL,
         SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
-        UNSAVED_CREDENTIALS_COPY, VERIFYING_SCOPED_TOKEN_STATUS, WRITE_SAFETY_COPY,
+        UNSAVED_CREDENTIALS_COPY, VERIFYING_CREDENTIALS_STATUS, WRITE_SAFETY_COPY,
         connection_failure_copy, connection_readiness, is_submit_event,
-        notification_width_for_viewport, save_credentials_warning, saved_login_warning,
-        should_check_saved_credentials, should_show_validation_guidance, validation_guidance,
+        notification_width_for_viewport, onboarding_busy_policy, onboarding_status,
+        save_credentials_warning, saved_login_warning, should_check_saved_credentials,
+        should_show_validation_guidance, validation_guidance,
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
@@ -1101,6 +1162,43 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_busy_state_has_stable_fallback_status() {
+        assert_eq!(
+            onboarding_status(true, None).as_deref(),
+            Some(VERIFYING_CREDENTIALS_STATUS)
+        );
+        assert_eq!(
+            onboarding_status(true, Some(CHECKING_KEYRING_STATUS)).as_deref(),
+            Some(CHECKING_KEYRING_STATUS)
+        );
+        assert_eq!(onboarding_status(false, None), None);
+    }
+
+    #[test]
+    fn onboarding_busy_policy_disables_every_mutable_control_and_action() {
+        assert_eq!(
+            onboarding_busy_policy(true),
+            super::OnboardingBusyPolicy {
+                inputs_disabled: true,
+                remember_disabled: true,
+                submit_disabled: true,
+                cancel_disabled: true,
+                trigger_disabled: true,
+            }
+        );
+        assert_eq!(
+            onboarding_busy_policy(false),
+            super::OnboardingBusyPolicy {
+                inputs_disabled: false,
+                remember_disabled: false,
+                submit_disabled: false,
+                cancel_disabled: false,
+                trigger_disabled: false,
+            }
+        );
+    }
+
+    #[test]
     fn failed_connection_copy_requires_token_reentry_without_exposing_a_secret() {
         let copy = connection_failure_copy("Jira rejected the credentials");
         assert!(copy.contains("Jira rejected the credentials"));
@@ -1148,7 +1246,8 @@ mod tests {
         );
         assert_eq!(UNSAVED_CREDENTIALS_COPY, "Not saved after this session.");
         assert!(CHECKING_KEYRING_STATUS.contains("Checking system keyring"));
-        assert!(VERIFYING_SCOPED_TOKEN_STATUS.contains("verifying scoped token"));
+        assert!(VERIFYING_CREDENTIALS_STATUS.contains("Verifying Jira credentials"));
+        assert!(VERIFYING_CREDENTIALS_STATUS.contains("configuring"));
     }
 
     #[test]
