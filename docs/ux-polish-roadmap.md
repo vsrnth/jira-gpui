@@ -121,6 +121,9 @@ interaction quality—not a mandate to copy visual treatments.
   semantic queries against the actual AX contract; the revised rich-content
   scenario passed in the authoritative real-window run at
   `target/ui-automation/markdown-description-verified-20260831/rich-content/TestResults.xcresult`.
+  The complete six-scenario committed-tree suite subsequently passed at
+  `target/ui-automation/markdown-description-full-suite-20260831`, with each
+  saved summary reporting `Passed, 1 passed, 0 failed`.
 - **Local regression coverage (`295484c`)** — the consolidated local macOS
   XCUITest suite passed all six scenarios on 2026-08-31 at
   `target/ui-automation/cache-priority-final-20260831`, with each
@@ -163,7 +166,12 @@ retained roots are
 `target/ui-automation/markdown-description-after-testmanager-reset-20260831`.
 These earlier roots are diagnostic history only. The verified Markdown/canonical
 ADF scenario now passes and does not supersede the separate earlier six-scenario
-passing run.
+passing run. The final consolidated six-scenario committed-tree suite then
+passed on 2026-08-31 at
+`target/ui-automation/markdown-description-full-suite-20260831`; onboarding,
+issues, rich-content, updates, team, and settings each reported
+`Passed, 1 passed, 0 failed`. This supersedes the targeted-only Markdown
+validation as the final evidence for these two commits.
 
 ## Completed coherent commits
 

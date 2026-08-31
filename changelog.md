@@ -158,6 +158,13 @@ branch; it is not a published release.
   screenshot is retained in the result bundle. Earlier automation-mode timeout
   roots remain diagnostic history only and do not supersede the earlier
   six-scenario passing run.
+- The final consolidated local-only macOS XCUITest suite for the Markdown
+  revision passed all six scenarios on 2026-08-31 at
+  `target/ui-automation/markdown-description-full-suite-20260831`; the saved
+  summaries for `onboarding`, `issues`, `rich-content`, `updates`, `team`, and
+  `settings` each reported `Passed, 1 passed, 0 failed`. This supersedes the
+  targeted-only Markdown validation as the final evidence for `b6e8812` and
+  `1cf2f7a`.
 - The consolidated local-only macOS XCUITest suite passed all six scenarios on
   2026-08-31 at `target/ui-automation/cache-priority-final-20260831`; each
   `xcresulttool` summary reported `1 passed, 0 failed`. Commit `295484c`
@@ -176,6 +183,9 @@ branch; it is not a published release.
   (`onboarding`, `issues`, `rich-content`, `updates`, `team`, and `settings`);
   the complete run passed on 2026-08-29. Artifacts are retained under
   `target/ui-automation/final-20260829` (`b9c4f07`).
+- Built and verified the macOS arm64 package
+  `dist/Jira_Desk-0.1.43-local-arm64.dmg`, including its version metadata,
+  filesystem contents, checksum, and ad-hoc signature.
 
 The validated six-scenario run covered real issue-row type and workspace
 identity, ready rich content (image, rule, and table with no loading or

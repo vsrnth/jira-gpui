@@ -302,6 +302,15 @@ They do not supersede the earlier six-scenario passing run at
 `target/ui-automation/cache-priority-final-20260831`; the verified Markdown
 scenario is an additional passing rich-content result.
 
+The final consolidated committed-tree suite for this Markdown revision also
+passed on 2026-08-31 at
+`target/ui-automation/markdown-description-full-suite-20260831`. The saved
+`xcresulttool` summaries for `onboarding`, `issues`, `rich-content`, `updates`,
+`team`, and `settings` each reported `Passed, 1 passed, 0 failed`. This is the
+final consolidated validation for commits `b6e8812` and `1cf2f7a`, superseding
+the targeted-only Markdown result while retaining the earlier timeout roots as
+diagnostic history.
+
 The complete six-scenario local suite passed on 2026-08-29. Its artifacts are
 retained under `target/ui-automation/final-20260829`:
 
