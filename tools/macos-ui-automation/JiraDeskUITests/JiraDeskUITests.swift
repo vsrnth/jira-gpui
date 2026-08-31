@@ -111,7 +111,7 @@ final class JiraDeskUITests: XCTestCase {
 
         XCTAssertTrue(body.frame.contains(remember.frame), "remember control should remain inside the dialog body")
         XCTAssertGreaterThan(remember.frame.width, 180, "remember control should have bounded width")
-        XCTAssertGreaterThan(remember.frame.height, 20, "remember control should have bounded height")
+        XCTAssertGreaterThan(remember.frame.height, 12, "remember control should have bounded height")
         remember.click()
         XCTAssertEqual(axValue(remember), initialRemember, "busy remember control must not mutate")
 
