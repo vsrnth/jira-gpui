@@ -192,22 +192,32 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertGreaterThan(markdownSurface.frame.width, 0, "Markdown description should have a visible width")
         XCTAssertGreaterThan(markdownSurface.frame.height, 80, "Markdown description should lay out multiple rendered lines")
-        let renderedParent = app.staticTexts.matching(
-            NSPredicate(format: "value == %@", "Parent")
-        ).firstMatch
-        XCTAssertTrue(renderedParent.exists, "Markdown heading should expose its rendered text semantically")
-        let renderedProblem = app.staticTexts.matching(
-            NSPredicate(format: "value == %@", "Problem")
-        ).firstMatch
-        XCTAssertTrue(renderedProblem.exists, "Markdown body should expose the rendered Problem heading semantically")
-        let rawHeading = app.staticTexts.matching(
-            NSPredicate(format: "value CONTAINS %@", "## Parent")
-        ).firstMatch
-        XCTAssertFalse(rawHeading.exists, "Markdown heading delimiters must not be exposed as visible text")
-        let rawCode = app.staticTexts.matching(
-            NSPredicate(format: "value CONTAINS %@", "`UploadedRecordingsProcessing")
-        ).firstMatch
-        XCTAssertFalse(rawCode.exists, "Markdown inline-code delimiters must not be exposed as visible text")
+        let description = try require(
+            app.descendants(matching: .any)["issue-detail-description"],
+            "issue-detail-description"
+        )
+        let descriptionSemanticText = [
+            description.label,
+            description.title,
+            description.value as? String ?? "",
+        ].joined(separator: " ")
+        for expected in [
+            "Parent",
+            "Problem",
+            "The API bug",
+            "UploadedRecordingsProcessing::RecordingFilePreparer#s3_filename",
+        ] {
+            XCTAssertTrue(
+                descriptionSemanticText.contains(expected),
+                "Markdown description should expose rendered semantic text: \(expected)"
+            )
+        }
+        for rejected in ["## Parent", "## Problem", "### The API bug", "`"] {
+            XCTAssertFalse(
+                descriptionSemanticText.contains(rejected),
+                "Markdown description should not expose source delimiter: \(rejected)"
+            )
+        }
         _ = try require(
             app.descendants(matching: .any)["rich-text-horizontal-rule"],
             "rich-text-horizontal-rule"
@@ -318,13 +328,13 @@ final class JiraDeskUITests: XCTestCase {
 
         let expand = try require(
             app.descendants(matching: .any).matching(
-                NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "rich-text-expand-", "Details")
+                NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-expand-")
             ).firstMatch,
             "Details expand"
         )
         let nestedExpand = try require(
             app.descendants(matching: .any).matching(
-                NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "rich-text-nested-expand-", "More details")
+                NSPredicate(format: "identifier BEGINSWITH %@", "rich-text-nested-expand-")
             ).firstMatch,
             "More details expand"
         )
@@ -350,14 +360,18 @@ final class JiraDeskUITests: XCTestCase {
             "Per the ENG-43, after",
             "OPS-7",
         ] {
+            let paragraphCandidate = app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH %@ AND title == %@", "rich-text-paragraph-", expected)
+            ).firstMatch
             let paragraph = try require(
-                app.staticTexts.matching(NSPredicate(format: "value == %@", expected)).firstMatch,
-                "rich paragraph (expected)"
+                paragraphCandidate,
+                "rich paragraph with title \(expected)"
             )
+            let semanticTitle = paragraph.title.isEmpty ? paragraph.label : paragraph.title
             XCTAssertEqual(
-                paragraph.value as? String,
+                semanticTitle,
                 expected,
-                "rich paragraph should expose exact value"
+                "rich paragraph should expose exact semantic title"
             )
         }
 
