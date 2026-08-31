@@ -285,12 +285,20 @@ impl Dashboard {
                                 "Collapse sidebar"
                             })
                             .w_full()
-                            .justify_end()
-                            .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.toggle_sidebar(layout, cx);
-                                }),
-                            )),
+                            .justify_center()
+                            .child(
+                                h_flex()
+                                    .id("sidebar-toggle-button")
+                                    .debug_selector(|| "sidebar-toggle-button".to_owned())
+                                    .justify_center()
+                                    .child(
+                                        SidebarToggleButton::new().collapsed(collapsed).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.toggle_sidebar(layout, cx);
+                                            }),
+                                        ),
+                                    ),
+                            ),
                     )
                 })
                 .into_any_element()

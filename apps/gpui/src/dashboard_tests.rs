@@ -648,6 +648,39 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     assert!(visual.debug_bounds("sidebar-profile-label").is_none());
     assert!(visual.debug_bounds("sidebar-workspace-site").is_none());
     assert!(visual.debug_bounds("sidebar-workspace-mode").is_none());
+
+    let collapsed_sidebar = visual
+        .debug_bounds("dashboard-sidebar")
+        .expect("collapsed sidebar should remain laid out");
+    let collapsed_workspace_icon = visual
+        .debug_bounds("sidebar-workspace-icon")
+        .expect("collapsed workspace icon should remain visible");
+    let collapsed_toggle_button = visual
+        .debug_bounds("sidebar-toggle-button")
+        .expect("collapsed toggle button should expose its control bounds");
+    let rail_center = collapsed_sidebar.origin.x + collapsed_sidebar.size.width / 2.;
+    let workspace_icon_center =
+        collapsed_workspace_icon.origin.x + collapsed_workspace_icon.size.width / 2.;
+    let toggle_button_center =
+        collapsed_toggle_button.origin.x + collapsed_toggle_button.size.width / 2.;
+    assert!(
+        collapsed_toggle_button.origin.x >= collapsed_sidebar.origin.x
+            && collapsed_toggle_button.origin.x + collapsed_toggle_button.size.width
+                <= collapsed_sidebar.origin.x + collapsed_sidebar.size.width,
+        "collapsed toggle must stay inside the 3rem rail: sidebar={collapsed_sidebar:?}, toggle={collapsed_toggle_button:?}"
+    );
+    assert!(
+        (f32::from(workspace_icon_center) - f32::from(rail_center)).abs() <= 1.5,
+        "collapsed workspace icon should be centered in the rail: sidebar={collapsed_sidebar:?}, icon={collapsed_workspace_icon:?}"
+    );
+    assert!(
+        (f32::from(toggle_button_center) - f32::from(rail_center)).abs() <= 1.5,
+        "collapsed toggle should share the workspace icon rail: sidebar={collapsed_sidebar:?}, toggle={collapsed_toggle_button:?}"
+    );
+    assert!(
+        (f32::from(workspace_icon_center) - f32::from(toggle_button_center)).abs() <= 1.5,
+        "collapsed workspace icon and toggle should share a horizontal center: icon={collapsed_workspace_icon:?}, toggle={collapsed_toggle_button:?}"
+    );
 }
 
 #[gpui::test]
