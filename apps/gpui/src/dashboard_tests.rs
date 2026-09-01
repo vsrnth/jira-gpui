@@ -2195,6 +2195,98 @@ fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui::T
 }
 
 #[gpui::test]
+fn mobile_comment_confirmation_actions_are_intrinsic_and_non_overlapping(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let issue = sample_issues().into_iter().next().expect("sample issue");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
+    dashboard.mobile_detail_open = true;
+    dashboard
+        .comment_flow
+        .begin_confirmation(
+            CommentTarget {
+                issue_id: issue.id.clone(),
+                issue_key: issue.key.as_str().to_owned(),
+            },
+            "A fixture comment requiring confirmation",
+        )
+        .expect("fixture comment should enter confirmation");
+    let window = cx.open_window(gpui::size(px(640.), px(900.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.ensure_comment_input(window, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let composer = visual
+        .debug_bounds("comment-composer")
+        .expect("comment composer should be laid out");
+    let actions = visual
+        .debug_bounds("comment-composer-actions")
+        .expect("comment action row should be laid out");
+    let post_now = visual
+        .debug_bounds("post-comment-now")
+        .expect("Post now button should be laid out");
+    let cancel = visual
+        .debug_bounds("cancel-comment")
+        .expect("Cancel button should be laid out");
+
+    assert!(post_now.size.width > px(0.));
+    assert!(cancel.size.width > px(0.));
+    assert!(post_now.size.height > px(0.));
+    assert!(cancel.size.height > px(0.));
+    assert!(
+        post_now.size.width < actions.size.width * 0.6,
+        "Post now should retain intrinsic width on mobile: button={post_now:?}, actions={actions:?}"
+    );
+    assert!(
+        cancel.size.width < actions.size.width * 0.6,
+        "Cancel should retain intrinsic width on mobile: button={cancel:?}, actions={actions:?}"
+    );
+    assert!(
+        actions.origin.x >= composer.origin.x
+            && actions.origin.y >= composer.origin.y
+            && actions.origin.x + actions.size.width
+                <= composer.origin.x + composer.size.width + px(1.)
+            && actions.origin.y + actions.size.height
+                <= composer.origin.y + composer.size.height + px(1.),
+        "mobile comment action row should remain inside composer: actions={actions:?}, composer={composer:?}"
+    );
+    for (name, button) in [("Post now", post_now), ("Cancel", cancel)] {
+        assert!(
+            button.origin.x >= actions.origin.x
+                && button.origin.y >= actions.origin.y
+                && button.origin.x + button.size.width
+                    <= actions.origin.x + actions.size.width + px(1.)
+                && button.origin.y + button.size.height
+                    <= actions.origin.y + actions.size.height + px(1.),
+            "{name} should remain inside mobile action row: button={button:?}, actions={actions:?}"
+        );
+    }
+    assert!(
+        (f32::from(post_now.origin.y) - f32::from(cancel.origin.y)).abs() <= 1.,
+        "confirmation actions should share a row at narrow width: post={post_now:?}, cancel={cancel:?}"
+    );
+    assert!(
+        post_now.origin.x + post_now.size.width <= cancel.origin.x,
+        "horizontal confirmation actions should not overlap: post={post_now:?}, cancel={cancel:?}"
+    );
+    assert!(
+        (f32::from(cancel.origin.x + cancel.size.width)
+            - f32::from(actions.origin.x + actions.size.width))
+        .abs()
+            <= 1.,
+        "confirmation action group should be trailing-aligned: cancel={cancel:?}, actions={actions:?}"
+    );
+}
+
+#[gpui::test]
 fn mobile_remote_lookup_loading_and_error_states_stay_visible_in_the_list(
     cx: &mut gpui::TestAppContext,
 ) {

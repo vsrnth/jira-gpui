@@ -17,6 +17,8 @@ pub enum UiAutomationScenario {
     Issues,
     /// Rich issue content with a preloaded image fixture.
     RichContent,
+    /// Inert comment confirmation at a narrow/mobile window width.
+    CommentConfirmation,
     /// The local change ledger.
     Updates,
     /// The local team tracker.
@@ -33,6 +35,7 @@ impl UiAutomationScenario {
             Self::OnboardingBusy => "onboarding-busy",
             Self::Issues => "issues",
             Self::RichContent => "rich-content",
+            Self::CommentConfirmation => "comment-confirmation",
             Self::Updates => "updates",
             Self::Team => "team",
             Self::Settings => "settings",
@@ -46,11 +49,12 @@ impl UiAutomationScenario {
             "onboarding-busy" => Ok(Self::OnboardingBusy),
             "issues" => Ok(Self::Issues),
             "rich-content" => Ok(Self::RichContent),
+            "comment-confirmation" => Ok(Self::CommentConfirmation),
             "updates" => Ok(Self::Updates),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, updates, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings"
             ),
         }
     }
@@ -66,10 +70,9 @@ pub enum Command {
 }
 
 /// Text printed by `--help`.
-pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
+pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | comment-confirmation | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
 
-const SCENARIOS: &str =
-    "onboarding, onboarding-busy, issues, rich-content, updates, team, settings";
+const SCENARIOS: &str = "onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings";
 
 fn next_value(args: &mut impl Iterator<Item = String>) -> Result<String> {
     let value = args
@@ -138,7 +141,13 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
     };
     use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 
-    const WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
+    const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
+    const COMMENT_CONFIRMATION_WINDOW_SIZE: Size<Pixels> = size(px(640.), px(900.));
+    let window_size = if scenario == UiAutomationScenario::CommentConfirmation {
+        COMMENT_CONFIRMATION_WINDOW_SIZE
+    } else {
+        DEFAULT_WINDOW_SIZE
+    };
     const APP_ID: &str = "dev.jiradesk.JiraDesk.UIAutomation";
     const WINDOW_TITLE: &str = "Jira Desk UI Automation";
 
@@ -154,14 +163,14 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                 .map(|display| {
                     let visible = display.visible_bounds();
                     let available = visible.size;
-                    let width = WINDOW_SIZE.width.as_f32().min(available.width.as_f32());
-                    let height = WINDOW_SIZE.height.as_f32().min(available.height.as_f32());
+                    let width = window_size.width.as_f32().min(available.width.as_f32());
+                    let height = window_size.height.as_f32().min(available.height.as_f32());
                     WindowBounds::Windowed(Bounds::centered_at(
                         visible.center(),
                         size(px(width.max(1.)), px(height.max(1.))),
                     ))
                 })
-                .unwrap_or_else(|| WindowBounds::centered(WINDOW_SIZE, cx));
+                .unwrap_or_else(|| WindowBounds::centered(window_size, cx));
             let window_options = WindowOptions {
                 window_bounds: Some(bounds),
                 window_decorations: Some(WindowDecorations::Client),
@@ -190,6 +199,9 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                         }
                         UiAutomationScenario::RichContent => {
                             Some(Dashboard::from_ui_automation_rich_content())
+                        }
+                        UiAutomationScenario::CommentConfirmation => {
+                            Some(Dashboard::from_ui_automation_comment_confirmation())
                         }
                         UiAutomationScenario::Updates => Some(
                             Dashboard::from_sample_data_for_section(SampleSection::Updates),
@@ -235,7 +247,7 @@ fn launch(_: UiAutomationScenario) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, UiAutomationScenario, parse_args};
+    use super::{Command, HELP, SCENARIOS, UiAutomationScenario, parse_args};
 
     #[test]
     fn parser_accepts_only_the_supported_scenario_form() {
@@ -244,6 +256,10 @@ mod tests {
             ("onboarding-busy", UiAutomationScenario::OnboardingBusy),
             ("issues", UiAutomationScenario::Issues),
             ("rich-content", UiAutomationScenario::RichContent),
+            (
+                "comment-confirmation",
+                UiAutomationScenario::CommentConfirmation,
+            ),
             ("updates", UiAutomationScenario::Updates),
             ("team", UiAutomationScenario::Team),
             ("settings", UiAutomationScenario::Settings),
@@ -276,6 +292,8 @@ mod tests {
         assert_eq!(parse_args(["--help"]).unwrap(), Command::Help);
         assert_eq!(parse_args(["--list"]).unwrap(), Command::List);
         assert!(parse_args(["--list", "--scenario", "issues"]).is_err());
+        assert!(HELP.contains("comment-confirmation"));
+        assert!(SCENARIOS.contains("comment-confirmation"));
     }
 
     #[cfg(not(target_os = "macos"))]

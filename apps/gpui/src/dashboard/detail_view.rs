@@ -1334,7 +1334,7 @@ impl Dashboard {
             .into_any_element()
     }
 
-    fn render_comment_composer(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
+    fn render_comment_composer(&self, _layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
         let Some(input) = self.comment_input.as_ref() else {
             return div().into_any_element();
         };
@@ -1392,14 +1392,16 @@ impl Dashboard {
                         .role(gpui::accesskit::Role::Group)
                         .aria_label("Comment actions")
                         .w_full()
-                        .when(!layout.is_mobile(), |this| this.justify_end())
-                        .when(layout.is_mobile(), |this| this.flex_col())
+                        .justify_end()
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             Button::new("post-comment-now")
                                 .primary()
                                 .small()
                                 .compact()
+                                .debug_selector(|| "post-comment-now".to_owned())
+                                .accessibility_id("post-comment-now")
                                 .label("Post now")
                                 .on_click(
                                     cx.listener(|this, _, window, cx| {
@@ -1411,6 +1413,8 @@ impl Dashboard {
                             Button::new("cancel-comment")
                                 .small()
                                 .compact()
+                                .debug_selector(|| "cancel-comment".to_owned())
+                                .accessibility_id("cancel-comment")
                                 .label("Cancel")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.cancel_comment_confirmation(cx)
@@ -1440,8 +1444,8 @@ impl Dashboard {
                         .role(gpui::accesskit::Role::Group)
                         .aria_label("Comment actions")
                         .w_full()
-                        .when(!layout.is_mobile(), |this| this.justify_end())
-                        .when(layout.is_mobile(), |this| this.flex_col())
+                        .justify_end()
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             Button::new("post-comment")
@@ -1478,8 +1482,8 @@ impl Dashboard {
                     .role(gpui::accesskit::Role::Group)
                     .aria_label("Comment actions")
                     .w_full()
-                    .when(!layout.is_mobile(), |this| this.justify_end())
-                    .when(layout.is_mobile(), |this| this.flex_col())
+                    .justify_end()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         Button::new("post-comment")

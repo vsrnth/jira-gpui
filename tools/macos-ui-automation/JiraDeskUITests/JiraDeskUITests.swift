@@ -743,6 +743,63 @@ final class JiraDeskUITests: XCTestCase {
         add(screenshot)
     }
 
+    func testCommentConfirmationActions() throws {
+        try launchFixture(scenario: "comment-confirmation")
+
+        let composer = try require(
+            app.descendants(matching: .any)["comment-composer"],
+            "comment-composer"
+        )
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        let actions = try require(
+            app.descendants(matching: .any)["comment-composer-actions"],
+            "comment-composer-actions"
+        )
+        let postNow = try require(app.buttons["post-comment-now"], "post-comment-now")
+        let cancel = try require(app.buttons["cancel-comment"], "cancel-comment")
+
+        XCTAssertGreaterThan(postNow.frame.width, 0, "Post now should have visible width")
+        XCTAssertGreaterThan(cancel.frame.width, 0, "Cancel should have visible width")
+        XCTAssertTrue(hostWindow.frame.contains(postNow.frame), "Post now should be visible inside the host window")
+        XCTAssertTrue(hostWindow.frame.contains(cancel.frame), "Cancel should be visible inside the host window")
+        XCTAssertLessThan(
+            postNow.frame.width,
+            actions.frame.width * 0.6,
+            "Post now should retain intrinsic width in the confirmation action surface"
+        )
+        XCTAssertLessThan(
+            cancel.frame.width,
+            actions.frame.width * 0.6,
+            "Cancel should retain intrinsic width in the confirmation action surface"
+        )
+        XCTAssertTrue(composer.frame.contains(actions.frame), "confirmation actions should remain inside composer")
+        XCTAssertTrue(actions.frame.contains(postNow.frame), "Post now should remain inside action surface")
+        XCTAssertTrue(actions.frame.contains(cancel.frame), "Cancel should remain inside action surface")
+        XCTAssertLessThanOrEqual(
+            abs(cancel.frame.maxX - actions.frame.maxX),
+            2,
+            "confirmation action group should be trailing-aligned in the narrow action surface"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(postNow.frame.midY - cancel.frame.midY),
+            2,
+            "confirmation actions should share a row at narrow width"
+        )
+        XCTAssertLessThanOrEqual(
+            postNow.frame.maxX,
+            cancel.frame.minX,
+            "horizontal confirmation actions should not overlap"
+        )
+        XCTAssertEqual(postNow.label.isEmpty ? postNow.title : postNow.label, "Post now")
+        XCTAssertEqual(cancel.label.isEmpty ? cancel.title : cancel.label, "Cancel")
+
+        // This fixture is intentionally confirmation-only. The write action is never activated.
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "comment-confirmation-actions-final"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
     func testSettings() throws {
         try launchFixture(scenario: "settings")
         let sidebarMenu = try require(app.descendants(matching: .any)["nav-settings"], "nav-settings")

@@ -1220,6 +1220,41 @@ impl Dashboard {
         dashboard
     }
 
+    /// Builds the short, inert comment-confirmation fixture used by local macOS accessibility
+    /// tests. It stages confirmation without installing a workspace, so the test can inspect the
+    /// real confirmation layout without enabling Jira writes.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn from_ui_automation_comment_confirmation() -> Self {
+        use crate::presentation::IssueDetailViewModel;
+
+        let mut dashboard = Self::from_sample_data();
+        dashboard.mobile_detail_open = true;
+        dashboard.issue_details_open = false;
+        let issue = dashboard
+            .domain_issues
+            .first()
+            .cloned()
+            .expect("sample issue fixture");
+        dashboard.selected_issue = Some(issue.id.clone());
+        dashboard.detail_state = DetailState::Loaded(IssueDetailViewModel {
+            description: "Short confirmation fixture description.".to_owned(),
+            rich_description: None,
+            comments: Vec::new(),
+            attachments: Vec::new(),
+        });
+        dashboard
+            .comment_flow
+            .begin_confirmation(
+                CommentTarget {
+                    issue_id: issue.id.clone(),
+                    issue_key: issue.key.as_str().to_owned(),
+                },
+                "A fixture comment requiring confirmation",
+            )
+            .expect("fixture comment should enter confirmation");
+        dashboard
+    }
+
     #[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
     fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink, section: Section) -> Self {
         let domain_issues = sample_issues();
