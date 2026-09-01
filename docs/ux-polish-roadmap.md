@@ -89,9 +89,14 @@ interaction quality—not a mandate to copy visual treatments.
   collapsible without losing the selected issue or metadata.
 - **Comment composer action sizing** — idle, error, and confirmation actions
   use compact buttons in trailing desktop action rows; local GPUI coverage
-  bounds the idle `Post comment` control inside the detail pane. The
+  bounds the idle `Post comment` control inside the detail pane and the
+  narrow/mobile confirmation `Post now` and `Cancel` controls in trailing,
+  wrapping, non-overlapping intrinsic-width rows. The
   authoritative local macOS regression passed on 2026-08-31 at
   `target/ui-automation/comment-action-final-20260831/rich-content/TestResults.xcresult`
+  with result `Passed, 1 passed, 0 failed`. The dedicated narrow/mobile
+  confirmation regression passed on 2026-09-01 at
+  `target/ui-automation/comment-confirmation-final2-20260901/comment-confirmation/TestResults.xcresult`
   with result `Passed, 1 passed, 0 failed`.
 - **Empty ADF table cells (`c24a73f`, `319ddec`)** — omitted paragraph
   content, which official ADF permits and Jira uses for visually blank table

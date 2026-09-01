@@ -66,6 +66,9 @@ branch; it is not a published release.
 
 - Comment composer actions now use compact, trailing action rows so the idle
   `Post comment` control keeps intrinsic width inside the issue detail pane.
+- Comment confirmation actions now keep their intrinsic widths in trailing,
+  wrapping rows at narrow/mobile layouts, with stable semantic identifiers for
+  local coverage.
 - Issue-type icons are associated with the visible type label in issue rows,
   issue-detail metadata, and update cards. Issue keys remain text-only so the
   task check icon cannot be mistaken for a status indicator (`70dfb79`).

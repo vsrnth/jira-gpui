@@ -227,8 +227,8 @@ For another local run, replace the run ID and scenario in the path:
 ### Scenarios and artifacts
 
 The fixture host accepts exactly `onboarding`, `onboarding-busy`, `issues`,
-`rich-content`, `updates`, `team`, and `settings`. The XCUITest target
-performs bounded semantic waits and read-only actions:
+`rich-content`, `comment-confirmation`, `updates`, `team`, and `settings`.
+The XCUITest target performs bounded semantic waits and read-only actions:
 
 - `onboarding` opens the connection dialog, selects each field by its exact
   accessibility ID, clicks it for editor focus, and enters the synthetic site
@@ -266,6 +266,11 @@ performs bounded semantic waits and read-only actions:
 - `rich-content` also verifies the idle `Post comment` Button is compact and
   remains inside its semantic composer/action-row surfaces without spanning
   the detail pane. It does not click the write control.
+- `comment-confirmation` uses a separate inert fixture with a staged comment
+  confirmation and a narrow host window. It verifies the semantic `Post now`
+  and `Cancel` buttons retain intrinsic widths in a trailing horizontal row,
+  remain inside the action surface, and do not overlap; it never activates
+  either control or writes to Jira. The focused GPUI regression passes locally.
 - `rich-content` opens a fixture with a horizontal rule, a valid table, and a
   preloaded PNG image plus canonical Pass/Fail status lozenges. It requires
   the semantic rule/table/image IDs, exact native AX values for the distinct
@@ -311,6 +316,11 @@ refresh, or assignee controls.
 
 The authoritative compact comment-action regression passed on 2026-08-31 at
 `target/ui-automation/comment-action-final-20260831/rich-content/TestResults.xcresult`;
+the saved result reported `Passed, 1 passed, 0 failed`.
+
+The authoritative narrow/mobile comment-confirmation regression passed on
+2026-09-01 at
+`target/ui-automation/comment-confirmation-final2-20260901/comment-confirmation/TestResults.xcresult`;
 the saved result reported `Passed, 1 passed, 0 failed`.
 
 The issue-type semantic-color and onboarding verification busy revisions
