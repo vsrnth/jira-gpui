@@ -802,25 +802,59 @@ final class JiraDeskUITests: XCTestCase {
 
     func testSettings() throws {
         try launchFixture(scenario: "settings")
-        let sidebarMenu = try require(app.descendants(matching: .any)["nav-settings"], "nav-settings")
-
         let sidebar = try require(app.descendants(matching: .any)["dashboard-sidebar"], "dashboard-sidebar")
-        let settingsIdentity = sidebarMenu.label.isEmpty ? sidebarMenu.title : sidebarMenu.label
-        XCTAssertEqual(settingsIdentity, "Settings")
-        let settingsFrame = sidebarMenu.frame
-        XCTAssertTrue(sidebar.frame.contains(settingsFrame), "expanded Settings navigation must remain inside the sidebar bounds")
-        XCTAssertGreaterThanOrEqual(
-            settingsFrame.width,
-            200,
-            "expanded Settings submenu needs enough width for Desktop notifications"
-        )
-        XCTAssertGreaterThanOrEqual(
-            settingsFrame.height,
-            180,
-            "expanded Settings submenu needs enough height for Desktop notifications"
-        )
+        let navSettings = app.descendants(matching: .any)["nav-settings"]
+        XCTAssertFalse(navSettings.exists, "settings must not be a primary sidebar navigation item")
 
+        let profile = try require(app.buttons["sidebar-profile"], "sidebar-profile")
+        let profileName = profile.label.isEmpty ? profile.title : profile.label
+        XCTAssertFalse(profileName.isEmpty, "profile trigger should expose the account name")
+        XCTAssertGreaterThan(profile.frame.width, 0)
+        XCTAssertGreaterThan(profile.frame.height, 0)
+        XCTAssertTrue(sidebar.frame.contains(profile.frame), "profile trigger should stay inside the sidebar")
+
+        func openAccountMenu() throws {
+            profile.click()
+            for label in [
+                "Appearance",
+                "Issue scope",
+                "Team tracker",
+                "Desktop notifications",
+                "Saved Jira login",
+            ] {
+                _ = try require(app.menuItems[label], "account menu item \(label)")
+            }
+        }
+
+        func activateAccountMenuItem(_ label: String) throws {
+            try openAccountMenu()
+            let item = try require(app.menuItems[label], "account menu item \(label)")
+            let frame = item.frame
+            XCTAssertGreaterThan(frame.width, 0, "account menu item \(label) should have visible width")
+            XCTAssertGreaterThan(frame.height, 0, "account menu item \(label) should have visible height")
+            XCTAssertTrue(frame.minX.isFinite && frame.maxX.isFinite && frame.minY.isFinite && frame.maxY.isFinite,
+                          "account menu item \(label) should have bounded geometry")
+            item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        }
+
+        try activateAccountMenuItem("Appearance")
         _ = try require(app.descendants(matching: .any)["appearance-dark"], "appearance-dark")
+
+        try activateAccountMenuItem("Issue scope")
+        _ = try require(app.descendants(matching: .any)["JQL scope"], "JQL scope")
+        _ = try require(app.buttons["Save and refresh"], "Save and refresh")
+
+        try activateAccountMenuItem("Team tracker")
+        _ = try require(app.descendants(matching: .any)["Team tracker members"], "Team tracker members")
+        _ = try require(app.buttons["Save team"], "Save team")
+
+        try activateAccountMenuItem("Desktop notifications")
+        _ = try require(app.buttons["Send test notification"], "Send test notification")
+
+        try activateAccountMenuItem("Saved Jira login")
+        _ = try require(app.buttons["Forget saved Jira login"], "Forget saved Jira login")
+
+        try activateAccountMenuItem("Appearance")
         let darkToggle = try require(app.checkBoxes["Use Dark appearance"], "Use Dark appearance")
         darkToggle.click()
         let darkExpectation = XCTNSPredicateExpectation(
@@ -845,7 +879,7 @@ final class JiraDeskUITests: XCTestCase {
 
         let toggle = try require(app.descendants(matching: .any)["sidebar-toggle"], "sidebar-toggle")
         toggle.click()
-        XCTAssertFalse(sidebarMenu.frame.width > 100, "collapsed sidebar should use the icon-only rail")
+        XCTAssertLessThan(sidebar.frame.width, 100, "collapsed sidebar should use the icon-only rail")
         let collapsedWorkspaceHeader = try require(
             app.descendants(matching: .any)["sidebar-workspace-header"],
             "sidebar-workspace-header after collapse"

@@ -627,6 +627,10 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     let profile = visual
         .debug_bounds("sidebar-profile")
         .expect("expanded sidebar should expose account footer");
+    assert!(
+        visual.debug_bounds("nav-settings").is_none(),
+        "settings must be opened from the account menu, not the primary navigation"
+    );
     assert!(refresh.size.width <= px(24.));
     assert!(refresh.size.height <= px(24.));
     assert!(refresh.origin.x >= profile_actions.origin.x);
@@ -649,7 +653,6 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     );
     assert!(profile.origin.x >= sidebar.origin.x);
     assert!(profile.origin.x + profile.size.width <= sidebar.origin.x + sidebar.size.width);
-    assert!(visual.debug_bounds("sidebar-profile-label").is_some());
 
     visual.simulate_click(
         gpui::point(
@@ -742,6 +745,45 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     assert!(
         (f32::from(workspace_icon_center) - f32::from(toggle_button_center)).abs() <= 1.5,
         "collapsed workspace icon and toggle should share a horizontal center: icon={collapsed_workspace_icon:?}, toggle={collapsed_toggle_button:?}"
+    );
+}
+
+#[gpui::test]
+fn account_menu_exposes_settings_categories_and_selects_settings_section(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("nav-settings").is_none());
+    let profile = visual
+        .debug_bounds("sidebar-profile")
+        .expect("profile should be a visible account-menu trigger");
+    visual.simulate_click(
+        gpui::point(
+            profile.origin.x + profile.size.width / 2.,
+            profile.origin.y + profile.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+
+    // PopupMenu owns keyboard focus and exposes each standard item as a semantic MenuItem. The
+    // first down press enters the menu list, then three more move through the first categories.
+    visual.simulate_keystrokes("down down down down enter");
+    visual.run_until_parked();
+    assert!(
+        dashboard_entity.read_with(&visual, |dashboard, _| {
+            dashboard.section == Section::Settings
+                && dashboard.settings_category == SettingsCategory::TeamTracker
+        }),
+        "selecting Team tracker should activate the matching settings category"
     );
 }
 

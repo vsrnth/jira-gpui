@@ -289,10 +289,15 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   `Open Jira issue ENG-43`), and no Link role for a rejected hostile
   scheme. It never clicks links or opens a browser.
 - `settings` starts on the fixture's Settings/Appearance screen and verifies
-  that the full `Desktop notifications` label stays within the
-  expanded sidebar, activates the nested `Use Dark appearance` CheckBox, and
-  then confirms collapsed mode hides expanded labels and keeps the workspace
-  icon and sidebar toggle centered in the collapsed rail.
+  that Settings is absent from the desktop primary sidebar. The GPUI mobile
+  navigation coverage keeps the Settings destination available. It opens the
+  named profile's accessible account-menu button, checks that the native dropdown exposes
+  Appearance, Issue scope, Team tracker, Desktop notifications, and Saved Jira
+  login as semantic menu items, selects each item using bounded center-coordinate
+  activation, and checks the distinct category controls (appearance, JQL scope,
+  team members, desktop notification test, and saved-login action). It also
+  activates the `Use Dark appearance` CheckBox and confirms collapsed mode keeps
+  the workspace icon and sidebar toggle centered in the collapsed rail.
 - `updates` navigates to its read-only surface and compares the accessibility
   frames of `update-unread-dot-0` and `update-metadata-0` with a bounded
   vertical tolerance. `team` verifies the `team-table` container, the cached

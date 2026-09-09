@@ -5,7 +5,8 @@ use crate::app_assets::AppIconName;
 use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
 use gpui::MouseButton;
 use gpui_component::{
-    Collapsible as _,
+    Collapsible as _, Sizable as _,
+    menu::{DropdownMenu as _, PopupMenuItem},
     sidebar::{
         Sidebar, SidebarCollapsible, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenuItem,
         SidebarToggleButton,
@@ -71,10 +72,6 @@ struct AccessibleSidebarMenuItem {
     accessible_label: String,
     selected: bool,
     activation: SidebarActivation,
-    /// Settings retains the component's own pointer handler so it can open its submenu. Its
-    /// wrapper handles AXPress and keyboard activation separately, preventing duplicate section
-    /// dispatch when a driver presses the semantic node.
-    component_handles_pointer: bool,
 }
 
 impl AccessibleSidebarMenuItem {
@@ -91,13 +88,7 @@ impl AccessibleSidebarMenuItem {
             accessible_label: accessible_label.into(),
             selected,
             activation: Rc::new(activation),
-            component_handles_pointer: false,
         }
-    }
-
-    fn component_handles_pointer(mut self, handles_pointer: bool) -> Self {
-        self.component_handles_pointer = handles_pointer;
-        self
     }
 }
 
@@ -124,8 +115,7 @@ impl SidebarItem for AccessibleSidebarMenuItem {
         let accessible_label = self.accessible_label;
         let selected = self.selected;
         let activation = self.activation;
-        let component_handles_pointer = self.component_handles_pointer;
-        let mut wrapper = div()
+        div()
             .id(accessibility_id)
             .debug_selector(move || accessibility_id.to_owned())
             .accessibility_id(accessibility_id)
@@ -142,17 +132,8 @@ impl SidebarItem for AccessibleSidebarMenuItem {
                     }
                 }
             })
-            .child(item);
-
-        if component_handles_pointer {
-            wrapper = wrapper
-                .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
-                    activation(&gpui::ClickEvent::default(), window, cx)
-                });
-        } else {
-            wrapper = wrapper.on_click(move |event, window, cx| activation(event, window, cx));
-        }
-        wrapper
+            .on_click(move |event, window, cx| activation(event, window, cx))
+            .child(item)
     }
 }
 
@@ -206,8 +187,7 @@ impl Dashboard {
                 self.section == Section::Team,
                 Section::Team,
                 cx,
-            ))
-            .child(self.settings_sidebar_menu_item(cx));
+            ));
 
         let workspace = h_flex()
             .id("sidebar-workspace-header")
@@ -332,32 +312,7 @@ impl Dashboard {
         };
 
         let profile_label = self.sidebar_profile_label();
-        let profile = h_flex()
-            .id("sidebar-profile")
-            .debug_selector(|| "sidebar-profile".to_owned())
-            .accessibility_id("sidebar-profile")
-            .role(gpui::accesskit::Role::Group)
-            .aria_label(profile_label.clone())
-            .min_w_0()
-            .items_center()
-            .gap_2()
-            .when(collapsed, |this| this.gap_0())
-            .child(
-                Icon::new(IconName::CircleUser)
-                    .size_4()
-                    .when(collapsed, |this| this.size_3()),
-            )
-            .when(!collapsed, |this| {
-                this.child(
-                    div()
-                        .id("sidebar-profile-label")
-                        .debug_selector(|| "sidebar-profile-label".to_owned())
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .child(profile_label.clone()),
-                )
-            });
+        let profile = self.render_profile_trigger(profile_label, collapsed, cx);
 
         let footer = v_flex()
             .id("sidebar-footer-content")
@@ -406,11 +361,7 @@ impl Dashboard {
                             this.flex_col().h(gpui::rems(5.)).gap_1().justify_center()
                         })
                         .when(!collapsed, |this| this.gap_1())
-                        .child(if collapsed {
-                            profile.into_any_element()
-                        } else {
-                            profile.flex_1().into_any_element()
-                        })
+                        .child(profile)
                         .when(self.refresh_visible(), |this| {
                             this.child(self.render_refresh_action(
                                 "sidebar-refresh",
@@ -457,6 +408,58 @@ impl Dashboard {
             })
     }
 
+    fn render_profile_trigger(
+        &self,
+        profile_label: String,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dashboard = cx.entity().downgrade();
+        Button::new("sidebar-profile")
+            .debug_selector(|| "sidebar-profile".to_owned())
+            .accessibility_id("sidebar-profile")
+            .ghost()
+            .compact()
+            .when(collapsed, |this| {
+                this.icon(IconName::CircleUser).xsmall().size_4()
+            })
+            .when(!collapsed, |this| {
+                this.icon(IconName::CircleUser)
+                    .label(profile_label.clone())
+                    .dropdown_caret(true)
+                    .flex_1()
+                    .flex_shrink_1()
+                    .min_w_0()
+                    .max_w(gpui::rems(10.5))
+                    .justify_start()
+            })
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                let settings = [
+                    ("Appearance", SettingsCategory::Appearance),
+                    ("Issue scope", SettingsCategory::IssueScope),
+                    ("Team tracker", SettingsCategory::TeamTracker),
+                    (
+                        "Desktop notifications",
+                        SettingsCategory::DesktopNotifications,
+                    ),
+                    ("Saved Jira login", SettingsCategory::SavedJiraLogin),
+                ];
+                settings.into_iter().fold(
+                    menu.label("Settings").separator(),
+                    |menu, (label, category)| {
+                        let dashboard = dashboard.clone();
+                        menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            let _ = dashboard.update(cx, |dashboard, cx| {
+                                dashboard.settings_category = category;
+                                dashboard.activate_section(Section::Settings, cx);
+                            });
+                        }))
+                    },
+                )
+            })
+            .into_any_element()
+    }
+
     fn sidebar_menu_item(
         &self,
         label: &'static str,
@@ -497,67 +500,6 @@ impl Dashboard {
                 this.activate_section(section, cx);
             }),
         )
-    }
-
-    fn settings_sidebar_menu_item(&self, cx: &mut Context<Self>) -> AccessibleSidebarMenuItem {
-        AccessibleSidebarMenuItem::new(
-            SidebarMenuItem::new("Settings")
-                .icon(IconName::Settings2)
-                .active(self.section == Section::Settings)
-                .click_to_open(true)
-                .default_open(self.section == Section::Settings)
-                .children([
-                    self.settings_category_menu_item(
-                        "Appearance",
-                        SettingsCategory::Appearance,
-                        cx,
-                    ),
-                    self.settings_category_menu_item(
-                        "Issue scope",
-                        SettingsCategory::IssueScope,
-                        cx,
-                    ),
-                    self.settings_category_menu_item(
-                        "Team tracker",
-                        SettingsCategory::TeamTracker,
-                        cx,
-                    ),
-                    self.settings_category_menu_item(
-                        "Desktop notifications",
-                        SettingsCategory::DesktopNotifications,
-                        cx,
-                    ),
-                    self.settings_category_menu_item(
-                        "Saved Jira login",
-                        SettingsCategory::SavedJiraLogin,
-                        cx,
-                    ),
-                ])
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.activate_section(Section::Settings, cx);
-                })),
-            "nav-settings",
-            "Settings",
-            self.section == Section::Settings,
-            cx.listener(|this, _, _, cx| {
-                this.activate_section(Section::Settings, cx);
-            }),
-        )
-        .component_handles_pointer(true)
-    }
-
-    fn settings_category_menu_item(
-        &self,
-        label: &'static str,
-        category: SettingsCategory,
-        cx: &mut Context<Self>,
-    ) -> SidebarMenuItem {
-        SidebarMenuItem::new(label)
-            .active(self.section == Section::Settings && self.settings_category == category)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.settings_category = category;
-                this.activate_section(Section::Settings, cx);
-            }))
     }
 
     fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) -> bool {
