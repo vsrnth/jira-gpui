@@ -744,7 +744,7 @@ impl Dashboard {
             .border_b_1()
             .border_color(cx.theme().border)
             .when(selected, |this| {
-                this.bg(cx.theme().list_active).child(
+                this.child(
                     div()
                         .absolute()
                         .top_2()

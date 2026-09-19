@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 
 final class JiraDeskUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -189,6 +190,51 @@ final class JiraDeskUITests: XCTestCase {
             "issue-list-summary"
         )
 
+        // Selection is communicated by the narrow accent rail. The row surface itself should
+        // remain the same neutral list surface as its neighbors.
+        let selectedRow = try require(
+            app.descendants(matching: .any)["issue-row-DESK-184"],
+            "issue-row-DESK-184 for selection styling"
+        )
+        let neighboringRow = try require(
+            app.descendants(matching: .any)["issue-row-DESK-171"],
+            "issue-row-DESK-171 for selection styling"
+        )
+        selectedRow.click()
+        XCTAssertTrue(selectedRow.exists, "selected issue row should remain discoverable")
+        let selectedDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after selecting DESK-184")
+        XCTAssertTrue(semanticText(selectedDetail).contains("DESK-184"), "clicking the row should select DESK-184")
+        issueSearch.click()
+        let selectionScreenshot = hostWindow.screenshot()
+        let selectedInterior = try requireScreenshotColor(
+            selectionScreenshot,
+            at: CGPoint(x: selectedRow.frame.minX + 8, y: selectedRow.frame.midY),
+            in: hostWindow,
+            name: "selected row interior"
+        )
+        let neighboringInterior = try requireScreenshotColor(
+            selectionScreenshot,
+            at: CGPoint(x: neighboringRow.frame.minX + 8, y: neighboringRow.frame.midY),
+            in: hostWindow,
+            name: "neighboring row interior"
+        )
+        let accentRail = try requireScreenshotColor(
+            selectionScreenshot,
+            at: CGPoint(x: selectedRow.frame.minX + 1, y: selectedRow.frame.midY),
+            in: hostWindow,
+            name: "selected row accent rail"
+        )
+        XCTAssertLessThan(
+            rgbDistance(selectedInterior, neighboringInterior),
+            12,
+            "selected row interior should retain the neutral list surface"
+        )
+        XCTAssertGreaterThan(
+            rgbDistance(accentRail, selectedInterior),
+            18,
+            "selected row should retain a visually distinct accent rail"
+        )
+
         // A natural-language summary is a local filter. Pressing Enter must not turn it into a
         // Jira lookup or surface an unavailable-workspace error.
         try setValue("MVP", identifier: "issue-search")
@@ -263,8 +309,8 @@ final class JiraDeskUITests: XCTestCase {
         issueSearch.click()
         try setValue("DESK-171", identifier: "issue-search")
         searchSubmit.click()
-        let selectedDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after local key lookup")
-        let selectedDetailText = [selectedDetail.label, selectedDetail.title, selectedDetail.value as? String ?? ""].joined(separator: " ")
+        let keyLookupDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after local key lookup")
+        let selectedDetailText = [keyLookupDetail.label, keyLookupDetail.title, keyLookupDetail.value as? String ?? ""].joined(separator: " ")
         XCTAssertTrue(selectedDetailText.contains("DESK-171"), "exact local key lookup should select DESK-171")
         let finalClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after key lookup")
         finalClear.click()
@@ -1322,6 +1368,36 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertGreaterThan(frame.height, 0, "\(name) should have visible height")
         XCTAssertLessThan(frame.width, 2_000, "\(name) width should remain bounded")
         XCTAssertLessThan(frame.height, 1_000, "\(name) height should remain bounded")
+    }
+
+    private func requireScreenshotColor(
+        _ screenshot: XCUIScreenshot,
+        at point: CGPoint,
+        in window: XCUIElement,
+        name: String
+    ) throws -> NSColor {
+        guard let cgImage = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read \(name) from the fixture screenshot")
+            throw NSError(domain: "JiraDeskUITests", code: 6)
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let windowFrame = window.frame
+        let x = Int((point.x - windowFrame.minX) * CGFloat(bitmap.pixelsWide) / windowFrame.width)
+        let y = Int((point.y - windowFrame.minY) * CGFloat(bitmap.pixelsHigh) / windowFrame.height)
+        guard x >= 0, x < bitmap.pixelsWide, y >= 0, y < bitmap.pixelsHigh,
+              let color = bitmap.colorAt(x: x, y: y) else {
+            XCTFail("\(name) fell outside the fixture screenshot")
+            throw NSError(domain: "JiraDeskUITests", code: 7)
+        }
+        return color.usingColorSpace(.deviceRGB) ?? color
+    }
+
+    private func rgbDistance(_ lhs: NSColor, _ rhs: NSColor) -> CGFloat {
+        let left = lhs.usingColorSpace(.deviceRGB) ?? lhs
+        let right = rhs.usingColorSpace(.deviceRGB) ?? rhs
+        return abs(left.redComponent - right.redComponent) * 255
+            + abs(left.greenComponent - right.greenComponent) * 255
+            + abs(left.blueComponent - right.blueComponent) * 255
     }
 
     private func waitForSemanticText(_ expected: String, in element: XCUIElement) -> Bool {
