@@ -3101,6 +3101,81 @@ fn clearing_search_cancels_and_removes_remote_result() {
     assert_eq!(dashboard.remote_lookup_epoch.generation(), generation + 1);
 }
 
+#[gpui_kit::test]
+fn clearing_idle_remote_lookup_preserves_scroll_but_active_lookup_resets_it(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(900.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|_, cx| {
+        dashboard.update(cx, |dashboard, _| {
+            let mut offset = dashboard.issues_scroll_handle.base_handle().offset();
+            offset.y = px(240.);
+            dashboard
+                .issues_scroll_handle
+                .base_handle()
+                .set_offset(offset);
+            dashboard.clear_remote_lookup();
+            assert_eq!(
+                dashboard.issues_scroll_handle.base_handle().offset().y,
+                px(240.)
+            );
+            dashboard.remote_lookup = RemoteLookupState::Loading {
+                query: "IX-240".to_owned(),
+            };
+            dashboard.clear_remote_lookup();
+            assert_eq!(
+                dashboard.issues_scroll_handle.base_handle().offset().y,
+                px(0.)
+            );
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn assignee_list_uses_fetched_subset_and_rebuilds_after_refresh(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(900.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard.update(cx, |dashboard, cx| {
+            let issue = dashboard
+                .selected_issue_view()
+                .expect("selected issue")
+                .clone();
+            let fetched = vec![sample_users().into_iter().next().expect("fixture user")];
+            let generation = dashboard
+                .issue_edit_flow
+                .begin_assignee_loading(issue.id.clone(), "cached".to_owned());
+            assert!(dashboard.issue_edit_flow.finish_assignee_loading(
+                Some(&issue.id),
+                issue.id.clone(),
+                issue.key.clone(),
+                "cached".to_owned(),
+                generation,
+                Ok(fetched.clone()),
+            ));
+            dashboard.ensure_assignee_list(window, cx);
+            let list = dashboard.assignee_list.as_ref().expect("assignee list");
+            assert_eq!(list.read(cx).delegate().users.len(), 1);
+            dashboard.assignee_list = None;
+            dashboard.ensure_assignee_list(window, cx);
+            let rebuilt = dashboard
+                .assignee_list
+                .as_ref()
+                .expect("rebuilt assignee list");
+            assert_eq!(rebuilt.read(cx).delegate().users.len(), 1);
+        });
+    });
+}
+
 #[test]
 fn issue_edit_target_snapshot_requires_current_issue_and_generation() {
     let issue = IssueId::new("100").expect("issue");

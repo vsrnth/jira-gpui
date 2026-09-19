@@ -843,6 +843,157 @@ final class JiraDeskUITests: XCTestCase {
         add(screenshot)
     }
 
+    func testKitComponentSemanticsAndBoundedGeometry() throws {
+        try launchFixture(scenario: "components")
+
+        let detail = try require(
+            app.descendants(matching: .any)["issue-detail"],
+            "issue-detail"
+        )
+
+        // The status surface and Jira labels are display-only metadata tags. Keep this semantic
+        // check independent of their painted color and shape.
+        for (identifier, expectedText) in [
+            ("issue-detail-label-notifications", "Label notifications"),
+            ("issue-detail-label-phase-1", "Label phase-1"),
+        ] {
+            var tag = app.descendants(matching: .any)[identifier]
+            for _ in 0..<8 where !tag.isHittable {
+                detail.swipeUp()
+                tag = app.descendants(matching: .any)[identifier]
+            }
+            tag = try require(tag, identifier)
+            XCTAssertTrue(semanticText(tag).contains(expectedText), "\(identifier) should expose tag semantics")
+            XCTAssertTrue(detail.frame.contains(tag.frame), "\(identifier) should remain inside issue detail")
+            assertFiniteBounded(tag.frame, name: identifier)
+            XCTAssertLessThan(tag.frame.width, 500, "\(identifier) should remain compact")
+            XCTAssertLessThan(tag.frame.height, 100, "\(identifier) should remain compact")
+        }
+
+        // The detail fixture has one authenticated-download attachment. The attachment row and
+        // action must remain discoverable through the kit presentation component without firing
+        // the write/download path.
+        var attachmentCandidate = app.buttons["download-attachment-comment-fixture-image"]
+        for _ in 0..<8 where !attachmentCandidate.isHittable {
+            detail.swipeUp()
+            attachmentCandidate = app.buttons["download-attachment-comment-fixture-image"]
+        }
+        let attachmentAction = try require(attachmentCandidate, "download-attachment-comment-fixture-image")
+        XCTAssertTrue(semanticText(attachmentAction).contains("Download"), "attachment action should retain download semantics")
+        assertFiniteBounded(attachmentAction.frame, name: "download-attachment-comment-fixture-image")
+        XCTAssertTrue(detail.frame.contains(attachmentAction.frame), "attachment action should remain inside issue detail")
+
+        // DESK-179 is deliberately detail-loaded with no description. Relaunch the isolated
+        // fixture so this check does not depend on a network lookup or a prior interaction.
+        app.terminate()
+        try launchFixture(scenario: "issues")
+        let issueRow = try require(app.descendants(matching: .any)["issue-row-DESK-179"], "issue-row-DESK-179")
+        issueRow.click()
+        let empty = try require(
+            app.descendants(matching: .any)["issue-detail-description"],
+            "issue-detail-description"
+        )
+        XCTAssertTrue(semanticText(empty).contains("No description supplied."), "empty state should expose its copy")
+        assertFiniteBounded(empty.frame, name: "issue-detail-description")
+        XCTAssertFalse(
+            app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Loading issue details…")).firstMatch.exists,
+            "empty detail should not regress to a loading state"
+        )
+        let search = try require(app.descendants(matching: .any)["issue-search"], "issue-search")
+        search.click()
+        try setValue("no matching fixture", identifier: "issue-search")
+        let filteredEmpty = try require(app.descendants(matching: .any)["issues-empty"], "issues-empty")
+        XCTAssertTrue(
+            semanticText(filteredEmpty).contains("No issues match the current search and status filters"),
+            "Empty component should expose its explicit status label"
+        )
+        assertFiniteBounded(filteredEmpty.frame, name: "issues-empty")
+    }
+
+    func testAlertComponentSemantics() throws {
+        try launchFixture(scenario: "alert")
+        let alert = app.descendants(matching: .any)["issue-detail-error"]
+        let fallback = app.descendants(matching: .any)["issue-detail-error-surface"]
+        let surface = alert.exists ? alert : fallback
+        _ = try require(surface, "issue-detail-error")
+        XCTAssertTrue(semanticText(surface).contains("Unable to load issue details"), "Alert should expose its title")
+        XCTAssertTrue(semanticText(surface).contains("Jira is unreachable"), "Alert should expose recovery context")
+        assertFiniteBounded(surface.frame, name: "issue-detail-error")
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        XCTAssertTrue(hostWindow.frame.contains(surface.frame), "Alert should remain inside the host window")
+    }
+
+    func testAssigneeListConfirmation() throws {
+        try launchFixture(scenario: "assignee")
+        let list = try require(app.descendants(matching: .any)["assignee-list"], "assignee-list")
+        let unassigned = try require(app.descendants(matching: .any)["assignee-0"], "assignee-0")
+        let firstUser = try require(app.descendants(matching: .any)["assignee-1"], "assignee-1")
+        XCTAssertTrue(semanticText(unassigned).contains("Unassigned"), "assignee List should expose Unassigned")
+        XCTAssertTrue(semanticText(firstUser).contains("Amina Yusuf"), "assignee List should expose fixture users")
+        assertFiniteBounded(list.frame, name: "assignee-list")
+        app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+        let confirmation = try require(
+            app.descendants(matching: .any)["assignee-confirmation"],
+            "assignee-confirmation"
+        )
+        XCTAssertTrue(semanticText(confirmation).contains("Assign DESK-184 to Amina Yusuf?"), "confirmation should expose the full assignment target")
+        XCTAssertTrue(semanticText(confirmation).contains("Amina Yusuf"), "assignee selection should enter confirmation state")
+        XCTAssertTrue(app.buttons["confirm-assignee"].exists, "confirmation action should be discoverable")
+    }
+
+    func testVirtualizedIssueRowsRemainIdentifiableAfterScrollAndFilter() throws {
+        try launchFixture(scenario: "virtualized")
+        let list = try require(app.descendants(matching: .any)["issue-list"], "issue-list")
+        let summary = try require(app.descendants(matching: .any)["issue-list-summary"], "issue-list-summary")
+        XCTAssertTrue(waitForSemanticText("45 Jira issues", in: summary), "virtualized fixture should expose its full count")
+
+        let first = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184")
+        assertFiniteBounded(first.frame, name: "issue-row-DESK-184")
+        XCTAssertTrue(list.frame.intersects(first.frame), "first virtualized row should be in or at the list viewport")
+
+        var later = app.descendants(matching: .any)["issue-row-VIRT-39"]
+        for _ in 0..<16 where !later.exists {
+            list.swipeUp()
+            later = app.descendants(matching: .any)["issue-row-VIRT-39"]
+        }
+        let realizedLater = try require(later, "issue-row-VIRT-39")
+        XCTAssertTrue(list.frame.intersects(realizedLater.frame), "scrolled virtualized row should intersect the list viewport")
+        XCTAssertTrue(semanticText(realizedLater).contains("VIRT-39"), "scrolled row should retain its stable issue identity")
+        assertFiniteBounded(realizedLater.frame, name: "issue-row-VIRT-39")
+
+        let search = try require(app.descendants(matching: .any)["issue-search"], "issue-search")
+        search.click()
+        try setValue("VIRT-39", identifier: "issue-search")
+        let filtered = try require(app.descendants(matching: .any)["issue-row-VIRT-39"], "filtered issue-row-VIRT-39")
+        XCTAssertTrue(waitForSemanticText("1 of 45 Jira issues", in: summary), "filter should retain the virtualized total")
+        XCTAssertTrue(semanticText(filtered).contains("VIRT-39"), "filtered result should retain stable identity")
+        assertFiniteBounded(filtered.frame, name: "filtered issue-row-VIRT-39")
+    }
+
+    func testVirtualizedUpdateExpansionRetainsGeometry() throws {
+        try launchFixture(scenario: "virtualized")
+        let nav = try require(app.descendants(matching: .any)["nav-updates"], "nav-updates")
+        nav.click()
+        let list = try require(app.descendants(matching: .any)["update-list"], "update-list")
+        let card = try require(app.descendants(matching: .any)["update-card-0"], "update-card-0")
+        let expand = try require(app.buttons["Show 9 more"], "Show 9 more")
+        let collapsedHeight = card.frame.height
+        expand.click()
+        let collapse = try require(app.buttons["Show less"], "Show less")
+        XCTAssertGreaterThan(card.frame.height, collapsedHeight, "expanded update group should grow its card")
+        XCTAssertLessThan(list.frame.height, 1_000, "virtualized update viewport should remain bounded")
+        assertFiniteBounded(collapse.frame, name: "Show less")
+        collapse.click()
+        XCTAssertLessThanOrEqual(card.frame.height, collapsedHeight + 4, "collapsing update group should restore its card height")
+    }
+
+    func testVirtualizedCoverage() throws {
+        try testVirtualizedIssueRowsRemainIdentifiableAfterScrollAndFilter()
+        try testVirtualizedUpdateExpansionRetainsGeometry()
+    }
+
     func testCommentConfirmationActions() throws {
         try launchFixture(scenario: "comment-confirmation")
 
@@ -1007,12 +1158,31 @@ final class JiraDeskUITests: XCTestCase {
         try launchFixture(scenario: "updates")
         let updates = try require(app.descendants(matching: .any)["nav-updates"], "nav-updates")
         updates.click()
-        _ = try require(app.descendants(matching: .any)["update-list"], "update-list")
+        let updateList = try require(app.descendants(matching: .any)["update-list"], "update-list")
         let dot = try require(app.descendants(matching: .any)["update-unread-dot-0"], "update-unread-dot-0")
         let metadata = try require(app.descendants(matching: .any)["update-metadata-0"], "update-metadata-0")
         let dotCenter = CGPoint(x: dot.frame.midX, y: dot.frame.midY)
         let metadataCenter = CGPoint(x: metadata.frame.midX, y: metadata.frame.midY)
         XCTAssertLessThanOrEqual(abs(dotCenter.y - metadataCenter.y), 2.0, "unread dot should align with first metadata line")
+
+        // Virtualized feeds must expose stable semantic identities for the rows currently in the
+        // viewport and keep every realized row inside the scrolling surface. This assertion is
+        // intentionally count-agnostic so it remains valid as the fixture grows beyond five rows.
+        let rows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "update-metadata-")
+        )
+        XCTAssertGreaterThan(rows.count, 0, "updates should expose at least one realized semantic row")
+        var priorMaxY: CGFloat?
+        for index in 0..<rows.count {
+            let row = try require(rows.element(boundBy: index), "update-metadata-\(index)")
+            XCTAssertFalse(semanticText(row).isEmpty, "realized update row \(index) should expose identity")
+            assertFiniteBounded(row.frame, name: "update-metadata-\(index)")
+            XCTAssertTrue(updateList.frame.contains(row.frame), "realized update row \(index) should stay in update list")
+            if let priorMaxY {
+                XCTAssertGreaterThanOrEqual(row.frame.minY, priorMaxY - 1, "realized update rows should not overlap")
+            }
+            priorMaxY = row.frame.maxY
+        }
     }
 
     func testTeam() throws {
@@ -1143,6 +1313,15 @@ final class JiraDeskUITests: XCTestCase {
 
     private func semanticText(_ element: XCUIElement) -> String {
         [element.label, element.title, axValue(element)].joined(separator: " ")
+    }
+
+    private func assertFiniteBounded(_ frame: CGRect, name: String) {
+        XCTAssertTrue(frame.minX.isFinite && frame.maxX.isFinite && frame.minY.isFinite && frame.maxY.isFinite,
+                      "\(name) frame should remain finite")
+        XCTAssertGreaterThan(frame.width, 0, "\(name) should have visible width")
+        XCTAssertGreaterThan(frame.height, 0, "\(name) should have visible height")
+        XCTAssertLessThan(frame.width, 2_000, "\(name) width should remain bounded")
+        XCTAssertLessThan(frame.height, 1_000, "\(name) height should remain bounded")
     }
 
     private func waitForSemanticText(_ expected: String, in element: XCUIElement) -> Bool {

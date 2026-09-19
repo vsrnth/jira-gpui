@@ -25,6 +25,14 @@ pub enum UiAutomationScenario {
     Team,
     /// The local settings view.
     Settings,
+    /// A large fixture for local virtualization and row-identity coverage.
+    Virtualized,
+    /// An inert detail error rendered through the kit Alert component.
+    Alert,
+    /// The inert assignee chooser with cached users and confirmation state.
+    Assignee,
+    /// Component semantic coverage fixture (rich content plus metadata tags).
+    Components,
 }
 
 impl UiAutomationScenario {
@@ -39,6 +47,10 @@ impl UiAutomationScenario {
             Self::Updates => "updates",
             Self::Team => "team",
             Self::Settings => "settings",
+            Self::Virtualized => "virtualized",
+            Self::Alert => "alert",
+            Self::Assignee => "assignee",
+            Self::Components => "components",
         }
     }
 
@@ -53,8 +65,12 @@ impl UiAutomationScenario {
             "updates" => Ok(Self::Updates),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
+            "virtualized" => Ok(Self::Virtualized),
+            "alert" => Ok(Self::Alert),
+            "assignee" => Ok(Self::Assignee),
+            "components" => Ok(Self::Components),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings, virtualized, alert, assignee, components"
             ),
         }
     }
@@ -70,9 +86,9 @@ pub enum Command {
 }
 
 /// Text printed by `--help`.
-pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | comment-confirmation | updates | team | settings\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
+pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | comment-confirmation | updates | team | settings | virtualized | alert | assignee | components\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
 
-const SCENARIOS: &str = "onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings";
+const SCENARIOS: &str = "onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings, virtualized, alert, assignee, components";
 
 fn next_value(args: &mut impl Iterator<Item = String>) -> Result<String> {
     let value = args
@@ -185,7 +201,12 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
 
                     let fixture_dashboard = |mut dashboard: Dashboard| {
                         dashboard.initialize_appearance_preference(AppearancePreference::Light);
-                        cx.new(|_| dashboard)
+                        cx.new(|cx| {
+                            if scenario == UiAutomationScenario::Assignee {
+                                dashboard.prepare_assignee_for_ui_automation(window, cx);
+                            }
+                            dashboard
+                        })
                     };
                     let dashboard = match scenario {
                         UiAutomationScenario::Onboarding | UiAutomationScenario::OnboardingBusy => {
@@ -212,6 +233,16 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
                         UiAutomationScenario::Settings => Some(
                             Dashboard::from_sample_data_for_section(SampleSection::Settings),
                         ),
+                        UiAutomationScenario::Virtualized => {
+                            Some(Dashboard::from_ui_automation_virtualized())
+                        }
+                        UiAutomationScenario::Alert => Some(Dashboard::from_ui_automation_alert()),
+                        UiAutomationScenario::Assignee => Some(
+                            Dashboard::from_sample_data_for_section(SampleSection::Issues),
+                        ),
+                        UiAutomationScenario::Components => {
+                            Some(Dashboard::from_ui_automation_rich_content())
+                        }
                     }
                     .map(fixture_dashboard);
                     let shell = cx.new(|cx| {
@@ -263,6 +294,10 @@ mod tests {
             ("updates", UiAutomationScenario::Updates),
             ("team", UiAutomationScenario::Team),
             ("settings", UiAutomationScenario::Settings),
+            ("virtualized", UiAutomationScenario::Virtualized),
+            ("alert", UiAutomationScenario::Alert),
+            ("assignee", UiAutomationScenario::Assignee),
+            ("components", UiAutomationScenario::Components),
         ] {
             assert_eq!(
                 parse_args(["--scenario", name]).unwrap(),

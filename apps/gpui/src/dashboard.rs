@@ -6,7 +6,7 @@ use time::UtcOffset;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, StyledExt as _, Theme,
-    WindowExt as _,
+    VirtualListScrollHandle, WindowExt as _,
     button::Button,
     button::ButtonVariants as _,
     combobox::{Combobox, ComboboxEvent, ComboboxState},
@@ -81,6 +81,7 @@ mod settings_view;
 mod shell_view;
 mod team_view;
 mod updates_view;
+mod virtual_rows;
 
 #[cfg(test)]
 use crate::presentation::issue_views_for_filter;
@@ -748,7 +749,13 @@ pub struct Dashboard {
     appearance_preference: AppearancePreference,
     domain_issues: Vec<Issue>,
     issues: Vec<IssueViewModel>,
+    /// Persistent scroll state shared with the issues virtual list across redraws.
+    issues_scroll_handle: VirtualListScrollHandle,
+    issues_row_measurements: virtual_rows::RowMeasureCache,
     update_groups: Vec<UpdateGroupViewModel>,
+    /// Persistent scroll state shared with the updates virtual list across redraws.
+    updates_scroll_handle: VirtualListScrollHandle,
+    updates_row_measurements: virtual_rows::RowMeasureCache,
     update_filter: UpdateFilter,
     expanded_update_groups: HashSet<IssueId>,
     selected_issue: Option<IssueId>,
@@ -822,6 +829,11 @@ pub struct Dashboard {
     issue_edit_task: Option<gpui_kit::Task<()>>,
     assignee_input: Option<Entity<InputState>>,
     assignee_subscriptions: Vec<Subscription>,
+    assignee_list: Option<
+        Entity<
+            gpui_kit::component::list::ListState<detail_view::assignee_list::AssigneeListDelegate>,
+        >,
+    >,
     attachment_download_state: AttachmentDownloadState,
     attachment_download_generation: u64,
     attachment_download_cancellation: Option<CancellationToken>,
@@ -841,6 +853,18 @@ pub struct Dashboard {
 impl EventEmitter<DashboardEvent> for Dashboard {}
 
 impl Dashboard {
+    fn reset_issue_list_scroll(&self) {
+        let mut offset = self.issues_scroll_handle.base_handle().offset();
+        offset.y = px(0.);
+        self.issues_scroll_handle.base_handle().set_offset(offset);
+    }
+
+    fn reset_update_list_scroll(&self) {
+        let mut offset = self.updates_scroll_handle.base_handle().offset();
+        offset.y = px(0.);
+        self.updates_scroll_handle.base_handle().set_offset(offset);
+    }
+
     fn ensure_team_panes_state(&mut self, cx: &mut Context<Self>) {
         if self.team_panes_state.is_some() {
             return;
@@ -977,6 +1001,110 @@ impl Dashboard {
             self.update_groups.len()
         );
         self.ui_automation_show_assignee = true;
+    }
+
+    /// Primes the assignee editor with cached fixture users. The chooser is inert and never
+    /// reaches a Jira write port; it exists so local automation can exercise List keyboard
+    /// selection through confirmation.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn prepare_assignee_for_ui_automation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_for_ui_automation();
+        self.ensure_assignee_input(window, cx);
+        self.ensure_assignee_list(window, cx);
+        let Some(issue) = self.selected_issue_view() else {
+            return;
+        };
+        let generation = self
+            .issue_edit_flow
+            .begin_assignee_loading(issue.id.clone(), String::new());
+        self.issue_edit_flow.finish_assignee_loading(
+            self.selected_issue.as_ref(),
+            issue.id.clone(),
+            issue.key.clone(),
+            String::new(),
+            generation,
+            Ok(self.users.clone()),
+        );
+        cx.notify();
+    }
+
+    /// Builds a large, fully local fixture for virtualization and accessibility regression tests.
+    /// Every generated issue has a stable key and ID; no transport, cache, or write service is
+    /// installed by this constructor.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn from_ui_automation_virtualized() -> Self {
+        let mut dashboard = Self::from_sample_data_for_section(SampleSection::Issues);
+        let template = dashboard
+            .domain_issues
+            .first()
+            .cloned()
+            .expect("sample issue fixture");
+        for index in 0..40 {
+            let mut issue = template.clone();
+            issue.id =
+                jira_domain::IssueId::new(format!("ui-virtual-{index}")).expect("fixture id");
+            issue.key = jira_domain::IssueKey::new(format!("VIRT-{index}")).expect("fixture key");
+            issue.summary = format!("Virtualized fixture issue {index}: wrapped row content");
+            issue.labels = vec![format!("fixture-{index}"), "virtualized".to_owned()];
+            dashboard.domain_issues.push(issue);
+        }
+        dashboard.issues = issue_views_for_filter_with_offset(
+            &dashboard.domain_issues,
+            &dashboard.users,
+            IssueStatusFilter::All,
+            "",
+            Some(UtcOffset::UTC),
+        );
+        let update_template = sample_updates()
+            .into_iter()
+            .next()
+            .expect("sample update fixture");
+        let update_issue = dashboard
+            .domain_issues
+            .first()
+            .expect("virtual issue fixture");
+        let mut virtual_updates = Vec::new();
+        for index in 0..12 {
+            let mut event = update_template.clone();
+            event.id = jira_domain::EventId::new(format!("ui-virtual-event-{index}"))
+                .expect("fixture event id");
+            event.issue_id = update_issue.id.clone();
+            event.issue_key = update_issue.key.clone();
+            virtual_updates.push(event);
+        }
+        dashboard.update_groups = update_groups_for_events_with_offset(
+            &virtual_updates,
+            &dashboard.domain_issues,
+            &dashboard.users,
+            Some(UtcOffset::UTC),
+        );
+        dashboard.selected_issue = dashboard
+            .domain_issues
+            .first()
+            .map(|issue| issue.id.clone());
+        dashboard.prepare_for_ui_automation();
+        dashboard
+    }
+
+    /// Builds a no-selection fixture with an explicit Alert surface for local accessibility QA.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn from_ui_automation_alert() -> Self {
+        let mut dashboard = Self::from_sample_data_for_section(SampleSection::Issues);
+        let issue_id = dashboard
+            .domain_issues
+            .first()
+            .map(|issue| issue.id.clone())
+            .expect("sample issue fixture");
+        dashboard.selected_issue = None;
+        dashboard.detail_state = DetailState::Error {
+            issue_id,
+            copy: read_error_copy(ReadSurface::Detail, jira_application::ErrorKind::Offline),
+        };
+        dashboard
     }
 
     /// Builds the rich-content fixture used exclusively by the local macOS accessibility tests.
@@ -1298,7 +1426,11 @@ impl Dashboard {
             appearance_preference: AppearancePreference::System,
             domain_issues,
             issues,
+            issues_scroll_handle: VirtualListScrollHandle::new(),
+            issues_row_measurements: virtual_rows::new_row_measure_cache(),
             update_groups,
+            updates_scroll_handle: VirtualListScrollHandle::new(),
+            updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
             expanded_update_groups: HashSet::new(),
             selected_issue,
@@ -1378,6 +1510,7 @@ impl Dashboard {
             issue_edit_task: None,
             assignee_input: None,
             assignee_subscriptions: Vec::new(),
+            assignee_list: None,
             attachment_download_state: AttachmentDownloadState::Idle,
             attachment_download_generation: 0,
             attachment_download_cancellation: None,
@@ -1410,7 +1543,11 @@ impl Dashboard {
             appearance_preference: AppearancePreference::System,
             domain_issues: Vec::new(),
             issues: Vec::new(),
+            issues_scroll_handle: VirtualListScrollHandle::new(),
+            issues_row_measurements: virtual_rows::new_row_measure_cache(),
             update_groups: Vec::new(),
+            updates_scroll_handle: VirtualListScrollHandle::new(),
+            updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
             expanded_update_groups: HashSet::new(),
             selected_issue: None,
@@ -1496,6 +1633,7 @@ impl Dashboard {
             issue_edit_task: None,
             assignee_input: None,
             assignee_subscriptions: Vec::new(),
+            assignee_list: None,
             attachment_download_state: AttachmentDownloadState::Idle,
             attachment_download_generation: 0,
             attachment_download_cancellation: None,
@@ -1802,6 +1940,7 @@ impl Dashboard {
             return;
         }
         self.status_filter = filter;
+        self.reset_issue_list_scroll();
         self.rebuild_issue_views(false, cx);
         cx.notify();
     }
@@ -1812,6 +1951,7 @@ impl Dashboard {
             return;
         }
         self.clear_remote_lookup();
+        self.reset_issue_list_scroll();
         self.invalidate_comment_selection();
         self.invalidate_attachment_download();
         self.search_query = query;
@@ -1823,6 +1963,7 @@ impl Dashboard {
     /// model. This is deliberately local-only: clearing a filter must never trigger Jira I/O.
     fn clear_issue_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_remote_lookup();
+        self.reset_issue_list_scroll();
         self.invalidate_comment_selection();
         self.invalidate_attachment_download();
         self.search_query.clear();
@@ -1840,12 +1981,16 @@ impl Dashboard {
     }
 
     fn clear_remote_lookup(&mut self) {
+        let had_remote_lookup = !matches!(self.remote_lookup, RemoteLookupState::Idle);
         self.status_popover_open = false;
         self.invalidate_attachment_download();
         self.remote_image_states.clear();
         self.remote_lookup_epoch.invalidate();
         self.remote_lookup_task.take();
         self.remote_lookup = RemoteLookupState::Idle;
+        if had_remote_lookup {
+            self.reset_issue_list_scroll();
+        }
     }
 
     fn search_jira(&mut self, cx: &mut Context<Self>) {
@@ -2658,6 +2803,56 @@ impl Dashboard {
         self.assignee_input = Some(input);
     }
 
+    fn ensure_assignee_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assignee_list.is_some() {
+            return;
+        }
+        let dashboard = cx.entity().downgrade();
+        let IssueEditState::AssigneeChooser { users, .. } = self.issue_edit_flow.state() else {
+            return;
+        };
+        let users = users.clone();
+        let delegate = detail_view::assignee_list::AssigneeListDelegate::new(
+            users,
+            move |choice, window, app| {
+                let Some(dashboard) = dashboard.upgrade() else {
+                    return;
+                };
+                let account_id = choice.account_id.clone();
+                let display_name = choice.display_name.clone();
+                dashboard.update(app, |this, cx| {
+                    if this.operation_in_progress {
+                        return;
+                    }
+                    let valid_target = match this.issue_edit_flow.state() {
+                        IssueEditState::AssigneeChooser {
+                            issue_id, users, ..
+                        } => {
+                            this.selected_issue.as_ref() == Some(issue_id)
+                                && match &account_id {
+                                    Some(account_id) => {
+                                        users.iter().any(|user| user.account_id == *account_id)
+                                    }
+                                    None => display_name == "Unassigned",
+                                }
+                        }
+                        _ => false,
+                    };
+                    if !valid_target {
+                        return;
+                    }
+                    this.choose_assignee(account_id, display_name, cx);
+                });
+                let _ = window;
+            },
+        );
+        let list = cx.new(|cx| {
+            gpui_kit::component::list::ListState::new(delegate, window, cx).searchable(false)
+        });
+        cx.focus_view(&list, window);
+        self.assignee_list = Some(list);
+    }
+
     fn begin_assignee_chooser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(issue) = selected_issue_from_sources(
             self.selected_issue.as_ref(),
@@ -2669,6 +2864,7 @@ impl Dashboard {
             return;
         };
         self.ensure_assignee_input(window, cx);
+        self.ensure_assignee_list(window, cx);
         if let Some(input) = &self.assignee_input {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
@@ -2741,6 +2937,7 @@ impl Dashboard {
                     generation,
                     result,
                 );
+                this.assignee_list = None;
                 cx.notify();
             });
         });
@@ -3198,6 +3395,7 @@ impl Dashboard {
     fn set_update_filter(&mut self, filter: UpdateFilter, cx: &mut Context<Self>) {
         if self.update_filter != filter {
             self.update_filter = filter;
+            self.reset_update_list_scroll();
             cx.notify();
         }
     }

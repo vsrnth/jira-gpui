@@ -181,7 +181,17 @@ tools/macos-ui-automation/run.sh --scenario rich-content
 tools/macos-ui-automation/run.sh --scenario updates
 tools/macos-ui-automation/run.sh --scenario team
 tools/macos-ui-automation/run.sh --scenario settings
+tools/macos-ui-automation/run.sh --scenario components
+tools/macos-ui-automation/run.sh --scenario alert
+tools/macos-ui-automation/run.sh --scenario assignee
+tools/macos-ui-automation/run.sh --scenario virtualized
 ```
+
+`components` covers kit Tags, Empty, and attachments; `alert` covers the inert
+kit Alert fixture; `assignee` covers keyboard selection through confirmation;
+and `virtualized` covers scrolling, filtering, variable row measurement, and
+update expansion. These scenarios are local-only and never contact Jira or
+dispatch writes.
 
 Validate the XCUITest project, plist, and scheme without launching the host:
 
@@ -227,7 +237,8 @@ For another local run, replace the run ID and scenario in the path:
 ### Scenarios and artifacts
 
 The fixture host accepts exactly `onboarding`, `onboarding-busy`, `issues`,
-`rich-content`, `comment-confirmation`, `updates`, `team`, and `settings`.
+`rich-content`, `comment-confirmation`, `updates`, `team`, `settings`,
+`components`, `alert`, `assignee`, and `virtualized`.
 The XCUITest target performs bounded semantic waits and read-only actions:
 
 - `onboarding` opens the connection dialog, selects each field by its exact
@@ -434,8 +445,10 @@ image is:
 
 `target/ui-automation/adf-status-final-20260830/candidate-export/B8721B09-B686-4AA6-81A9-5B2E48F0B291.png`.
 
-The tests deliberately do not click refresh, links, or assignee controls, and
-do not activate status transitions, comments, saved-login deletion,
+The tests deliberately do not click refresh or links. The dedicated
+`assignee` scenario uses keyboard selection to reach confirmation and never
+submits it. Other scenarios do not activate assignee controls, status
+transitions, comments, saved-login deletion,
 notification tests, attachment downloads, or any other Jira write. Site/email
 are fixed synthetic test data that may appear
 only in local XCTest diagnostics; no API token is supplied or read.

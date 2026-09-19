@@ -286,7 +286,22 @@ impl Dashboard {
                                                 ))
                                             })
                                             .when(!team_loading && !team_error, |this| {
-                                                this.child("No in-progress team tickets found.")
+                                                this.child(
+                                                    div()
+                                                        .id("team-empty-state")
+                                                        .role(gpui_kit::accesskit::Role::Status)
+                                                        .child(gpui_kit::component::empty::Empty::new()
+                                                        .header(
+                                                            gpui_kit::component::empty::EmptyHeader::new()
+                                                                .title(gpui_kit::component::empty::EmptyTitle::new().child(
+                                                                    "No in-progress team tickets found",
+                                                                ))
+                                                                .description(
+                                                                    gpui_kit::component::empty::EmptyDescription::new()
+                                                                        .child("Matching Jira tickets will appear here after refresh."),
+                                                                ),
+                                                        )),
+                                                )
                                             }),
                                     )
                                 })
@@ -394,7 +409,22 @@ impl Dashboard {
                                                     ))
                                                 })
                                                 .when(!team_loading && !team_error, |this| {
-                                                    this.child("No in-progress team tickets found.")
+                                                    this.child(
+                                                        div()
+                                                            .id("team-empty-state")
+                                                            .role(gpui_kit::accesskit::Role::Status)
+                                                            .child(gpui_kit::component::empty::Empty::new()
+                                                            .header(
+                                                                gpui_kit::component::empty::EmptyHeader::new()
+                                                                    .title(gpui_kit::component::empty::EmptyTitle::new().child(
+                                                                        "No in-progress team tickets found",
+                                                                    ))
+                                                                    .description(
+                                                                        gpui_kit::component::empty::EmptyDescription::new()
+                                                                            .child("Matching Jira tickets will appear here after refresh."),
+                                                                    ),
+                                                            )),
+                                                    )
                                                 }),
                                         )
                                     },

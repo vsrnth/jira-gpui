@@ -1,5 +1,22 @@
+use std::rc::Rc;
+
+use super::virtual_rows::{
+    RowMeasureKey, cached_height, measured_row, retain_identities, revision_hash,
+};
 use super::*;
 use gpui_kit::component::Selectable as _;
+
+fn update_group_height(group: &UpdateGroupViewModel, layout: LayoutMode, expanded: bool) -> f32 {
+    let rows = compact_update_rows(&group.events);
+    let visible = visible_update_row_count(rows.len(), expanded);
+    // Event text is line-clamped on mobile and single-line on desktop. The
+    // extra allowance covers the action row and card padding without clipping.
+    if layout.is_mobile() {
+        180. + visible as f32 * 40.
+    } else {
+        116. + visible as f32 * 22.
+    }
+}
 
 pub(super) fn update_filter_is_selected(current: UpdateFilter, option: UpdateFilter) -> bool {
     current == option
@@ -15,6 +32,11 @@ impl Dashboard {
         let unread = self.unread_count();
         let visible_groups = filtered_update_group_indices(&self.update_groups, self.update_filter);
         let no_visible_groups = visible_groups.is_empty();
+        let retained_update_ids = visible_groups
+            .iter()
+            .map(|index| self.update_groups[*index].issue_id.to_string())
+            .collect();
+        retain_identities(&self.updates_row_measurements, &retained_update_ids);
         v_flex()
             .size_full()
             .min_w_0()
@@ -124,8 +146,8 @@ impl Dashboard {
                     .role(gpui_kit::accesskit::Role::Group)
                     .aria_label("Local Jira activity")
                     .flex_1()
-                    .overflow_y_scrollbar()
                     .overflow_x_hidden()
+                    .vertical_scrollbar(&self.updates_scroll_handle)
                     .min_h_0()
                     .w_full()
                     .justify_start()
@@ -133,17 +155,79 @@ impl Dashboard {
                     .child(
                         v_flex()
                             .w_full()
+                            .flex_1()
+                            .h_full()
+                            .min_h_0()
                             .max_w(gpui_kit::rems(70.))
                             .p(gpui_kit::rems(layout.list_padding() / 16.))
                             .gap_3()
-                            .children(visible_groups.into_iter().map(|index| {
-                                self.update_group_card(
-                                    index,
-                                    &self.update_groups[index],
-                                    layout,
-                                    cx,
+                            .child(if no_visible_groups {
+                                v_flex().into_any_element()
+                            } else {
+                                let heights = Rc::new(
+                                    visible_groups
+                                        .iter()
+                                        .map(|index| {
+                                            let group = &self.update_groups[*index];
+                                            let expanded = self
+                                                .expanded_update_groups
+                                                .contains(&group.issue_id);
+                                            gpui_kit::size(
+                                                gpui_kit::px(0.),
+                                                cached_height(
+                                                    &self.updates_row_measurements,
+                                                    &RowMeasureKey {
+                                                        identity: group.issue_id.to_string(),
+                                                        revision: revision_hash((
+                                                            &group.issue_key,
+                                                            &group.issue_summary,
+                                                            &group.latest_occurred_at,
+                                                            group.unread,
+                                                            format!("{:?}", &group.events),
+                                                        )),
+                                                        layout: layout as u8,
+                                                        expanded,
+                                                    },
+                                                    update_group_height(group, layout, expanded),
+                                                ),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>(),
+                                );
+                                let visible_groups = visible_groups.clone();
+                                gpui_kit::component::v_virtual_list(
+                                    cx.entity(),
+                                    "update-list-virtual",
+                                    heights,
+                                    move |this, range, _, cx| {
+                                        range
+                                            .map(|position| {
+                                                let index = visible_groups[position];
+                                                let group = &this.update_groups[index];
+                                                measured_row(
+                                                    RowMeasureKey {
+                                                        identity: group.issue_id.to_string(),
+                                                        revision: revision_hash((
+                                                            &group.issue_key,
+                                                            &group.issue_summary,
+                                                            &group.latest_occurred_at,
+                                                            group.unread,
+                                                            format!("{:?}", &group.events),
+                                                        )),
+                                                        layout: layout as u8,
+                                                        expanded: this.expanded_update_groups.contains(&group.issue_id),
+                                                    },
+                                                    this.updates_row_measurements.clone(),
+                                                    cx.entity().downgrade(),
+                                                    this.update_group_card(index, group, layout, cx),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
                                 )
-                            }))
+                                .track_scroll(&self.updates_scroll_handle)
+                                .into_any_element()
+                            })
                             .when(no_visible_groups, |this| {
                                 this.child(
                                     div()
@@ -165,14 +249,24 @@ impl Dashboard {
                                         } else {
                                             "No local updates yet. Refresh to check Jira activity."
                                         })
-                                        .p_4()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(if self.update_filter == UpdateFilter::Unread {
-                                            "You are all caught up. New local updates will appear after refresh."
-                                        } else {
-                                            "No local updates yet. Refresh to check Jira activity."
-                                        }),
+                                        .child(gpui_kit::component::empty::Empty::new().header(
+                                            gpui_kit::component::empty::EmptyHeader::new()
+                                                .title(gpui_kit::component::empty::EmptyTitle::new().child(
+                                                    if self.update_filter == UpdateFilter::Unread {
+                                                        "You are all caught up"
+                                                    } else {
+                                                        "No local updates yet"
+                                                    },
+                                                ))
+                                                .description(
+                                                    gpui_kit::component::empty::EmptyDescription::new()
+                                                        .child(if self.update_filter == UpdateFilter::Unread {
+                                                            "New local updates will appear after refresh."
+                                                        } else {
+                                                            "Refresh to check Jira activity."
+                                                        }),
+                                                ),
+                                        )),
                                 )
                             }),
                     ),
@@ -207,8 +301,9 @@ impl Dashboard {
         );
         let open_area = div()
             .id(("update-open", index))
+            .accessibility_id(format!("update-open-{index}"))
             .role(gpui_kit::accesskit::Role::Button)
-            .aria_label(accessible_label)
+            .aria_label(accessible_label.clone())
             .tab_index(0)
             .flex()
             .flex_1()
@@ -338,6 +433,9 @@ impl Dashboard {
             .into_any_element();
         h_flex()
             .id(("update-card", index))
+            .accessibility_id(format!("update-card-{index}"))
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label(format!("{accessible_label} update card"))
             .debug_selector(move || format!("update-card-{index}"))
             .w_full()
             .min_w_0()

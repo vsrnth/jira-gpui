@@ -1,11 +1,23 @@
 use super::*;
 use crate::rich_text_view::safe_browser_url;
 use gpui_kit::component::{
-    Sizable as _, Size, accordion::Accordion, description_list::DescriptionList, list::List,
-    popover::Popover, text::TextView,
+    Sizable as _, Size,
+    accordion::Accordion,
+    alert::Alert,
+    attachment::{
+        Attachment, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentTitle,
+    },
+    description_list::DescriptionList,
+    list::List,
+    popover::Popover,
+    tag::Tag,
+    text::TextView,
 };
 use gpui_kit::rems;
 use jira_domain::{RichBlock, RichInline, RichTextDocument};
+
+#[path = "assignee_list.rs"]
+pub(super) mod assignee_list;
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
     div()
@@ -214,39 +226,24 @@ impl Dashboard {
                     ),
                 DetailState::RemoteError { query, copy } => v_flex()
                     .id("issue-detail-remote-error")
-                    .role(gpui_kit::accesskit::Role::Alert)
+                    .debug_selector(|| "issue-detail-remote-error".to_owned())
+                    .accessibility_id("issue-detail-remote-error")
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label(format!(
                         "Jira lookup failed for {}: {}",
                         normalized_lookup_query(query),
                         copy.message()
                     ))
-                    .gap_2()
-                    .child(div().text_base().font_semibold().child("Jira lookup failed"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(copy.message()),
-                    ),
+                    .child(Alert::error("issue-detail-remote-error", copy.message().to_owned())
+                        .title(format!("Jira lookup failed for {}", normalized_lookup_query(query)))),
                 DetailState::Error { copy, .. } => v_flex()
                     .id("issue-detail-error-surface")
-                    .role(gpui_kit::accesskit::Role::Alert)
-                    .aria_label(format!(
-                        "Unable to load issue details: {}",
-                        copy.message()
-                    ))
-                    .gap_2()
-                    .child(div().text_base().font_semibold().child("Unable to load issue details"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(copy.message()),
-                    ),
+                    .debug_selector(|| "issue-detail-error-surface".to_owned())
+                    .accessibility_id("issue-detail-error-surface")
+                    .role(gpui_kit::accesskit::Role::Group)
+                    .aria_label(format!("Unable to load issue details: {}", copy.message()))
+                    .child(Alert::error("issue-detail-error-surface", copy.message().to_owned())
+                        .title("Unable to load issue details")),
                 DetailState::Loading { .. } => v_flex()
                     .id("issue-detail-loading-surface")
                     .role(gpui_kit::accesskit::Role::Status)
@@ -638,13 +635,19 @@ impl Dashboard {
                     v_flex()
                         .gap_2()
                         .child(div().text_sm().font_semibold().child("Labels"))
-                        .child(
-                            h_flex()
-                                .flex_wrap()
-                                .min_w_0()
-                                .gap_2()
-                                .children(labels.iter().cloned().map(|label| self.pill(label, cx))),
-                        ),
+                        .child(h_flex().flex_wrap().min_w_0().gap_2().children(
+                            labels.iter().cloned().map(|label| {
+                                let id = format!("issue-detail-label-{label}");
+                                let selector = id.clone();
+                                div()
+                                    .id(id.clone())
+                                    .debug_selector(move || selector.clone())
+                                    .accessibility_id(id)
+                                    .role(gpui_kit::accesskit::Role::ListItem)
+                                    .aria_label(format!("Label {label}"))
+                                    .child(self.tag(label))
+                            }),
+                        )),
                 )
             })
             .child(self.render_detail_state_for(&detail_state, layout, cx))
@@ -679,18 +682,13 @@ impl Dashboard {
                 v_flex()
                     .id("issue-detail-error")
                     .debug_selector(|| "issue-detail-error".to_owned())
-                    .role(gpui_kit::accesskit::Role::Alert)
+                    .accessibility_id("issue-detail-error")
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label(format!("Unable to load issue details: {}", copy.message()))
-                    .min_w_0()
-                    .gap_1()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().danger.opacity(0.45))
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(div().font_semibold().child("Unable to load issue details"))
-                    .child(div().min_w_0().child(copy.message()))
+                    .child(
+                        Alert::error("issue-detail-error-alert", copy.message().to_owned())
+                            .title("Unable to load issue details"),
+                    )
                     .into_any_element(),
             ),
             DetailState::Empty
@@ -753,16 +751,12 @@ impl Dashboard {
                         .child(format!("Looking up {query}…")),
                 )
                 .into_any_element(),
-            DetailState::RemoteError { copy, .. } => v_flex()
-                .gap_2()
-                .child(div().text_sm().font_semibold().child("Jira lookup"))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(copy.message()),
-                )
-                .into_any_element(),
+            DetailState::RemoteError { query, copy } => Alert::error(
+                "issue-detail-remote-error",
+                copy.message().to_owned(),
+            )
+            .title(format!("Jira lookup failed for {}", normalized_lookup_query(query)))
+            .into_any_element(),
             DetailState::Loaded(detail) => {
                 let palette = self.rich_text_palette(cx);
                 let comments = if detail.comments.is_empty() {
@@ -891,41 +885,54 @@ impl Dashboard {
                                 self.attachment_download_state,
                                 AttachmentDownloadState::Idle
                             );
-                            h_flex()
-                                .min_w_0()
-                                .flex_wrap()
-                                .justify_between()
-                                .text_sm()
+                            let attachment_ax_id = format!("attachment-{}", attachment.id);
+                            let download_ax_id = format!("download-attachment-{}", attachment.id);
+                            let attachment_label = format!(
+                                "Attachment {}, {} · {}",
+                                attachment.filename, attachment.mime_type, attachment.size
+                            );
+                            div()
+                                .id(attachment_ax_id.clone())
+                                .accessibility_id(attachment_ax_id.clone())
+                                .role(gpui_kit::accesskit::Role::Group)
+                                .aria_label(attachment_label)
+                                .max_w_full()
                                 .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(attachment.filename.clone()),
+                                    Attachment::new()
+                                        .id(format!("attachment-card-{}", attachment.id))
+                                        .content(
+                                            AttachmentContent::new()
+                                                .title(AttachmentTitle::new(
+                                                    attachment.filename.clone(),
+                                                ))
+                                                .description(AttachmentDescription::new(format!(
+                                                    "{} · {}",
+                                                    attachment.mime_type, attachment.size
+                                                ))),
+                                        )
+                                        .actions(
+                                            AttachmentActions::new().child(
+                                                Button::new(download_ax_id.clone())
+                                                    .accessibility_id(download_ax_id)
+                                                    .ghost()
+                                                    .label(attachment_download_button_label(
+                                                        downloading,
+                                                    ))
+                                                    .loading(downloading)
+                                                    .disabled(download_active)
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.download_attachment(
+                                                                attachment_for_click.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "{} · {}",
-                                            attachment.mime_type, attachment.size
-                                        )),
-                                )
-                                .child(
-                                    Button::new(format!("download-attachment-{}", attachment.id))
-                                        .ghost()
-                                        .label(attachment_download_button_label(downloading))
-                                        .loading(downloading)
-                                        .disabled(download_active)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.download_attachment(
-                                                attachment_for_click.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
+                                .into_any_element()
                         }))
                         .into_any_element()
                 };
@@ -1074,7 +1081,11 @@ impl Dashboard {
         let Some(issue) = issue else {
             return div().into_any_element();
         };
-        if self.workspace.is_none() || self.selected_issue.as_ref() != Some(&issue.id) {
+        #[cfg(feature = "ui-automation")]
+        let has_workspace = self.workspace.is_some() || self.ui_automation_show_assignee;
+        #[cfg(not(feature = "ui-automation"))]
+        let has_workspace = self.workspace.is_some();
+        if !has_workspace || self.selected_issue.as_ref() != Some(&issue.id) {
             return div().into_any_element();
         }
         let busy = self.operation_in_progress;
@@ -1129,35 +1140,18 @@ impl Dashboard {
                                 ),
                         )
                     })
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .child(
-                                Button::new("assignee-unassigned")
-                                    .compact()
-                                    .label("Unassigned")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.choose_assignee(None, "Unassigned".to_owned(), cx)
-                                    })),
-                            )
-                            .children(users.into_iter().enumerate().map(|(index, user)| {
-                                let name = user.display_name.clone();
-                                let account_id = user.account_id.clone();
-                                Button::new(format!("assignee-{index}"))
-                                    .compact()
-                                    .label(name.clone())
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.choose_assignee(
-                                            Some(account_id.clone()),
-                                            name.clone(),
-                                            cx,
-                                        )
-                                    }))
-                            })),
-                    )
+                    .when_some(self.assignee_list.clone(), |this, list| {
+                        this.child(
+                            div()
+                                .id("assignee-list")
+                                .accessibility_id("assignee-list")
+                                .role(gpui_kit::accesskit::Role::List)
+                                .aria_label("Assignee choices")
+                                .w_full()
+                                .h_40()
+                                .child(List::new(&list)),
+                        )
+                    })
                     .when(no_users, |this| {
                         this.child(
                             div()
@@ -1180,6 +1174,10 @@ impl Dashboard {
                 display_name,
                 ..
             } => v_flex()
+                .id("assignee-confirmation")
+                .accessibility_id("assignee-confirmation")
+                .role(gpui_kit::accesskit::Role::Group)
+                .aria_label(format!("Assign {issue_key} to {display_name}?"))
                 .gap_2()
                 .child(
                     div()
@@ -1193,6 +1191,7 @@ impl Dashboard {
                         .gap_2()
                         .child(
                             Button::new("confirm-assignee")
+                                .accessibility_id("confirm-assignee")
                                 .primary()
                                 .label("Confirm change")
                                 .disabled(busy)
@@ -1502,14 +1501,10 @@ impl Dashboard {
         composer.into_any_element()
     }
 
-    fn pill(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .px_2()
-            .py_1()
+    fn tag(&self, label: String) -> AnyElement {
+        Tag::secondary()
+            .small()
             .rounded_full()
-            .bg(cx.theme().secondary)
-            .text_color(cx.theme().secondary_foreground)
-            .text_xs()
             .child(label)
             .into_any_element()
     }

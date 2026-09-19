@@ -785,6 +785,12 @@ impl Render for Dashboard {
         self.ensure_status_combobox(window, cx);
         self.ensure_search_input(window, cx);
         self.ensure_comment_input(window, cx);
+        if matches!(
+            self.issue_edit_flow.state(),
+            IssueEditState::AssigneeChooser { .. }
+        ) {
+            self.ensure_assignee_list(window, cx);
+        }
         self.ensure_settings_input(window, cx);
         self.ensure_team_input(window, cx);
         self.ensure_team_table(window, cx);

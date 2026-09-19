@@ -1,4 +1,19 @@
+use std::rc::Rc;
+
+use super::virtual_rows::{
+    RowMeasureKey, cached_height, measured_row, retain_identities, revision_hash,
+};
 use super::*;
+
+fn issue_row_height(layout: LayoutMode) -> f32 {
+    // The row clamps summary and mobile timestamps to two lines. Keep the
+    // virtual slot large enough for the wrapped mobile metadata row as well.
+    if layout.is_mobile() { 172. } else { 136. }
+}
+
+fn issue_row_height_with_label(layout: LayoutMode, labelled: bool) -> f32 {
+    issue_row_height(layout) + if labelled { 24. } else { 0. }
+}
 
 fn issue_row_accessible_label(
     key: &str,
@@ -155,6 +170,15 @@ impl Dashboard {
         let has_active_filters = active_query || active_status;
         let lookup_enabled =
             crate::presentation::normalized_issue_key(&self.search_query).is_some();
+        let remote_issue = self.remote_lookup_view();
+        let has_remote_issue = remote_issue.is_some();
+        let retained_issue_ids = self
+            .issues
+            .iter()
+            .map(|issue| issue.key.clone())
+            .chain(std::iter::once("remote-lookup".to_owned()).filter(|_| has_remote_issue))
+            .collect();
+        retain_identities(&self.issues_row_measurements, &retained_issue_ids);
         let issue_count = issue_count_label(
             self.issues.len(),
             self.domain_issues.len(),
@@ -202,7 +226,8 @@ impl Dashboard {
                     .into_any_element(),
             )
             .when_some(self.search_input.clone(), |this, input| {
-                let lookup_loading = matches!(self.remote_lookup, RemoteLookupState::Loading { .. });
+                let lookup_loading =
+                    matches!(self.remote_lookup, RemoteLookupState::Loading { .. });
                 if mobile {
                     this.child(
                         v_flex()
@@ -319,37 +344,164 @@ impl Dashboard {
             .child(
                 v_flex()
                     .id("issue-list")
+                    .accessibility_id("issue-list")
+                    .role(gpui_kit::accesskit::Role::Group)
+                    .aria_label("Jira issues")
                     .min_h_0()
                     .flex_1()
+                    .vertical_scrollbar(&self.issues_scroll_handle)
                     .when(mobile, |this| this.w_full())
-                    .overflow_y_scrollbar()
-                    .when_some(self.remote_lookup_view(), |this, issue| {
-                        this.child(self.issue_row_with_label(
-                            &issue,
-                            "Jira lookup result",
-                            layout,
-                            cx,
-                        ))
-                    })
-                    .children(
-                        self.issues
-                            .iter()
-                            .map(|issue| self.issue_row(issue, layout, cx)),
-                    )
-                    .when(self.issues.is_empty() && self.remote_lookup_view().is_none(), |this| {
-                        this.child(
-                            v_flex()
-                                .items_center()
-                                .gap_2()
-                                .p_6()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if self.domain_issues.is_empty() {
-                                    "No Jira issues loaded yet. Refresh to check your assigned or watched view."
-                                } else {
-                                    "No issues match the current search and status filters."
-                                }),
-                        )
+                    .child(if self.issues.is_empty() && !has_remote_issue {
+                        div()
+                            .id("issues-empty")
+                            .accessibility_id("issues-empty")
+                            .role(gpui_kit::accesskit::Role::Status)
+                            .aria_label(if self.domain_issues.is_empty() {
+                                "No Jira issues loaded yet"
+                            } else {
+                                "No issues match the current search and status filters"
+                            })
+                            .child(gpui_kit::component::empty::Empty::new().header(
+                                gpui_kit::component::empty::EmptyHeader::new()
+                                    .title(gpui_kit::component::empty::EmptyTitle::new().child(
+                                        if self.domain_issues.is_empty() {
+                                            "No Jira issues loaded yet"
+                                        } else {
+                                            "No matching issues"
+                                        },
+                                    ))
+                                    .description(
+                                        gpui_kit::component::empty::EmptyDescription::new().child(
+                                            if self.domain_issues.is_empty() {
+                                                "Refresh to check your assigned or watched view."
+                                            } else {
+                                                "Try changing the search or status filters."
+                                            },
+                                        ),
+                                    ),
+                            ))
+                            .into_any_element()
+                    } else {
+                        {
+                            let remote_count = usize::from(has_remote_issue);
+                            let remote_issue_for_rows = remote_issue.clone();
+                            let heights = Rc::new(
+                                std::iter::repeat_n(
+                                    gpui_kit::size(
+                                        gpui_kit::px(0.),
+                                        cached_height(
+                                            &self.issues_row_measurements,
+                                            &RowMeasureKey {
+                                                identity: "remote-lookup".to_owned(),
+                                                revision: remote_issue
+                                                    .as_ref()
+                                                    .map(|issue| {
+                                                        revision_hash((
+                                                            &issue.key,
+                                                            &issue.summary,
+                                                            &issue.status,
+                                                            &issue.issue_type,
+                                                            &issue.assignee,
+                                                            &issue.priority,
+                                                            &issue.updated,
+                                                        ))
+                                                    })
+                                                    .unwrap_or_default(),
+                                                layout: layout as u8,
+                                                expanded: false,
+                                            },
+                                            issue_row_height_with_label(layout, true),
+                                        ),
+                                    ),
+                                    remote_count,
+                                )
+                                .chain(self.issues.iter().map(|issue| {
+                                    gpui_kit::size(
+                                        gpui_kit::px(0.),
+                                        cached_height(
+                                            &self.issues_row_measurements,
+                                            &RowMeasureKey {
+                                                identity: issue.key.clone(),
+                                                revision: revision_hash((
+                                                    &issue.key,
+                                                    &issue.summary,
+                                                    &issue.status,
+                                                    &issue.issue_type,
+                                                    &issue.assignee,
+                                                    &issue.priority,
+                                                    &issue.updated,
+                                                )),
+                                                layout: layout as u8,
+                                                expanded: false,
+                                            },
+                                            issue_row_height(layout),
+                                        ),
+                                    )
+                                }))
+                                .collect::<Vec<_>>(),
+                            );
+                            gpui_kit::component::v_virtual_list(
+                                cx.entity(),
+                                "issue-list-virtual",
+                                heights,
+                                move |this, range, _, cx| {
+                                    range
+                                        .map(|index| {
+                                            if let (0, Some(issue)) =
+                                                (index, remote_issue_for_rows.as_ref())
+                                            {
+                                                return measured_row(
+                                                    RowMeasureKey {
+                                                        identity: "remote-lookup".to_owned(),
+                                                        revision: revision_hash((
+                                                            &issue.key,
+                                                            &issue.summary,
+                                                            &issue.status,
+                                                            &issue.issue_type,
+                                                            &issue.assignee,
+                                                            &issue.priority,
+                                                            &issue.updated,
+                                                        )),
+                                                        layout: layout as u8,
+                                                        expanded: false,
+                                                    },
+                                                    this.issues_row_measurements.clone(),
+                                                    cx.entity().downgrade(),
+                                                    this.issue_row_with_label(
+                                                        issue,
+                                                        "Jira lookup result",
+                                                        layout,
+                                                        cx,
+                                                    ),
+                                                );
+                                            }
+                                            let issue = &this.issues[index - remote_count];
+                                            measured_row(
+                                                RowMeasureKey {
+                                                    identity: issue.key.clone(),
+                                                    revision: revision_hash((
+                                                        &issue.key,
+                                                        &issue.summary,
+                                                        &issue.status,
+                                                        &issue.issue_type,
+                                                        &issue.assignee,
+                                                        &issue.priority,
+                                                        &issue.updated,
+                                                    )),
+                                                    layout: layout as u8,
+                                                    expanded: false,
+                                                },
+                                                this.issues_row_measurements.clone(),
+                                                cx.entity().downgrade(),
+                                                this.issue_row(issue, layout, cx),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            )
+                            .track_scroll(&self.issues_scroll_handle)
+                            .into_any_element()
+                        }
                     }),
             )
             .into_any_element();
@@ -500,21 +652,14 @@ impl Dashboard {
                     v_flex()
                         .id("remote-lookup-error")
                         .debug_selector(|| "remote-lookup-error".to_owned())
-                        .role(gpui_kit::accesskit::Role::Alert)
-                        .aria_label(format!(
-                            "Jira lookup failed for {query}: {}",
-                            copy.message()
-                        ))
-                        .min_w_0()
-                        .gap_1()
-                        .px_3()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().danger.opacity(0.45))
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(div().font_semibold().child("Jira lookup failed"))
-                        .child(div().min_w_0().child(copy.message()))
+                        .accessibility_id("remote-lookup-error")
+                        .child(
+                            gpui_kit::component::alert::Alert::error(
+                                "remote-lookup-error-alert",
+                                copy.message(),
+                            )
+                            .title(format!("Jira lookup failed for {query}")),
+                        )
                         .into_any_element(),
                 )
             }
@@ -658,19 +803,15 @@ impl Dashboard {
                             )
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .flex_shrink_0()
-                                    .truncate()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_full()
-                                    .bg(cx.theme().secondary)
-                                    .border_1()
-                                    .border_color(cx.theme().link.opacity(0.4))
-                                    .text_color(cx.theme().secondary_foreground)
-                                    .text_xs()
-                                    .font_semibold()
-                                    .child(issue.status.clone()),
+                                    .id(format!("issue-status-{}", issue.key))
+                                    .accessibility_id(format!("issue-status-{}", issue.key))
+                                    .role(gpui_kit::accesskit::Role::TextRun)
+                                    .aria_label(format!("Status: {}", issue.status))
+                                    .child(
+                                        gpui_kit::component::tag::Tag::secondary()
+                                            .outline()
+                                            .child(issue.status.clone()),
+                                    ),
                             ),
                     )
                     .when(!label.is_empty(), |this| {
@@ -730,7 +871,8 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::{issue_row_accessible_label, issue_type_color_for_theme};
+    use super::{issue_row_accessible_label, issue_row_height, issue_type_color_for_theme};
+    use crate::responsive::LayoutMode;
     use crate::semantic_icons::IssueTypeTone;
 
     #[test]
@@ -764,5 +906,11 @@ mod tests {
             issue_row_accessible_label("DESK-179", "Task", "Improve caching", "Highest"),
             "Open DESK-179 (Task): Improve caching · Priority: Highest"
         );
+    }
+
+    #[test]
+    fn virtual_issue_rows_reserve_mobile_metadata_wrap_space() {
+        assert!(issue_row_height(LayoutMode::Mobile) > issue_row_height(LayoutMode::Standard));
+        assert!(issue_row_height(LayoutMode::Standard) > 0.);
     }
 }
