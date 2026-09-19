@@ -309,9 +309,12 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   frames of `update-unread-dot-0` and `update-metadata-0` with a bounded
   vertical tolerance. `team` verifies the `team-table` container, the cached
   Team Tracker description, spinner-free detail state, and bounded,
-  non-overlapping table/detail panes. The fixture primes the selected Team
-  ticket locally; Rust GPUI tests cover the live asynchronous refresh and
-  failure path.
+  non-overlapping table/detail panes at the default 1240 px dense-table
+  viewport. It also requires exact semantic key/status cells for `DESK-171`
+  and `DESK-184`, with bounded widths that preserve `DESK-###` and `In
+  Progress` without overlap. The fixture primes the selected Team ticket
+  locally; Rust GPUI tests cover the live asynchronous refresh and failure
+  path.
 
 ### Latest validated run
 

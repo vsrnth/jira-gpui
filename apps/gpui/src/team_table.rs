@@ -23,7 +23,12 @@ use crate::presentation::{
 
 const DENSE_COLUMN_COUNT: usize = 5;
 const WIDE_COLUMN_COUNT: usize = 7;
-const DENSE_COLUMN_WIDTHS: [f32; DENSE_COLUMN_COUNT] = [72.0, 184.0, 105.0, 85.0, 150.0];
+// Keep the compact table within the pane's fixed 596 px budget while reserving enough native
+// padding for the two high-scan fields. Ticket keys and statuses otherwise lose their final
+// characters even when the values themselves are short (for example, `DESK-171` and
+// `In Progress`). Activity remains intentionally compact; its complete value is still exposed
+// through the cell tooltip and accessibility label.
+const DENSE_COLUMN_WIDTHS: [f32; DENSE_COLUMN_COUNT] = [96.0, 170.0, 96.0, 112.0, 122.0];
 const WIDE_COLUMN_WIDTHS: [f32; WIDE_COLUMN_COUNT] =
     [100.0, 280.0, 150.0, 125.0, 260.0, 190.0, 85.0];
 
@@ -402,16 +407,21 @@ impl TableDelegate for TeamTicketTableDelegate {
         // localized Updated timestamp in Activity cells) to assistive technology and keyboard
         // users. The table's generic cell renderer truncates the visible text by design.
         let value_for_tooltip = value.to_owned();
+        let accessibility_id = cell_accessibility_id(row, row_ix, col_ix, column);
         let mut cell = div()
-            .id(format!("team-ticket-cell-{row_ix}-{col_ix}"))
+            .id(accessibility_id.clone())
             .size_full()
             .truncate()
+            .role(gpui_kit::accesskit::Role::Cell)
+            .accessibility_id(accessibility_id)
             .aria_label(value.to_owned())
             .tooltip(move |window, cx| Tooltip::new(value_for_tooltip.clone()).build(window, cx))
             .child(value.to_owned());
         cell = match column {
             SortColumn::Key => cell.text_color(cx.theme().link).text_sm(),
-            SortColumn::Status => cell.text_color(cx.theme().success).text_sm(),
+            // In Progress is a workflow state, not a success outcome. Use the regular
+            // foreground so the label remains readable in both light and dark themes.
+            SortColumn::Status => cell.text_color(cx.theme().foreground).text_sm(),
             SortColumn::Elapsed => cell
                 .text_color(age_color(row.elapsed_seconds, cx))
                 .text_xs(),
@@ -442,6 +452,20 @@ fn cell_value(row: &TeamTicketRow, column: SortColumn) -> &str {
         SortColumn::LastUpdated => row.last_updated.as_str(),
         SortColumn::Elapsed => row.elapsed.as_str(),
         SortColumn::Activity => row.activity.as_str(),
+    }
+}
+
+fn cell_accessibility_id(
+    row: &TeamTicketRow,
+    row_ix: usize,
+    col_ix: usize,
+    column: SortColumn,
+) -> String {
+    match column {
+        // Keyed IDs remain stable when the user sorts or the virtualized table reuses a row.
+        SortColumn::Key => format!("team-ticket-key-{}", row.key),
+        SortColumn::Status => format!("team-ticket-status-{}", row.key),
+        _ => format!("team-ticket-cell-{row_ix}-{col_ix}"),
     }
 }
 
@@ -647,8 +671,33 @@ mod tests {
 
     #[test]
     fn dense_column_widths_match_the_bounded_table_contract() {
-        assert_eq!(DENSE_COLUMN_WIDTHS, [72.0, 184.0, 105.0, 85.0, 150.0]);
+        assert_eq!(DENSE_COLUMN_WIDTHS, [96.0, 170.0, 96.0, 112.0, 122.0]);
         assert_eq!(DENSE_COLUMN_WIDTHS.iter().sum::<f32>(), 596.0);
+    }
+
+    #[test]
+    fn key_and_status_cell_ids_are_stable_across_row_reordering() {
+        let table = TeamTicketTableDelegate::new(
+            &sample_issues(),
+            &[],
+            &sample_users(),
+            datetime!(2026-08-19 00:00 UTC),
+        );
+        let row = &table.rows()[0];
+        let key_id = cell_accessibility_id(row, 0, 0, SortColumn::Key);
+        let status_id = cell_accessibility_id(row, 0, 3, SortColumn::Status);
+        assert_eq!(key_id, format!("team-ticket-key-{}", row.key));
+        assert_eq!(status_id, format!("team-ticket-status-{}", row.key));
+        assert_eq!(
+            key_id,
+            cell_accessibility_id(row, 7, 0, SortColumn::Key),
+            "key identity must not depend on the virtualized row index"
+        );
+        assert_eq!(
+            status_id,
+            cell_accessibility_id(row, 7, 3, SortColumn::Status),
+            "status identity must not depend on the virtualized row index"
+        );
     }
 
     #[test]
@@ -848,7 +897,7 @@ mod tests {
 
     #[test]
     fn dense_columns_fit_compact_dashboard_content() {
-        assert_eq!(column_widths(true), &[72.0, 184.0, 105.0, 85.0, 150.0]);
+        assert_eq!(column_widths(true), &[96.0, 170.0, 96.0, 112.0, 122.0]);
         assert_eq!(column_widths(true).iter().sum::<f32>(), 596.0);
         assert!(column_widths(false).iter().sum::<f32>() > 900.0);
     }

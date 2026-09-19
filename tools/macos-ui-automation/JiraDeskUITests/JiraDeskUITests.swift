@@ -1032,9 +1032,37 @@ final class JiraDeskUITests: XCTestCase {
         )
         let detailLoading = app.descendants(matching: .any)["issue-detail-loading"]
         XCTAssertFalse(detailLoading.exists, "cached Team Tracker detail should not show a spinner")
-        XCTAssertTrue(table.frame.width > 300, "Team Tracker table should retain a usable width")
-        XCTAssertTrue(detail.frame.width > 260, "Team Tracker detail should retain a usable width")
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        XCTAssertGreaterThan(table.frame.width, 560, "dense Team Tracker table should retain its 596 px budget")
+        XCTAssertLessThanOrEqual(table.frame.width, 620, "dense Team Tracker table should remain bounded")
+        XCTAssertGreaterThan(detail.frame.width, 260, "Team Tracker detail should retain a usable width")
+        XCTAssertTrue(hostWindow.frame.contains(table.frame), "Team Tracker table should remain inside the host window")
+        XCTAssertTrue(hostWindow.frame.contains(detail.frame), "Team Tracker detail should remain inside the host window")
         XCTAssertTrue(table.frame.maxX <= detail.frame.minX + 2, "Team Tracker panes should not overlap")
+
+        for (key, expectedStatus) in [("DESK-171", "In Progress"), ("DESK-184", "In Progress")] {
+            let keyCell = try require(
+                app.descendants(matching: .any)["team-ticket-key-\(key)"],
+                "team-ticket-key-\(key)"
+            )
+            let statusCell = try require(
+                app.descendants(matching: .any)["team-ticket-status-\(key)"],
+                "team-ticket-status-\(key)"
+            )
+            let keySemanticText = [keyCell.label, keyCell.title, keyCell.value as? String ?? ""]
+                .joined(separator: " ")
+            let statusSemanticText = [statusCell.label, statusCell.title, statusCell.value as? String ?? ""]
+                .joined(separator: " ")
+            XCTAssertTrue(keySemanticText.contains(key), "dense table should expose exact ticket key identity for \(key)")
+            XCTAssertTrue(statusSemanticText.contains(expectedStatus), "dense table should expose exact status for \(key)")
+            XCTAssertGreaterThanOrEqual(keyCell.frame.width, 74, "ticket key cell must retain readable width for \(key)")
+            XCTAssertGreaterThanOrEqual(statusCell.frame.width, 88, "status cell must retain readable width for \(key)")
+            XCTAssertLessThan(keyCell.frame.width, 110, "ticket key cell must remain within its dense column")
+            XCTAssertLessThan(statusCell.frame.width, 125, "status cell must remain within its dense column")
+            XCTAssertTrue(table.frame.contains(keyCell.frame), "ticket key cell should remain inside the table")
+            XCTAssertTrue(table.frame.contains(statusCell.frame), "status cell should remain inside the table")
+            XCTAssertFalse(keyCell.frame.intersects(statusCell.frame), "key and status cells must not overlap for \(key)")
+        }
     }
 
     private func launchFixture(scenario: String) throws {
