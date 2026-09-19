@@ -1,5 +1,5 @@
 use super::*;
-use gpui_component::Selectable as _;
+use gpui_kit::component::Selectable as _;
 
 pub(super) fn update_filter_is_selected(current: UpdateFilter, option: UpdateFilter) -> bool {
     current == option
@@ -121,7 +121,7 @@ impl Dashboard {
                     .id("update-list")
                     .debug_selector(|| "update-list".to_owned())
                     .accessibility_id("update-list")
-                    .role(gpui::accesskit::Role::Group)
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label("Local Jira activity")
                     .flex_1()
                     .overflow_y_scrollbar()
@@ -133,8 +133,8 @@ impl Dashboard {
                     .child(
                         v_flex()
                             .w_full()
-                            .max_w(gpui::rems(70.))
-                            .p(gpui::rems(layout.list_padding() / 16.))
+                            .max_w(gpui_kit::rems(70.))
+                            .p(gpui_kit::rems(layout.list_padding() / 16.))
                             .gap_3()
                             .children(visible_groups.into_iter().map(|index| {
                                 self.update_group_card(
@@ -159,7 +159,7 @@ impl Dashboard {
                                                 "updates-empty-all".to_owned()
                                             }
                                         })
-                                        .role(gpui::accesskit::Role::Status)
+                                        .role(gpui_kit::accesskit::Role::Status)
                                         .aria_label(if self.update_filter == UpdateFilter::Unread {
                                             "You are all caught up. New local updates will appear after refresh."
                                         } else {
@@ -207,7 +207,7 @@ impl Dashboard {
         );
         let open_area = div()
             .id(("update-open", index))
-            .role(gpui::accesskit::Role::Button)
+            .role(gpui_kit::accesskit::Role::Button)
             .aria_label(accessible_label)
             .tab_index(0)
             .flex()
@@ -234,7 +234,7 @@ impl Dashboard {
                     .id(format!("update-unread-dot-{index}"))
                     .debug_selector(move || format!("update-unread-dot-{index}"))
                     .accessibility_id(format!("update-unread-dot-{index}"))
-                    .role(gpui::accesskit::Role::Group)
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label(if group.unread {
                         "Unread update marker"
                     } else {
@@ -278,7 +278,7 @@ impl Dashboard {
                                                 format!("update-metadata-{index}")
                                             })
                                             .accessibility_id(format!("update-metadata-{index}"))
-                                            .role(gpui::accesskit::Role::Group)
+                                            .role(gpui_kit::accesskit::Role::Group)
                                             .aria_label("Update metadata")
                                             .min_w_0()
                                             .items_start()

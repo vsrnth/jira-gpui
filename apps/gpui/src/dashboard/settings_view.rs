@@ -1,8 +1,8 @@
 use super::*;
 use crate::app_shell::AppearancePreference;
-use gpui_component::button::{Toggle, ToggleVariants};
-use gpui_component::group_box::GroupBoxVariant;
-use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_kit::component::button::{Toggle, ToggleVariants};
+use gpui_kit::component::group_box::GroupBoxVariant;
+use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
 
 const APPEARANCE_HELP_COPY: &str = "Follow the system appearance or choose a fixed theme.";
 const APPEARANCE_PREFERENCES: [AppearancePreference; 3] = [
@@ -32,9 +32,9 @@ const MACOS_NOTIFICATION_DISPLAY_COPY: &str = "Accepted by Notification Center m
 const MACOS_NOTIFICATION_ACCEPTANCE_COPY: &str = "Accepted by Notification Center · local receipt";
 const MACOS_KEYRING_COPY: &str = "Saved credentials are stored in the macOS Keychain and reused automatically across Jira Desk versions. Secrets are never written to SQLite, preferences, or logs.";
 const NOTIFICATION_TEST_RESULT_ID: &str = "notification-test-result";
-const NOTIFICATION_TEST_RESULT_ROLE: gpui::accesskit::Role = gpui::accesskit::Role::Status;
+const NOTIFICATION_TEST_RESULT_ROLE: gpui_kit::accesskit::Role = gpui_kit::accesskit::Role::Status;
 const SAVED_LOGIN_DELETE_RESULT_ID: &str = "saved-login-delete-result";
-const SAVED_LOGIN_DELETE_RESULT_ROLE: gpui::accesskit::Role = gpui::accesskit::Role::Status;
+const SAVED_LOGIN_DELETE_RESULT_ROLE: gpui_kit::accesskit::Role = gpui_kit::accesskit::Role::Status;
 
 fn saved_login_delete_feedback_for_state(state: SavedLoginDeleteState) -> Option<OutcomeCopy> {
     match state {
@@ -122,27 +122,27 @@ impl Dashboard {
                         .id(id.clone())
                         .debug_selector(move || debug_id.clone())
                         .accessibility_id(id.clone())
-                        .role(gpui::accesskit::Role::Group)
+                        .role(gpui_kit::accesskit::Role::Group)
                         .aria_label(format!("{label} appearance"))
                         .child(
                             div()
                                 .id(toggle_id.clone())
                                 .debug_selector(move || toggle_debug_id.clone())
                                 .accessibility_id(toggle_accessibility_id)
-                                .role(gpui::accesskit::Role::Button)
+                                .role(gpui_kit::accesskit::Role::Button)
                                 .aria_label(format!("{label} appearance"))
                                 .aria_selected(checks[index])
                                 .aria_toggled(if checks[index] {
-                                    gpui::accesskit::Toggled::True
+                                    gpui_kit::accesskit::Toggled::True
                                 } else {
-                                    gpui::accesskit::Toggled::False
+                                    gpui_kit::accesskit::Toggled::False
                                 })
                                 // The component Toggle remains the pointer and visual owner. The
                                 // semantic wrapper is not another tab stop, but is directly
                                 // pressable by AX clients and reports the controlled state.
                                 .tab_index(-1)
                                 .on_a11y_action(
-                                    gpui::AccessibleAction::Click,
+                                    gpui_kit::AccessibleAction::Click,
                                     move |_, window, cx| {
                                         if let Some(dashboard) = dashboard_for_a11y.upgrade() {
                                             dashboard.update(cx, |this, cx| {
@@ -225,7 +225,7 @@ impl Dashboard {
                 this.child(
                     Textarea::new(&input)
                         .w_full()
-                        .h(gpui::rems(7.5))
+                        .h(gpui_kit::rems(7.5))
                         .aria_label("JQL scope")
                         .disabled(!live || self.operation_in_progress),
                 )
@@ -341,7 +341,7 @@ impl Dashboard {
                 this.child(
                     Textarea::new(&input)
                         .w_full()
-                        .h(gpui::rems(if layout.is_mobile() { 6.875 } else { 7.5 }))
+                        .h(gpui_kit::rems(if layout.is_mobile() { 6.875 } else { 7.5 }))
                         .aria_label("Team tracker members")
                         .disabled(!live || task_running || self.operation_in_progress),
                 )
@@ -374,9 +374,9 @@ impl Dashboard {
                             cx.theme().muted_foreground
                         })
                         .role(if is_error {
-                            gpui::accesskit::Role::Alert
+                            gpui_kit::accesskit::Role::Alert
                         } else {
-                            gpui::accesskit::Role::Status
+                            gpui_kit::accesskit::Role::Status
                         })
                         .aria_label(accessibility_label)
                         .child(message),
@@ -738,7 +738,7 @@ mod tests {
         assert_eq!(SAVED_LOGIN_DELETE_RESULT_ID, "saved-login-delete-result");
         assert_eq!(
             SAVED_LOGIN_DELETE_RESULT_ROLE,
-            gpui::accesskit::Role::Status
+            gpui_kit::accesskit::Role::Status
         );
         assert!(saved_login_delete_feedback_for_state(SavedLoginDeleteState::Idle).is_none());
         assert!(saved_login_delete_feedback_for_state(SavedLoginDeleteState::Deleting).is_none());
@@ -802,6 +802,9 @@ mod tests {
     #[test]
     fn notification_completion_uses_a_stable_status_region() {
         assert_eq!(NOTIFICATION_TEST_RESULT_ID, "notification-test-result");
-        assert_eq!(NOTIFICATION_TEST_RESULT_ROLE, gpui::accesskit::Role::Status);
+        assert_eq!(
+            NOTIFICATION_TEST_RESULT_ROLE,
+            gpui_kit::accesskit::Role::Status
+        );
     }
 }

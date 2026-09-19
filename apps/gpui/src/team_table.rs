@@ -7,13 +7,13 @@
 
 use std::cmp::Ordering;
 
-use gpui::{
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement,
     StatefulInteractiveElement as _, Styled, Window, div, px,
 };
-use gpui_component::ActiveTheme as _;
-use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_component::tooltip::Tooltip;
 use jira_domain::{Issue, IssueId, Timestamp, UpdateEvent, User};
 use time::UtcOffset;
 
@@ -605,7 +605,7 @@ fn format_elapsed(seconds: i64) -> String {
     }
 }
 
-fn age_color(seconds: i64, cx: &Context<TableState<TeamTicketTableDelegate>>) -> gpui::Hsla {
+fn age_color(seconds: i64, cx: &Context<TableState<TeamTicketTableDelegate>>) -> gpui_kit::Hsla {
     match age_tone(seconds) {
         AgeTone::Fresh => cx.theme().muted_foreground,
         AgeTone::Aging => cx.theme().warning,

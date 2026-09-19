@@ -49,7 +49,9 @@ jobs:
             libssl-dev \
             libwayland-dev \
             libvulkan1 \
+            libxcb-xkb-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libxml2-utils \
             libzstd-dev \
             pkg-config \
@@ -210,14 +212,14 @@ jobs:
         if: ${{ steps.appimage-version.outputs.run_ci == 'true' }}
         run: cargo clippy --workspace --lib --bins --locked -- -D warnings
 
-      - name: Guard against gpui_linux X11 feature
+      - name: Verify Wayland feature is enabled
         shell: bash
         run: |
           set -euo pipefail
-          tree=$(cargo tree --target x86_64-unknown-linux-gnu -e features --locked)
-          printf '%s\n' "$tree"
-          if grep -Fq 'gpui_linux feature "x11"' <<<"$tree"; then
-            echo 'gpui_linux x11 feature must not be enabled' >&2
+          feature_tree=$(cargo tree --target x86_64-unknown-linux-gnu -e features --locked)
+          printf '%s\n' "$feature_tree"
+          if ! grep -Fq 'gpui-pre-linux feature "wayland"' <<<"$feature_tree"; then
+            echo 'gpui-pre-linux Wayland feature must be enabled' >&2
             exit 1
           fi
 
@@ -298,10 +300,6 @@ jobs:
           test "$ldd_status" -eq 0
           if grep -Fq 'not found' <<<"$ldd_output"; then
             echo 'Packaged binary has an unresolved shared-library dependency' >&2
-            exit 1
-          fi
-          if grep -Eq 'libX11|libxcb|libxkbcommon-x11' <<<"$ldd_output"; then
-            echo 'Packaged binary links an X11 dependency' >&2
             exit 1
           fi
 

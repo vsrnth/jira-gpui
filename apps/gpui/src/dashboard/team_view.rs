@@ -112,7 +112,7 @@ impl Dashboard {
         v_flex()
             .size_full()
             .min_w_0()
-            .p(gpui::rems(layout.list_padding() / 16.))
+            .p(gpui_kit::rems(layout.list_padding() / 16.))
             .gap_3()
             .child(
                 v_flex()
@@ -149,9 +149,9 @@ impl Dashboard {
                                     cx.theme().muted_foreground
                                 })
                                 .role(if team_feedback_error {
-                                    gpui::accesskit::Role::Alert
+                                    gpui_kit::accesskit::Role::Alert
                                 } else {
-                                    gpui::accesskit::Role::Status
+                                    gpui_kit::accesskit::Role::Status
                                 })
                                 .aria_label(
                                     team_feedback_error_label
@@ -196,7 +196,7 @@ impl Dashboard {
                                 .id("team-table")
                                 .debug_selector(|| "team-table".to_owned())
                                 .accessibility_id("team-table")
-                                .role(gpui::accesskit::Role::Group)
+                                .role(gpui_kit::accesskit::Role::Group)
                                 .aria_label("In-progress team tickets")
                                 .h_full()
                                 .flex_1()
@@ -209,7 +209,7 @@ impl Dashboard {
                                     this.child(
                                         v_flex()
                                             .id("team-unconfigured")
-                                            .role(gpui::accesskit::Role::Status)
+                                            .role(gpui_kit::accesskit::Role::Status)
                                             .aria_label("Team tracker is not configured")
                                             .items_center()
                                             .gap_2()
@@ -261,9 +261,9 @@ impl Dashboard {
                                             .id(status_id)
                                             .debug_selector(move || status_id.to_owned())
                                             .role(if team_error {
-                                                gpui::accesskit::Role::Alert
+                                                gpui_kit::accesskit::Role::Alert
                                             } else {
-                                                gpui::accesskit::Role::Status
+                                                gpui_kit::accesskit::Role::Status
                                             })
                                             .aria_label(status_label)
                                             .items_center()
@@ -301,7 +301,7 @@ impl Dashboard {
                                 .id("team-table")
                                 .debug_selector(|| "team-table".to_owned())
                                 .accessibility_id("team-table")
-                                .role(gpui::accesskit::Role::Group)
+                                .role(gpui_kit::accesskit::Role::Group)
                                 .aria_label("In-progress team tickets")
                                 .h_full()
                                 .flex_1()
@@ -313,7 +313,7 @@ impl Dashboard {
                                     this.child(
                                         v_flex()
                                             .id("team-unconfigured")
-                                            .role(gpui::accesskit::Role::Status)
+                                            .role(gpui_kit::accesskit::Role::Status)
                                             .aria_label("Team tracker is not configured")
                                             .items_center()
                                             .gap_2()
@@ -369,9 +369,9 @@ impl Dashboard {
                                                 .id(status_id)
                                                 .debug_selector(move || status_id.to_owned())
                                                 .role(if team_error {
-                                                    gpui::accesskit::Role::Alert
+                                                    gpui_kit::accesskit::Role::Alert
                                                 } else {
-                                                    gpui::accesskit::Role::Status
+                                                    gpui_kit::accesskit::Role::Status
                                                 })
                                                 .aria_label(status_label)
                                                 .items_center()

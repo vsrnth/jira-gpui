@@ -10,7 +10,10 @@ fn issue_row_accessible_label(
 }
 
 /// Resolve a semantic issue-type tone through the active theme's contrast-aware base colors.
-fn issue_type_color_for_theme(tone: IssueTypeTone, theme: &gpui_component::Theme) -> gpui::Hsla {
+fn issue_type_color_for_theme(
+    tone: IssueTypeTone,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Hsla {
     match tone {
         IssueTypeTone::Red => theme.red,
         IssueTypeTone::Green => theme.green,
@@ -52,7 +55,7 @@ impl Dashboard {
             .gap_1()
             .text_xs()
             .text_color(self.issue_type_color(type_semantics.tone, cx))
-            .role(gpui::accesskit::Role::TextRun)
+            .role(gpui_kit::accesskit::Role::TextRun)
             .aria_label(format!("Issue type: {label}"))
             .child(
                 Icon::new(type_semantics.icon)
@@ -70,7 +73,12 @@ impl Dashboard {
         accessibility_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.priority_badge_with_role(label, accessibility_id, gpui::accesskit::Role::TextRun, cx)
+        self.priority_badge_with_role(
+            label,
+            accessibility_id,
+            gpui_kit::accesskit::Role::TextRun,
+            cx,
+        )
     }
 
     pub(super) fn priority_badge_group(
@@ -79,14 +87,19 @@ impl Dashboard {
         accessibility_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.priority_badge_with_role(label, accessibility_id, gpui::accesskit::Role::Group, cx)
+        self.priority_badge_with_role(
+            label,
+            accessibility_id,
+            gpui_kit::accesskit::Role::Group,
+            cx,
+        )
     }
 
     fn priority_badge_with_role(
         &self,
         label: String,
         accessibility_id: impl Into<String>,
-        role: gpui::accesskit::Role,
+        role: gpui_kit::accesskit::Role,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (icon, tone) = priority_semantics(&label);
@@ -106,7 +119,7 @@ impl Dashboard {
             .into_any_element()
     }
 
-    fn priority_color(&self, tone: PriorityTone, cx: &mut Context<Self>) -> gpui::Hsla {
+    fn priority_color(&self, tone: PriorityTone, cx: &mut Context<Self>) -> gpui_kit::Hsla {
         match tone {
             PriorityTone::Critical => cx.theme().danger,
             PriorityTone::Elevated => cx.theme().warning,
@@ -119,7 +132,7 @@ impl Dashboard {
         &self,
         tone: IssueTypeTone,
         cx: &mut Context<Self>,
-    ) -> gpui::Hsla {
+    ) -> gpui_kit::Hsla {
         issue_type_color_for_theme(tone, cx.theme())
     }
 
@@ -140,7 +153,7 @@ impl Dashboard {
                 v_flex()
                     .id("issue-list-header")
                     .debug_selector(|| "issue-list-header".to_owned())
-                    .h(gpui::rems(if mobile { 3.625 } else { 3.25 }))
+                    .h(gpui_kit::rems(if mobile { 3.625 } else { 3.25 }))
                     .when(mobile, |this| this.px_3())
                     .when(!mobile, |this| this.px_4())
                     .justify_center()
@@ -400,7 +413,7 @@ impl Dashboard {
                     h_flex()
                         .id("remote-lookup-loading")
                         .debug_selector(|| "remote-lookup-loading".to_owned())
-                        .role(gpui::accesskit::Role::Status)
+                        .role(gpui_kit::accesskit::Role::Status)
                         .aria_label(format!("Jira lookup in progress for {query}"))
                         .min_w_0()
                         .gap_2()
@@ -426,7 +439,7 @@ impl Dashboard {
                     v_flex()
                         .id("remote-lookup-error")
                         .debug_selector(|| "remote-lookup-error".to_owned())
-                        .role(gpui::accesskit::Role::Alert)
+                        .role(gpui_kit::accesskit::Role::Alert)
                         .aria_label(format!(
                             "Jira lookup failed for {query}: {}",
                             copy.message()
@@ -512,7 +525,7 @@ impl Dashboard {
             .id(format!("issue-row-{}", issue.id))
             .debug_selector(move || format!("issue-row-{debug_issue_id}"))
             .accessibility_id(accessibility_issue_id)
-            .role(gpui::accesskit::Role::Button)
+            .role(gpui_kit::accesskit::Role::Button)
             .aria_label(accessible_label)
             .aria_selected(selected)
             .tab_index(0)
@@ -661,7 +674,7 @@ mod tests {
 
     #[test]
     fn issue_type_tones_resolve_to_theme_colors() {
-        let theme = gpui_component::Theme::default();
+        let theme = gpui_kit::component::Theme::default();
         assert_eq!(
             issue_type_color_for_theme(IssueTypeTone::Red, &theme),
             theme.red

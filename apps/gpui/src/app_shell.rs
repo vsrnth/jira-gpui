@@ -1,12 +1,6 @@
 //! Native application shell and first-run Jira connection form.
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Rems, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, relative, rems,
-};
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
     TitleBar, WindowExt as _,
     button::Button,
@@ -20,6 +14,12 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     spinner::Spinner,
     v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Rems, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, relative, rems,
 };
 
 use jira_http::JiraBaseUrl;
@@ -578,7 +578,7 @@ impl AppShell {
         help: Option<&'static str>,
         disabled: bool,
         state: &Entity<InputState>,
-        muted_foreground: gpui::Hsla,
+        muted_foreground: gpui_kit::Hsla,
     ) -> impl IntoElement {
         v_flex()
             .gap_1()
@@ -604,7 +604,7 @@ impl AppShell {
         base_url: &Entity<InputState>,
         email: &Entity<InputState>,
         api_token: &Entity<InputState>,
-        cx: &mut gpui::App,
+        cx: &mut gpui_kit::App,
     ) -> DialogContent {
         let shell = view.read(cx);
         let busy_policy = onboarding_busy_policy(shell.connecting);
@@ -1036,9 +1036,9 @@ mod tests {
     };
     use crate::config::{StartupError, StartupSelection};
     use crate::credential_store::CredentialStoreError;
-    use gpui::{WindowAppearance, px, rems};
-    use gpui_component::ThemeMode;
-    use gpui_component::input::InputEvent;
+    use gpui_kit::component::ThemeMode;
+    use gpui_kit::component::input::InputEvent;
+    use gpui_kit::{WindowAppearance, px, rems};
 
     #[test]
     fn connection_readiness_requires_all_three_fields() {

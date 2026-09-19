@@ -7,8 +7,10 @@
 
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled as _, Window, div};
-use gpui_component::{StyledExt as _, v_flex};
+use gpui_kit::component::{StyledExt as _, v_flex};
+use gpui_kit::{
+    AnyElement, App, Hsla, IntoElement as _, ParentElement as _, Styled as _, Window, div,
+};
 use jira_domain::{
     PanelKind, RichAttachmentCard, RichBlock, RichImage, RichInline, RichListItem, RichMark,
     RichStatusColor, RichTextDocument,
@@ -501,15 +503,15 @@ mod tests {
             false,
         );
         let palette = RichTextPalette {
-            foreground: gpui::Hsla::default(),
-            muted: gpui::Hsla::default(),
-            border: gpui::Hsla::default(),
-            code_surface: gpui::Hsla::default(),
-            link: gpui::Hsla::default(),
-            info: gpui::Hsla::default(),
-            warning: gpui::Hsla::default(),
-            success: gpui::Hsla::default(),
-            danger: gpui::Hsla::default(),
+            foreground: gpui_kit::Hsla::default(),
+            muted: gpui_kit::Hsla::default(),
+            border: gpui_kit::Hsla::default(),
+            code_surface: gpui_kit::Hsla::default(),
+            link: gpui_kit::Hsla::default(),
+            info: gpui_kit::Hsla::default(),
+            warning: gpui_kit::Hsla::default(),
+            success: gpui_kit::Hsla::default(),
+            danger: gpui_kit::Hsla::default(),
         };
 
         let rendered = render_rich_text(
@@ -537,15 +539,15 @@ mod tests {
             false,
         );
         let palette = RichTextPalette {
-            foreground: gpui::Hsla::default(),
-            muted: gpui::Hsla::default(),
-            border: gpui::Hsla::default(),
-            code_surface: gpui::Hsla::default(),
-            link: gpui::Hsla::default(),
-            info: gpui::Hsla::default(),
-            warning: gpui::Hsla::default(),
-            success: gpui::Hsla::default(),
-            danger: gpui::Hsla::default(),
+            foreground: gpui_kit::Hsla::default(),
+            muted: gpui_kit::Hsla::default(),
+            border: gpui_kit::Hsla::default(),
+            code_surface: gpui_kit::Hsla::default(),
+            link: gpui_kit::Hsla::default(),
+            info: gpui_kit::Hsla::default(),
+            warning: gpui_kit::Hsla::default(),
+            success: gpui_kit::Hsla::default(),
+            danger: gpui_kit::Hsla::default(),
         };
         let action = RichAttachmentCardAction::new(|attachment_id, _, _| {
             assert_eq!(attachment_id, "10002");
@@ -632,7 +634,10 @@ mod tests {
 
     #[test]
     fn ready_image_state_can_hold_decoded_in_memory_image() {
-        let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new()));
+        let image = Arc::new(gpui_kit::Image::from_bytes(
+            gpui_kit::ImageFormat::Png,
+            Vec::new(),
+        ));
         let state = RichImageRenderState::Ready(image);
         assert!(matches!(state, RichImageRenderState::Ready(_)));
     }

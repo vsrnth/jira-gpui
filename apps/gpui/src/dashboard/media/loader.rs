@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{Image, ImageFormat};
+use gpui_kit::{Image, ImageFormat};
 use jira_application::{AttachmentImage, AttachmentImageRequest, CancellationToken, PortFuture};
 use jira_domain::{IssueId, JiraSiteId, RichImage};
 

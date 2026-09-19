@@ -135,11 +135,11 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
         app_shell::AppearancePreference,
         dashboard::{Dashboard, SampleSection},
     };
-    use gpui::{
+    use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
+    use gpui_kit::{
         App, AppContext as _, Bounds, Pixels, Size, WindowBounds, WindowDecorations, WindowOptions,
         px, size,
     };
-    use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 
     const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
     const COMMENT_CONFIRMATION_WINDOW_SIZE: Size<Pixels> = size(px(640.), px(900.));
@@ -151,10 +151,10 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
     const APP_ID: &str = "dev.jiradesk.JiraDesk.UIAutomation";
     const WINDOW_TITLE: &str = "Jira Desk UI Automation";
 
-    gpui_platform::application()
+    gpui_kit::platform::application()
         .with_assets(AppAssets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::component::init(cx);
             // Do not synchronize with the host system appearance: the fixture must be stable.
             Theme::change(ThemeMode::Light, None, cx);
 

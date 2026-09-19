@@ -5,9 +5,9 @@ use super::*;
 use crate::app_shell::AppearancePreference;
 use crate::presentation::{UpdateViewModel, normalized_issue_key};
 use crate::sample_data::{sample_issues, sample_users};
-use gpui::VisualTestContext;
-use gpui_component::searchable_list::SearchableListDelegate as _;
-use gpui_component::table::{ColumnSort, TableDelegate as _};
+use gpui_kit::VisualTestContext;
+use gpui_kit::component::searchable_list::SearchableListDelegate as _;
+use gpui_kit::component::table::{ColumnSort, TableDelegate as _};
 use jira_application::{
     AddCommentRequest, AssignIssueRequest, AssignableUserSearchRequest, ErrorKind,
     IssueFetchRequest, IssuePage, IssueTransitionsRequest, JiraAttachmentReadPort,
@@ -247,11 +247,11 @@ fn status_control_disables_during_confirmation() {
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn native_status_popover_list_is_bounded_and_selection_only_confirms(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
     let site_id = JiraSiteId::new("site").expect("site");
     let calls = Arc::new(Mutex::new(EditCalls::default()));
     let transitions = vec![IssueTransition {
@@ -288,7 +288,7 @@ fn native_status_popover_list_is_bounded_and_selection_only_confirms(
     dashboard.status_transition_state = StatusTransitionReadState::Ready {
         issue_id: issue_id.clone(),
     };
-    let window = cx.open_window(gpui::size(px(1_200.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1_200.), px(900.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -306,7 +306,7 @@ fn native_status_popover_list_is_bounded_and_selection_only_confirms(
     );
 
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             control.origin.x + control.size.width / 2.,
             control.origin.y + control.size.height / 2.,
         ),
@@ -329,7 +329,7 @@ fn native_status_popover_list_is_bounded_and_selection_only_confirms(
         .debug_bounds("status-transition-31")
         .expect("native transition action should be visible");
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             option.origin.x + option.size.width / 2.,
             option.origin.y + option.size.height / 2.,
         ),
@@ -445,10 +445,10 @@ fn appearance_defaults_to_system_and_fixture_initialization_is_side_effect_free(
     ));
 }
 
-#[gpui::test]
-fn selecting_appearance_updates_state_and_emits_event(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(640.), px(480.)), |_, _| {
+#[gpui_kit::test]
+fn selecting_appearance_updates_state_and_emits_event(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(640.), px(480.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -500,10 +500,10 @@ fn refresh_action_labels_are_concise_and_do_not_include_sync_detail() {
     assert!(!refresh_action_label(true).contains("Refresh complete"));
 }
 
-#[gpui::test]
-fn sidebar_toggle_is_manual_only_on_standard_and_wide_layouts(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(1_000.), px(700.)), |_, _| {
+#[gpui_kit::test]
+fn sidebar_toggle_is_manual_only_on_standard_and_wide_layouts(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(1_000.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -527,10 +527,10 @@ fn sidebar_toggle_is_manual_only_on_standard_and_wide_layouts(cx: &mut gpui::Tes
     assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.sidebar_collapsed));
 }
 
-#[gpui::test]
-fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
+#[gpui_kit::test]
+fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(1_100.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -571,12 +571,12 @@ fn sidebar_bounds_switch_between_expanded_and_collapsed_widths(cx: &mut gpui::Te
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(1_100.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -655,7 +655,7 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     assert!(profile.origin.x + profile.size.width <= sidebar.origin.x + sidebar.size.width);
 
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             toggle.origin.x + toggle.size.width - px(16.),
             toggle.origin.y + toggle.size.height / 2.,
         ),
@@ -748,12 +748,12 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn account_menu_exposes_settings_categories_and_selects_settings_section(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(1_100.), px(700.)), |_, _| {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(1_100.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -766,7 +766,7 @@ fn account_menu_exposes_settings_categories_and_selects_settings_section(
         .debug_bounds("sidebar-profile")
         .expect("profile should be a visible account-menu trigger");
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             profile.origin.x + profile.size.width / 2.,
             profile.origin.y + profile.size.height / 2.,
         ),
@@ -787,14 +787,14 @@ fn account_menu_exposes_settings_categories_and_selects_settings_section(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn long_sync_status_stays_bounded_beside_desktop_content_at_short_height(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.sync_message = "Updated · 192 issues · 3 new updates".to_owned();
-    let window = cx.open_window(gpui::size(px(1_100.), px(160.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1_100.), px(160.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -827,12 +827,12 @@ fn sidebar_sync_message_visibility_only_hides_redundant_preview_copy() {
     }
 }
 
-#[gpui::test]
-fn long_sync_status_stays_above_mobile_content_at_short_height(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn long_sync_status_stays_above_mobile_content_at_short_height(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.sync_message = "Updated · 192 issues · 3 new updates".to_owned();
-    let window = cx.open_window(gpui::size(px(320.), px(160.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(320.), px(160.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -854,10 +854,10 @@ fn long_sync_status_stays_above_mobile_content_at_short_height(cx: &mut gpui::Te
     assert!(status_text.origin.y + status_text.size.height <= status.origin.y + status.size.height);
 }
 
-#[gpui::test]
-fn mobile_navigation_fits_all_destinations_at_supported_minimum(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| {
+#[gpui_kit::test]
+fn mobile_navigation_fits_all_destinations_at_supported_minimum(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(320.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let mut visual = VisualTestContext::from_window(window.into(), cx);
@@ -1098,7 +1098,7 @@ fn status_options_keep_combobox_values_and_labels_aligned() {
     ];
     for (index, expected) in values.into_iter().enumerate() {
         let item = options
-            .item(gpui_component::IndexPath::new(index))
+            .item(gpui_kit::component::IndexPath::new(index))
             .expect("status option");
         assert_eq!(*item.value(), expected);
         assert_eq!(item.title(), expected.label());
@@ -1114,8 +1114,8 @@ fn status_filter_initial_indices_follow_presentation_order() {
             IssueStatusSelection::ToDo,
         ])),
         vec![
-            gpui_component::IndexPath::new(0),
-            gpui_component::IndexPath::new(2),
+            gpui_kit::component::IndexPath::new(0),
+            gpui_kit::component::IndexPath::new(2),
         ]
     );
 }
@@ -1164,8 +1164,8 @@ fn status_filter_rebuilds_from_loaded_domain_issues_without_remote_state() {
     assert_eq!(done[0].key, "DESK-163");
 }
 
-#[gpui::test]
-fn selected_without_workspace_finishes_epoch_and_drops_task(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn selected_without_workspace_finishes_epoch_and_drops_task(cx: &mut gpui_kit::TestAppContext) {
     let dashboard = cx.new(|_| Dashboard::from_sample_data());
     let issue_id = sample_issues().into_iter().next().expect("issue").id;
     let before_generation = cx.read_entity(&dashboard, |dashboard, _| {
@@ -1193,9 +1193,9 @@ fn selected_without_workspace_finishes_epoch_and_drops_task(cx: &mut gpui::TestA
     assert_eq!(state, DetailState::Empty);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn cached_detail_renders_without_spinner_and_survives_background_failure(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
         JiraSiteId::new("site").expect("site"),
@@ -1218,8 +1218,8 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
         .find(|candidate| candidate.id == issue_id)
         .expect("selected issue");
     cached_issue.description_text = Some(cached_description.to_owned());
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.update(|_, cx| {
@@ -1255,9 +1255,9 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn team_only_cached_detail_renders_without_spinner_and_survives_background_failure(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
         JiraSiteId::new("site").expect("site"),
@@ -1279,8 +1279,8 @@ fn team_only_cached_detail_renders_without_spinner_and_survives_background_failu
     dashboard.team_issues = vec![team_issue];
     dashboard.section = Section::Team;
 
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.update(|_, cx| {
@@ -1316,9 +1316,9 @@ fn team_only_cached_detail_renders_without_spinner_and_survives_background_failu
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn empty_cached_detail_renders_without_spinner_and_survives_background_failure(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let workspace = futures_lite::future::block_on(LiveWorkspace::initialize(
         JiraSiteId::new("site").expect("site"),
@@ -1340,8 +1340,8 @@ fn empty_cached_detail_renders_without_spinner_and_survives_background_failure(
     cached_issue.description_text = None;
     cached_issue.rich_description = None;
     cached_issue.detail_loaded = true;
-    cx.update(gpui_component::init);
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.update(|_, cx| {
@@ -1448,8 +1448,8 @@ fn exact_local_key_hit_returns_id_without_remote_lookup() {
     assert_eq!(local_issue_id_for_key(&issues, &key), expected);
 }
 
-#[gpui::test]
-fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui_kit::TestAppContext) {
     let issue = sample_issues()
         .into_iter()
         .find(|issue| issue.key.as_str() == "DESK-176")
@@ -1473,11 +1473,11 @@ fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui::TestAppConte
     assert!(mobile_detail_open);
 }
 
-#[gpui::test]
-fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
-    let window = cx.open_window(gpui::size(px(1200.), px(900.)), |_, _| {
+    let window = cx.open_window(gpui_kit::size(px(1200.), px(900.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -1496,7 +1496,7 @@ fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui::TestAppConte
     assert!(row.size.height > px(0.));
 
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             row.origin.x + row.size.width / 2.,
             row.origin.y + row.size.height / 2.,
         ),
@@ -1516,13 +1516,13 @@ fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui::TestAppConte
     assert_eq!(selected_row.size, row.size);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
 
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| {
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
     let mut visual = VisualTestContext::from_window(window.into(), cx);
@@ -1560,11 +1560,11 @@ fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn dashboard_issue_edit_reads_and_dispatches_each_confirmed_operation_once(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
     let site_id = JiraSiteId::new("site").expect("site");
     let calls = Arc::new(Mutex::new(EditCalls::default()));
     let users = vec![
@@ -1634,7 +1634,7 @@ fn dashboard_issue_edit_reads_and_dispatches_each_confirmed_operation_once(
             query: String::new(),
             users: assignee_users.clone(),
         });
-    let window = cx.open_window(gpui::size(px(900.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(900.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -1714,9 +1714,9 @@ fn dashboard_issue_edit_reads_and_dispatches_each_confirmed_operation_once(
     assert_eq!(calls.transition_writes[0].transition_id, "31");
 }
 
-#[gpui::test]
-fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Team;
@@ -1729,7 +1729,7 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
     dashboard.team_feedback =
         TeamFeedback::Info("Team tracker refreshed · fetched 5 · displaying 3".to_owned());
 
-    let window = cx.open_window(gpui::size(px(1370.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1370.), px(900.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -1773,7 +1773,7 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
         "team detail escapes the desktop width: {detail_bounds:?}"
     );
 
-    visual.simulate_resize(gpui::size(px(390.), px(800.)));
+    visual.simulate_resize(gpui_kit::size(px(390.), px(800.)));
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let mobile_table_bounds = visual
@@ -1785,13 +1785,13 @@ fn team_tracker_table_and_detail_are_bounded_on_desktop(cx: &mut gpui::TestAppCo
     );
 }
 
-#[gpui::test]
-fn native_settings_root_and_general_controls_are_bounded(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn native_settings_root_and_general_controls_are_bounded(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Settings;
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -1827,9 +1827,11 @@ fn native_settings_root_and_general_controls_are_bounded(cx: &mut gpui::TestAppC
     }
 }
 
-#[gpui::test]
-fn team_table_sort_keeps_selected_detail_identity_after_reordering(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn team_table_sort_keeps_selected_detail_identity_after_reordering(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Team;
@@ -1839,7 +1841,7 @@ fn team_table_sort_keeps_selected_detail_identity_after_reordering(cx: &mut gpui
         display_name: "Amina Yusuf".to_owned(),
     }];
     dashboard.team_issues = sample_issues();
-    let window = cx.open_window(gpui::size(px(1_370.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1_370.), px(900.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -1934,11 +1936,11 @@ fn team_table_sort_keeps_selected_detail_identity_after_reordering(cx: &mut gpui
     assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.selected_issue.is_none()));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn team_table_density_refresh_keeps_identity_after_hidden_sort_resets(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Team;
@@ -1948,7 +1950,7 @@ fn team_table_density_refresh_keeps_identity_after_hidden_sort_resets(
         display_name: "Amina Yusuf".to_owned(),
     }];
     dashboard.team_issues = sample_issues();
-    let window = cx.open_window(gpui::size(px(1_920.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1_920.), px(900.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -1984,7 +1986,7 @@ fn team_table_density_refresh_keeps_identity_after_hidden_sort_resets(
         Some(2)
     );
 
-    visual.simulate_resize(gpui::size(px(1_370.), px(900.)));
+    visual.simulate_resize(gpui_kit::size(px(1_370.), px(900.)));
     visual.run_until_parked();
     assert_eq!(
         table.read_with(&visual, |table, _| table.selected_team_ticket_issue_id()),
@@ -1996,15 +1998,15 @@ fn team_table_density_refresh_keeps_identity_after_hidden_sort_resets(
     );
 }
 
-#[gpui::test]
-fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Team;
     dashboard.selected_issue = None;
     dashboard.selected_issue_core = None;
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2027,9 +2029,9 @@ fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui::TestAppCont
     );
 }
 
-#[gpui::test]
-fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let mut dashboard = Dashboard::from_sample_data();
@@ -2050,7 +2052,7 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
         comments: Vec::new(),
         attachments: Vec::new(),
     });
-    let window = cx.open_window(gpui::size(px(1370.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1370.), px(900.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -2136,7 +2138,7 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
         .debug_bounds("issue-detail-details-trigger")
         .expect("details accordion trigger should be laid out");
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             trigger.origin.x + trigger.size.width / 2.,
             trigger.origin.y + trigger.size.height / 2.,
         ),
@@ -2154,7 +2156,7 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
         .debug_bounds("issue-detail-details-trigger")
         .expect("details accordion trigger should remain laid out when closed");
     visual.simulate_click(
-        gpui::point(
+        gpui_kit::point(
             trigger.origin.x + trigger.size.width / 2.,
             trigger.origin.y + trigger.size.height / 2.,
         ),
@@ -2164,13 +2166,13 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui::T
     assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
 }
 
-#[gpui::test]
-fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
-    let window = cx.open_window(gpui::size(px(1_200.), px(1_200.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1_200.), px(1_200.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.update(|window, cx| {
@@ -2236,11 +2238,11 @@ fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui::T
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn mobile_comment_confirmation_actions_are_intrinsic_and_non_overlapping(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
@@ -2255,7 +2257,7 @@ fn mobile_comment_confirmation_actions_are_intrinsic_and_non_overlapping(
             "A fixture comment requiring confirmation",
         )
         .expect("fixture comment should enter confirmation");
-    let window = cx.open_window(gpui::size(px(640.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(640.), px(900.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.update(|window, cx| {
@@ -2328,16 +2330,16 @@ fn mobile_comment_confirmation_actions_are_intrinsic_and_non_overlapping(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn mobile_remote_lookup_loading_and_error_states_stay_visible_in_the_list(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.remote_lookup = RemoteLookupState::Loading {
         query: " ix-404 ".to_owned(),
     };
-    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(320.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -2372,9 +2374,11 @@ fn mobile_remote_lookup_loading_and_error_states_stay_visible_in_the_list(
     assert!(visual.debug_bounds("remote-lookup-loading").is_none());
 }
 
-#[gpui::test]
-fn selected_detail_feedback_is_early_and_has_stable_state_identity(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn selected_detail_feedback_is_early_and_has_stable_state_identity(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.selected_issue = Some(issue.id.clone());
@@ -2382,7 +2386,7 @@ fn selected_detail_feedback_is_early_and_has_stable_state_identity(cx: &mut gpui
     dashboard.detail_state = DetailState::Loading {
         issue_id: issue.id.clone(),
     };
-    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(320.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -2420,9 +2424,9 @@ fn selected_detail_feedback_is_early_and_has_stable_state_identity(cx: &mut gpui
     assert!(visual.debug_bounds("issue-detail-loading").is_none());
 }
 
-#[gpui::test]
-fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let issue_id = IssueId::new("100").expect("issue");
     let event_id = jira_domain::EventId::new("event-1").expect("event");
@@ -2446,7 +2450,7 @@ fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::T
         }],
     }];
 
-    let window = cx.open_window(gpui::size(px(1095.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1095.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2501,9 +2505,9 @@ fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui::T
     );
 }
 
-#[gpui::test]
-fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let issue_id = IssueId::new("100").expect("issue");
     let event_id = jira_domain::EventId::new("event-mobile").expect("event");
@@ -2527,7 +2531,7 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui::TestA
         }],
     }];
 
-    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(320.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2573,13 +2577,13 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui::TestA
     );
 }
 
-#[gpui::test]
-fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Updates;
-    let window = cx.open_window(gpui::size(px(960.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2616,14 +2620,14 @@ fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui::TestApp
     }
 }
 
-#[gpui::test]
-fn updates_empty_filters_have_distinct_stable_state_surfaces(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn updates_empty_filters_have_distinct_stable_state_surfaces(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Updates;
     dashboard.update_groups.clear();
-    let window = cx.open_window(gpui::size(px(320.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(320.), px(700.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -2715,7 +2719,7 @@ fn team_table_mode_defers_wide_columns_until_the_table_can_fit() {
 #[test]
 fn semantic_ticket_controls_activate_only_on_plain_enter_or_space() {
     let event = |key| KeyDownEvent {
-        keystroke: gpui::Keystroke::parse(key).expect("keystroke"),
+        keystroke: gpui_kit::Keystroke::parse(key).expect("keystroke"),
         is_held: false,
         prefer_character_input: false,
     };
@@ -3104,11 +3108,11 @@ fn team_feedback_alert_label_is_only_present_for_errors() {
     assert!(TeamFeedback::Idle.error_accessible_label().is_none());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn team_error_state_is_distinct_from_empty_state_in_dense_and_card_views(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::component::init);
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Team;
@@ -3122,7 +3126,7 @@ fn team_error_state_is_distinct_from_empty_state_in_dense_and_card_views(
         source: TeamFeedbackErrorSource::Refresh,
         message: "Jira is unavailable".to_owned(),
     };
-    let window = cx.open_window(gpui::size(px(1_370.), px(900.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1_370.), px(900.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -3145,7 +3149,7 @@ fn team_error_state_is_distinct_from_empty_state_in_dense_and_card_views(
     assert!(visual.debug_bounds("team-empty").is_some());
     assert!(visual.debug_bounds("team-error").is_none());
 
-    visual.simulate_resize(gpui::size(px(390.), px(800.)));
+    visual.simulate_resize(gpui_kit::size(px(390.), px(800.)));
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.update(|_, cx| {

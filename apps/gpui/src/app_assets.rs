@@ -2,15 +2,15 @@
 //!
 //! Jira-specific icons live in this crate so their visual vocabulary can be
 //! versioned with the application. Every other asset continues to come from
-//! `gpui-component-assets`, which keeps component internals working normally.
+//! `gpui-kit-assets`, which keeps component internals working normally.
 
 use std::borrow::Cow;
 
-use gpui::{App, AssetSource, IntoElement, RenderOnce, Result, SharedString, Window};
-use gpui_component::{Icon, IconNamed};
-use gpui_component_assets::Assets;
+use gpui_kit::assets::Assets;
+use gpui_kit::component::{Icon, IconNamed};
+use gpui_kit::{App, AssetSource, IntoElement, RenderOnce, Result, SharedString, Window};
 
-gpui_component::icon_named!(AppIconName, "assets/icons", [Debug, Copy, PartialEq, Eq]);
+gpui_kit::component::icon_named!(AppIconName, "assets/icons", [Debug, Copy, PartialEq, Eq]);
 
 impl RenderOnce for AppIconName {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {

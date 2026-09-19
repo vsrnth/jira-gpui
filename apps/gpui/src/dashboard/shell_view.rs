@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use crate::app_assets::AppIconName;
 use crate::responsive::{effective_sidebar_is_rail, mobile_nav_item_width};
-use gpui::MouseButton;
-use gpui_component::{
+use gpui_kit::MouseButton;
+use gpui_kit::component::{
     Collapsible as _, Sizable as _,
     menu::{DropdownMenu as _, PopupMenuItem},
     sidebar::{
@@ -14,7 +14,7 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 
-type SidebarActivation = Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>;
+type SidebarActivation = Rc<dyn Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App)>;
 
 #[derive(Clone)]
 struct AccessibleSidebarMenu {
@@ -36,7 +36,7 @@ impl AccessibleSidebarMenu {
     }
 }
 
-impl gpui_component::Collapsible for AccessibleSidebarMenu {
+impl gpui_kit::component::Collapsible for AccessibleSidebarMenu {
     fn is_collapsed(&self) -> bool {
         self.collapsed
     }
@@ -50,9 +50,9 @@ impl gpui_component::Collapsible for AccessibleSidebarMenu {
 impl SidebarItem for AccessibleSidebarMenu {
     fn render(
         self,
-        id: impl Into<gpui::ElementId>,
+        id: impl Into<gpui_kit::ElementId>,
         window: &mut Window,
-        cx: &mut gpui::App,
+        cx: &mut gpui_kit::App,
     ) -> impl IntoElement {
         let id = id.into();
         v_flex()
@@ -80,7 +80,7 @@ impl AccessibleSidebarMenuItem {
         accessibility_id: &'static str,
         accessible_label: impl Into<String>,
         selected: bool,
-        activation: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+        activation: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
     ) -> Self {
         Self {
             item,
@@ -92,7 +92,7 @@ impl AccessibleSidebarMenuItem {
     }
 }
 
-impl gpui_component::Collapsible for AccessibleSidebarMenuItem {
+impl gpui_kit::component::Collapsible for AccessibleSidebarMenuItem {
     fn is_collapsed(&self) -> bool {
         self.item.is_collapsed()
     }
@@ -106,9 +106,9 @@ impl gpui_component::Collapsible for AccessibleSidebarMenuItem {
 impl SidebarItem for AccessibleSidebarMenuItem {
     fn render(
         self,
-        id: impl Into<gpui::ElementId>,
+        id: impl Into<gpui_kit::ElementId>,
         window: &mut Window,
-        cx: &mut gpui::App,
+        cx: &mut gpui_kit::App,
     ) -> impl IntoElement {
         let item = self.item.render(id, window, cx).into_any_element();
         let accessibility_id = self.accessibility_id;
@@ -119,7 +119,7 @@ impl SidebarItem for AccessibleSidebarMenuItem {
             .id(accessibility_id)
             .debug_selector(move || accessibility_id.to_owned())
             .accessibility_id(accessibility_id)
-            .role(gpui::accesskit::Role::Button)
+            .role(gpui_kit::accesskit::Role::Button)
             .aria_label(accessible_label)
             .aria_selected(selected)
             .tab_index(0)
@@ -128,7 +128,7 @@ impl SidebarItem for AccessibleSidebarMenuItem {
                 move |event, window, cx| {
                     if is_activation_key(event) {
                         window.prevent_default();
-                        activation(&gpui::ClickEvent::default(), window, cx);
+                        activation(&gpui_kit::ClickEvent::default(), window, cx);
                     }
                 }
             })
@@ -193,7 +193,7 @@ impl Dashboard {
             .id("sidebar-workspace-header")
             .debug_selector(|| "sidebar-workspace-header".to_owned())
             .accessibility_id("sidebar-workspace-header")
-            .role(gpui::accesskit::Role::Group)
+            .role(gpui_kit::accesskit::Role::Group)
             .aria_label(format!("{} · {}", self.site_label, self.mode_label))
             .w_full()
             .min_w_0()
@@ -260,7 +260,7 @@ impl Dashboard {
                             .id("sidebar-toggle")
                             .debug_selector(|| "sidebar-toggle".to_owned())
                             .accessibility_id("sidebar-toggle")
-                            .role(gpui::accesskit::Role::Button)
+                            .role(gpui_kit::accesskit::Role::Button)
                             .aria_label(if collapsed {
                                 "Expand sidebar"
                             } else {
@@ -297,7 +297,7 @@ impl Dashboard {
                                 .id("sidebar-toggle")
                                 .debug_selector(|| "sidebar-toggle".to_owned())
                                 .accessibility_id("sidebar-toggle")
-                                .role(gpui::accesskit::Role::Button)
+                                .role(gpui_kit::accesskit::Role::Button)
                                 .aria_label("Collapse sidebar")
                                 .flex_shrink_0()
                                 .child(SidebarToggleButton::new().collapsed(collapsed).on_click(
@@ -325,17 +325,17 @@ impl Dashboard {
             .when(
                 !collapsed && should_render_sidebar_sync_message(&self.sync_message),
                 |this| {
-                    this.max_h(gpui::rems(11.)).min_h_0().child(
+                    this.max_h(gpui_kit::rems(11.)).min_h_0().child(
                         div()
                             .id("sidebar-sync-status")
                             .debug_selector(|| "sidebar-sync-status".to_owned())
                             .accessibility_id("sidebar-sync-status")
-                            .role(gpui::accesskit::Role::Status)
+                            .role(gpui_kit::accesskit::Role::Status)
                             .w_full()
                             .min_w_0()
                             .aria_label(self.sync_message.clone())
-                            .h(gpui::rems(3.5))
-                            .max_h(gpui::rems(4.5))
+                            .h(gpui_kit::rems(3.5))
+                            .max_h(gpui_kit::rems(4.5))
                             .min_h_0()
                             .flex_shrink_1()
                             .overflow_y_scrollbar()
@@ -352,13 +352,16 @@ impl Dashboard {
                         .id("sidebar-profile-actions")
                         .debug_selector(|| "sidebar-profile-actions".to_owned())
                         .accessibility_id("sidebar-profile-actions")
-                        .role(gpui::accesskit::Role::Group)
+                        .role(gpui_kit::accesskit::Role::Group)
                         .aria_label("Account and refresh actions")
                         .w_full()
                         .min_w_0()
                         .items_center()
                         .when(collapsed, |this| {
-                            this.flex_col().h(gpui::rems(5.)).gap_1().justify_center()
+                            this.flex_col()
+                                .h(gpui_kit::rems(5.))
+                                .gap_1()
+                                .justify_center()
                         })
                         .when(!collapsed, |this| this.gap_1())
                         .child(profile)
@@ -377,17 +380,17 @@ impl Dashboard {
             .id("dashboard-sidebar-shell")
             .debug_selector(|| "dashboard-sidebar".to_owned())
             .accessibility_id("dashboard-sidebar")
-            .role(gpui::accesskit::Role::Group)
+            .role(gpui_kit::accesskit::Role::Group)
             .aria_label("Jira Desk sidebar")
             .h_full()
-            .w(gpui::rems(if collapsed { 3. } else { 15. }))
+            .w(gpui_kit::rems(if collapsed { 3. } else { 15. }))
             .flex_shrink_0()
             .overflow_hidden()
             .child(
                 Sidebar::new("dashboard-sidebar-component")
                     .collapsible(SidebarCollapsible::Icon)
                     .collapsed(collapsed)
-                    .w(gpui::rems(15.))
+                    .w(gpui_kit::rems(15.))
                     .header(header)
                     .child(menu)
                     .footer(footer),
@@ -430,7 +433,7 @@ impl Dashboard {
                     .flex_1()
                     .flex_shrink_1()
                     .min_w_0()
-                    .max_w(gpui::rems(10.5))
+                    .max_w(gpui_kit::rems(10.5))
                     .justify_start()
             })
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
@@ -542,7 +545,7 @@ impl Dashboard {
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .accessibility_id(id)
-                .role(gpui::accesskit::Role::Button)
+                .role(gpui_kit::accesskit::Role::Button)
                 .aria_label(tooltip.clone())
                 .tab_index(0)
                 .flex_shrink_0()
@@ -566,7 +569,7 @@ impl Dashboard {
                 })
                 .focus(|style| style.border_1().border_color(cx.theme().primary))
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                .on_a11y_action(gpui::AccessibleAction::Click, move |_, window, cx| {
+                .on_a11y_action(gpui_kit::AccessibleAction::Click, move |_, window, cx| {
                     if let Some(dashboard) = dashboard_for_a11y.upgrade() {
                         dashboard.update(cx, |this, cx| {
                             this.begin_refresh(window, cx);
@@ -615,12 +618,12 @@ impl Dashboard {
         v_flex()
             .id("mobile-sync-status")
             .debug_selector(|| "mobile-sync-status".to_owned())
-            .role(gpui::accesskit::Role::Status)
+            .role(gpui_kit::accesskit::Role::Status)
             .w_full()
             .min_w_0()
             .min_h_0()
             .flex_shrink_0()
-            .max_h(gpui::rems(6.5))
+            .max_h(gpui_kit::rems(6.5))
             .overflow_hidden()
             .px_3()
             .py_2()
@@ -637,7 +640,7 @@ impl Dashboard {
                             .aria_label(self.sync_message.clone())
                             .flex_1()
                             .min_w_0()
-                            .max_h(gpui::rems(3.5))
+                            .max_h(gpui_kit::rems(3.5))
                             .overflow_y_scrollbar()
                             .whitespace_normal()
                             .text_xs()
@@ -731,7 +734,7 @@ impl Dashboard {
             .id(id)
             .debug_selector(move || id.to_owned())
             .accessibility_id(id)
-            .role(gpui::accesskit::Role::Button)
+            .role(gpui_kit::accesskit::Role::Button)
             .aria_label(accessible_label.clone())
             .aria_selected(selected)
             .tab_index(0)

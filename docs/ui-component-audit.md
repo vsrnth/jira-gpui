@@ -14,7 +14,7 @@ The shell already uses or intentionally composes on both supported platforms:
 - `Input` and `Combobox` for onboarding, local search, and status filters;
 - `Notification` for in-app refresh/comment outcomes; on Linux, Freedesktop
   alerts remain independent, while the adapter/test is unavailable on macOS;
-- the registered `gpui-component-assets` bundle for TitleBar and semantic icon
+- the registered `gpui-kit-assets` bundle for TitleBar and semantic icon
   assets, keeping idle minimize/maximize/close controls discoverable while
   retaining hover emphasis;
 - custom ADF rendering, responsive mobile navigation, and the existing detail
@@ -61,12 +61,10 @@ bounded list/detail ownership model.
 
 ## Version and toolchain constraints
 
-The repository is pinned to the verified `gpui-component` HEAD
-`b29ee13379e161c2fb68c14c229c958d52d6ffe4` (package `0.5.2`); Cargo.lock
-resolves its compatible GPUI/Zed revision to
-`cc053a4a6fa2fd0e8793201ed9099466af1be0b1`. Keep those revisions aligned
-through the lockfile rather than adding a second GPUI source identity. Rust
-1.95 remains sufficient for the
+The repository uses the published `gpui-kit` facade (`0.6.0` dependency
+constraint), which keeps GPUI, the base layer, components, and assets on one
+compatible release line. Keep that family aligned through the lockfile rather
+than adding a second GPUI source identity. Rust 1.95 remains sufficient for the
 current component set; Rust 1.97.1 is not required. Any upgrade must preserve
 native GPUI support on Linux Wayland and macOS, and rerun the platform-specific
 release smoke. Linux smoke includes media cancellation, XDG portal download,

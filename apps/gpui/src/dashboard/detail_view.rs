@@ -1,10 +1,10 @@
 use super::*;
 use crate::rich_text_view::safe_browser_url;
-use gpui::rems;
-use gpui_component::{
+use gpui_kit::component::{
     Sizable as _, Size, accordion::Accordion, description_list::DescriptionList, list::List,
     popover::Popover, text::TextView,
 };
+use gpui_kit::rems;
 use jira_domain::{RichBlock, RichInline, RichTextDocument};
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
@@ -192,7 +192,7 @@ impl Dashboard {
             let status_surface = match &detail_state {
                 DetailState::RemoteLoading { query } => v_flex()
                     .id("issue-detail-remote-loading")
-                    .role(gpui::accesskit::Role::Status)
+                    .role(gpui_kit::accesskit::Role::Status)
                     .aria_label(format!(
                         "Jira lookup in progress for {}",
                         normalized_lookup_query(query)
@@ -214,7 +214,7 @@ impl Dashboard {
                     ),
                 DetailState::RemoteError { query, copy } => v_flex()
                     .id("issue-detail-remote-error")
-                    .role(gpui::accesskit::Role::Alert)
+                    .role(gpui_kit::accesskit::Role::Alert)
                     .aria_label(format!(
                         "Jira lookup failed for {}: {}",
                         normalized_lookup_query(query),
@@ -232,7 +232,7 @@ impl Dashboard {
                     ),
                 DetailState::Error { copy, .. } => v_flex()
                     .id("issue-detail-error-surface")
-                    .role(gpui::accesskit::Role::Alert)
+                    .role(gpui_kit::accesskit::Role::Alert)
                     .aria_label(format!(
                         "Unable to load issue details: {}",
                         copy.message()
@@ -249,7 +249,7 @@ impl Dashboard {
                     ),
                 DetailState::Loading { .. } => v_flex()
                     .id("issue-detail-loading-surface")
-                    .role(gpui::accesskit::Role::Status)
+                    .role(gpui_kit::accesskit::Role::Status)
                     .aria_label("Loading issue details")
                     .gap_2()
                     .child(div().text_base().font_semibold().child("Loading issue details"))
@@ -271,7 +271,7 @@ impl Dashboard {
                 .id("issue-detail")
                 .debug_selector(|| "issue-detail".to_owned())
                 .accessibility_id("issue-detail")
-                .role(gpui::accesskit::Role::Group)
+                .role(gpui_kit::accesskit::Role::Group)
                 .aria_label("Issue detail")
                 .w_full()
                 .flex_1()
@@ -348,7 +348,7 @@ impl Dashboard {
             div()
                 .id("issue-description-markdown")
                 .accessibility_id("issue-description-markdown")
-                .role(gpui::accesskit::Role::Group)
+                .role(gpui_kit::accesskit::Role::Group)
                 .aria_label("Markdown description")
                 .min_w_0()
                 .text_sm()
@@ -392,7 +392,7 @@ impl Dashboard {
             .min_w_0()
             .debug_selector(|| "issue-detail".to_owned())
             .accessibility_id("issue-detail")
-            .role(gpui::accesskit::Role::Group)
+            .role(gpui_kit::accesskit::Role::Group)
             .aria_label(format!("Issue detail for {}", issue.key))
             .overflow_y_scrollbar()
             .p(rems(layout.detail_padding() / 16.0))
@@ -415,7 +415,7 @@ impl Dashboard {
                                     div()
                                         .id(detail_key_accessibility_id.clone())
                                         .accessibility_id(detail_key_accessibility_id)
-                                        .role(gpui::accesskit::Role::TextRun)
+                                        .role(gpui_kit::accesskit::Role::TextRun)
                                         .aria_label(detail_key_label)
                                         .min_w_0()
                                         .child(div().min_w_0().truncate().child(key)),
@@ -450,7 +450,7 @@ impl Dashboard {
                                     .bg(cx.theme().secondary)
                                     .text_sm()
                                     .text_color(self.issue_type_color(type_semantics.tone, cx))
-                                    .role(gpui::accesskit::Role::Group)
+                                    .role(gpui_kit::accesskit::Role::Group)
                                     .aria_label(format!("Issue type: {issue_type}"))
                                     .child(
                                         Icon::new(type_semantics.icon)
@@ -500,7 +500,7 @@ impl Dashboard {
                     .id("issue-detail-description")
                     .accessibility_id("issue-detail-description")
                     .debug_selector(|| "issue-detail-description".to_owned())
-                    .role(gpui::accesskit::Role::Group)
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label(format!("Description: {description_accessible_value}"))
                     .aria_value(description_accessible_value)
                     .gap_2()
@@ -521,7 +521,7 @@ impl Dashboard {
                     .id("issue-detail-details")
                     .accessibility_id("issue-detail-details")
                     .debug_selector(|| "issue-detail-details".to_owned())
-                    .role(gpui::accesskit::Role::Group)
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label("Issue details")
                     .child(
                         Accordion::new("issue-detail-details-accordion")
@@ -536,7 +536,7 @@ impl Dashboard {
                                                 "issue-detail-details-trigger".to_owned()
                                             })
                                             .accessibility_id("issue-detail-details-trigger")
-                                            .role(gpui::accesskit::Role::Button)
+                                            .role(gpui_kit::accesskit::Role::Button)
                                             .aria_label("Details")
                                             .aria_expanded(details_open)
                                             // The Accordion component owns the pointer interaction;
@@ -544,7 +544,7 @@ impl Dashboard {
                                             // a stable, pressable trigger without replacing it.
                                             .tab_index(-1)
                                             .on_a11y_action(
-                                                gpui::AccessibleAction::Click,
+                                                gpui_kit::AccessibleAction::Click,
                                                 move |_, _, cx| {
                                                     if let Some(dashboard) =
                                                         dashboard_for_details_a11y.upgrade()
@@ -661,7 +661,7 @@ impl Dashboard {
                 h_flex()
                     .id("issue-detail-loading")
                     .debug_selector(|| "issue-detail-loading".to_owned())
-                    .role(gpui::accesskit::Role::Status)
+                    .role(gpui_kit::accesskit::Role::Status)
                     .aria_label("Loading issue details")
                     .min_w_0()
                     .gap_2()
@@ -679,7 +679,7 @@ impl Dashboard {
                 v_flex()
                     .id("issue-detail-error")
                     .debug_selector(|| "issue-detail-error".to_owned())
-                    .role(gpui::accesskit::Role::Alert)
+                    .role(gpui_kit::accesskit::Role::Alert)
                     .aria_label(format!("Unable to load issue details: {}", copy.message()))
                     .min_w_0()
                     .gap_1()
@@ -994,7 +994,7 @@ impl Dashboard {
                     h_flex()
                         .id("issue-status-feedback")
                         .debug_selector(|| "issue-status-feedback".to_owned())
-                        .role(gpui::accesskit::Role::Alert)
+                        .role(gpui_kit::accesskit::Role::Alert)
                         .min_w_0()
                         .gap_2()
                         .text_xs()
@@ -1346,7 +1346,7 @@ impl Dashboard {
             .id("comment-composer")
             .debug_selector(|| "comment-composer".to_owned())
             .accessibility_id("comment-composer")
-            .role(gpui::accesskit::Role::Group)
+            .role(gpui_kit::accesskit::Role::Group)
             .aria_label("Comment composer")
             .min_w_0()
             .gap_2()
@@ -1389,7 +1389,7 @@ impl Dashboard {
                         .id("comment-composer-actions")
                         .debug_selector(|| "comment-composer-actions".to_owned())
                         .accessibility_id("comment-composer-actions")
-                        .role(gpui::accesskit::Role::Group)
+                        .role(gpui_kit::accesskit::Role::Group)
                         .aria_label("Comment actions")
                         .w_full()
                         .justify_end()
@@ -1441,7 +1441,7 @@ impl Dashboard {
                         .id("comment-composer-actions")
                         .debug_selector(|| "comment-composer-actions".to_owned())
                         .accessibility_id("comment-composer-actions")
-                        .role(gpui::accesskit::Role::Group)
+                        .role(gpui_kit::accesskit::Role::Group)
                         .aria_label("Comment actions")
                         .w_full()
                         .justify_end()
@@ -1479,7 +1479,7 @@ impl Dashboard {
                     .id("comment-composer-actions")
                     .debug_selector(|| "comment-composer-actions".to_owned())
                     .accessibility_id("comment-composer-actions")
-                    .role(gpui::accesskit::Role::Group)
+                    .role(gpui_kit::accesskit::Role::Group)
                     .aria_label("Comment actions")
                     .w_full()
                     .justify_end()

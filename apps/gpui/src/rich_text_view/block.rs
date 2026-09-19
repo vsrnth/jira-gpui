@@ -7,11 +7,11 @@ use super::{
     HeadingSize, MAX_RENDER_CHILDREN, RenderBudget, RenderContext, RichBlock, RichListItem,
     heading_size, omitted_element, panel_accent, presentation_placeholder_label,
 };
-use gpui::{
+use gpui_kit::component::{StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
+use gpui_kit::{
     AnyElement, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, rems,
 };
-use gpui_component::{StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
 use jira_domain::{
     HORIZONTAL_RULE_LABEL, RichDecisionItem, RichDecisionState, RichTable, RichTableCell,
     RichTaskItem, RichTaskState,
@@ -106,7 +106,7 @@ pub(super) fn render_block(
             .id("rich-text-horizontal-rule")
             .debug_selector(|| "rich-text-horizontal-rule".to_owned())
             .accessibility_id("rich-text-horizontal-rule")
-            .role(gpui::accesskit::Role::Group)
+            .role(gpui_kit::accesskit::Role::Group)
             .aria_label("Horizontal rule")
             .w_full()
             .h(rems(0.0625))
@@ -150,7 +150,7 @@ fn render_task_list(
                 ))
                 .debug_selector(move || row_id.clone())
                 .accessibility_id(format!("rich-text-task-item-{list_ordinal}-{index}"))
-                .role(gpui::accesskit::Role::ListItem)
+                .role(gpui_kit::accesskit::Role::ListItem)
                 .aria_label(row_label)
                 .aria_value(format!("{state_label} task"))
                 .min_w_0()
@@ -195,7 +195,7 @@ fn render_task_list(
         .id(ElementId::named_usize("rich-text-task-list", list_ordinal))
         .debug_selector(|| "rich-text-task-list".to_owned())
         .accessibility_id(format!("rich-text-task-list-{list_ordinal}"))
-        .role(gpui::accesskit::Role::List)
+        .role(gpui_kit::accesskit::Role::List)
         .aria_label("Task list")
         .min_w_0()
         .w_full()
@@ -231,7 +231,7 @@ fn render_decision_list(
                 ))
                 .debug_selector(move || row_id.clone())
                 .accessibility_id(format!("rich-text-decision-item-{list_ordinal}-{index}"))
-                .role(gpui::accesskit::Role::ListItem)
+                .role(gpui_kit::accesskit::Role::ListItem)
                 .aria_label(format!("{state_label} decision item"))
                 .aria_value(format!("{state_label} decision"))
                 .min_w_0()
@@ -285,7 +285,7 @@ fn render_decision_list(
         ))
         .debug_selector(|| "rich-text-decision-list".to_owned())
         .accessibility_id(format!("rich-text-decision-list-{list_ordinal}"))
-        .role(gpui::accesskit::Role::List)
+        .role(gpui_kit::accesskit::Role::List)
         .aria_label("Decision list")
         .min_w_0()
         .w_full()
@@ -320,7 +320,7 @@ fn render_expand(
         .id(ElementId::named_usize(debug_id, ordinal))
         .debug_selector(move || debug_id.to_owned())
         .accessibility_id(accessibility_id)
-        .role(gpui::accesskit::Role::Group)
+        .role(gpui_kit::accesskit::Role::Group)
         .aria_label(label.clone())
         .aria_value("Expanded")
         .min_w_0()
@@ -335,7 +335,7 @@ fn render_expand(
             div()
                 .id(ElementId::named_usize("rich-text-expand-title", ordinal))
                 .accessibility_id(format!("rich-text-expand-title-{ordinal}"))
-                .role(gpui::accesskit::Role::Heading)
+                .role(gpui_kit::accesskit::Role::Heading)
                 .aria_label(label)
                 .font_semibold()
                 .text_sm()
@@ -381,7 +381,7 @@ pub(super) fn render_table(
                 .id(format!("rich-text-table-row-{row_index}"))
                 .debug_selector(move || format!("rich-text-table-row-{row_index}"))
                 .accessibility_id(format!("rich-text-table-row-{row_index}"))
-                .role(gpui::accesskit::Role::Row)
+                .role(gpui_kit::accesskit::Role::Row)
                 .min_w_0()
                 .w_full()
                 .gap_1()
@@ -400,7 +400,7 @@ pub(super) fn render_table(
         .id("rich-text-table")
         .debug_selector(|| "rich-text-table".to_owned())
         .accessibility_id("rich-text-table")
-        .role(gpui::accesskit::Role::Table)
+        .role(gpui_kit::accesskit::Role::Table)
         .aria_label("Rich text table")
         .min_w_0()
         .w_full()
@@ -424,9 +424,9 @@ fn render_table_cell(
         .debug_selector(move || debug_cell_id.clone())
         .accessibility_id(cell_id)
         .role(if cell.header {
-            gpui::accesskit::Role::ColumnHeader
+            gpui_kit::accesskit::Role::ColumnHeader
         } else {
-            gpui::accesskit::Role::Cell
+            gpui_kit::accesskit::Role::Cell
         })
         .min_w_0()
         .flex_1()
@@ -527,7 +527,7 @@ mod tests {
     use super::*;
     use crate::diagnostics::ImageSource;
     use crate::rich_text_view::{RichImageRenderStates, RichTextPalette};
-    use gpui::{Context, Render, VisualTestContext, Window};
+    use gpui_kit::{Context, Render, VisualTestContext, Window};
     use jira_domain::{
         RichInline, RichTable, RichTableCell, RichTableRow, RichTaskItem, RichTaskState,
         RichTextDocument,
@@ -542,7 +542,7 @@ mod tests {
             &mut self,
             _window: &mut Window,
             _cx: &mut Context<Self>,
-        ) -> impl gpui::IntoElement {
+        ) -> impl gpui_kit::IntoElement {
             super::super::render_rich_text(
                 &self.document,
                 RichTextPalette::default(),
@@ -553,9 +553,9 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn horizontal_rule_renders_as_a_bounded_divider(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    #[gpui_kit::test]
+    fn horizontal_rule_renders_as_a_bounded_divider(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
         let document = RichTextDocument::new(
             vec![
                 RichBlock::Heading {
@@ -575,9 +575,10 @@ mod tests {
         );
         assert!(document.blocks[2].is_horizontal_rule());
 
-        let window = cx.open_window(gpui::size(gpui::px(480.), gpui::px(240.)), |_, _| {
-            RichTextFixture { document }
-        });
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(480.), gpui_kit::px(240.)),
+            |_, _| RichTextFixture { document },
+        );
         let mut visual = VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -585,14 +586,14 @@ mod tests {
         let divider = visual
             .debug_bounds("rich-text-horizontal-rule")
             .expect("horizontal rule should render as a divider");
-        assert!(divider.size.width > gpui::px(0.));
-        assert!(divider.size.height > gpui::px(0.));
-        assert!(divider.size.height <= gpui::px(4.));
+        assert!(divider.size.width > gpui_kit::px(0.));
+        assert!(divider.size.height > gpui_kit::px(0.));
+        assert!(divider.size.height <= gpui_kit::px(4.));
     }
 
-    #[gpui::test]
-    fn table_renders_as_a_bounded_themed_grid(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    #[gpui_kit::test]
+    fn table_renders_as_a_bounded_themed_grid(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
         let document = RichTextDocument::new(
             vec![RichBlock::Table(RichTable {
                 rows: vec![
@@ -654,9 +655,10 @@ mod tests {
             })],
             false,
         );
-        let window = cx.open_window(gpui::size(gpui::px(480.), gpui::px(240.)), |_, _| {
-            RichTextFixture { document }
-        });
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(480.), gpui_kit::px(240.)),
+            |_, _| RichTextFixture { document },
+        );
         let mut visual = VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -664,9 +666,9 @@ mod tests {
         let table = visual
             .debug_bounds("rich-text-table")
             .expect("table should render as a grid");
-        assert!(table.size.width > gpui::px(0.));
-        assert!(table.size.height > gpui::px(0.));
-        assert!(table.size.height < gpui::px(240.));
+        assert!(table.size.width > gpui_kit::px(0.));
+        assert!(table.size.height > gpui_kit::px(0.));
+        assert!(table.size.height < gpui_kit::px(240.));
 
         let short_cell = visual
             .debug_bounds("rich-text-table-cell-1-0")
@@ -691,8 +693,8 @@ mod tests {
                 <= 2.,
             "table cells should share a bottom edge: short={short_cell:?}, multiline={multiline_cell:?}"
         );
-        assert!(empty_cell.size.height > gpui::px(0.));
-        assert!(second_empty_cell.size.height > gpui::px(0.));
+        assert!(empty_cell.size.height > gpui_kit::px(0.));
+        assert!(second_empty_cell.size.height > gpui_kit::px(0.));
         assert!(
             (f32::from(empty_cell.origin.y) - f32::from(second_empty_cell.origin.y)).abs() <= 2.,
             "empty table cells should share a top edge: first={empty_cell:?}, second={second_empty_cell:?}"
@@ -706,9 +708,9 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn task_rows_keep_state_markers_visible_and_aligned(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    #[gpui_kit::test]
+    fn task_rows_keep_state_markers_visible_and_aligned(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
         let paragraph = |text: &str| {
             RichBlock::Paragraph(vec![RichInline::Text {
                 text: text.to_owned(),
@@ -730,9 +732,10 @@ mod tests {
             ])],
             false,
         );
-        let window = cx.open_window(gpui::size(gpui::px(480.), gpui::px(240.)), |_, _| {
-            RichTextFixture { document }
-        });
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(480.), gpui_kit::px(240.)),
+            |_, _| RichTextFixture { document },
+        );
         let mut visual = VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -753,18 +756,18 @@ mod tests {
             .debug_bounds("rich-text-task-marker-0-1")
             .expect("done marker should be visible");
 
-        assert!(list.size.width > gpui::px(0.));
-        assert!(first.size.width > gpui::px(0.));
-        assert!(second.size.width > gpui::px(0.));
+        assert!(list.size.width > gpui_kit::px(0.));
+        assert!(first.size.width > gpui_kit::px(0.));
+        assert!(second.size.width > gpui_kit::px(0.));
         assert!((f32::from(first.origin.x) - f32::from(second.origin.x)).abs() <= 1.);
         assert!((f32::from(first_marker.origin.x) - f32::from(second_marker.origin.x)).abs() <= 1.);
-        assert!(first_marker.size.width > gpui::px(0.));
-        assert!(second_marker.size.width > gpui::px(0.));
+        assert!(first_marker.size.width > gpui_kit::px(0.));
+        assert!(second_marker.size.width > gpui_kit::px(0.));
     }
 
-    #[gpui::test]
-    fn nested_expand_is_read_only_visible_and_indented(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    #[gpui_kit::test]
+    fn nested_expand_is_read_only_visible_and_indented(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
         let paragraph = |text: &str| {
             RichBlock::Paragraph(vec![RichInline::Text {
                 text: text.to_owned(),
@@ -781,9 +784,10 @@ mod tests {
             }],
             false,
         );
-        let window = cx.open_window(gpui::size(gpui::px(480.), gpui::px(240.)), |_, _| {
-            RichTextFixture { document }
-        });
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(480.), gpui_kit::px(240.)),
+            |_, _| RichTextFixture { document },
+        );
         let mut visual = VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -794,10 +798,10 @@ mod tests {
         let nested = visual
             .debug_bounds("rich-text-nested-expand")
             .expect("nested expand should remain visible");
-        assert!(outer.size.width > gpui::px(0.));
-        assert!(outer.size.height > gpui::px(0.));
-        assert!(nested.size.width > gpui::px(0.));
-        assert!(nested.size.height > gpui::px(0.));
+        assert!(outer.size.width > gpui_kit::px(0.));
+        assert!(outer.size.height > gpui_kit::px(0.));
+        assert!(nested.size.width > gpui_kit::px(0.));
+        assert!(nested.size.height > gpui_kit::px(0.));
         assert!(nested.origin.x > outer.origin.x);
     }
 }

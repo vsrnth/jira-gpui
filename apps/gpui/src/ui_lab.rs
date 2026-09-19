@@ -21,9 +21,9 @@ use crate::{
     dashboard::{Dashboard, SampleSection},
 };
 #[cfg(target_os = "macos")]
-use gpui::{AppContext as _, Size, VisualTestAppContext, px, size};
+use gpui_kit::component::{Root, Theme, ThemeMode};
 #[cfg(target_os = "macos")]
-use gpui_component::{Root, Theme, ThemeMode};
+use gpui_kit::{AppContext as _, Size, VisualTestAppContext, px, size};
 
 /// The supported semantic fixture scenarios.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,7 +163,7 @@ impl UiLabSize {
     }
 
     #[cfg(target_os = "macos")]
-    fn gpui_size(self) -> Size<gpui::Pixels> {
+    fn gpui_size(self) -> Size<gpui_kit::Pixels> {
         size(px(self.width as f32), px(self.height as f32))
     }
 }
@@ -200,11 +200,11 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
 
     let (image, report) = {
         let mut cx = VisualTestAppContext::with_asset_source(
-            gpui_platform::current_platform(false),
+            gpui_kit::platform::current_platform(false),
             Arc::new(AppAssets),
         );
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::component::init(cx);
             Theme::change(request.theme.mode(), None, cx);
         });
 
@@ -260,7 +260,7 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
         // Replace the root and drain GPUI before leaving this scope; dropping the context here
         // completes leak detection before the captured image is published.
         cx.update_window(window.into(), |_, window, app| {
-            window.replace_root(app, |_, _| gpui::Empty);
+            window.replace_root(app, |_, _| gpui_kit::Empty);
         })?;
         cx.run_until_parked();
         (image, report)

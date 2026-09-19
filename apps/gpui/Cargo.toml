@@ -20,7 +20,7 @@ required-features = ["ui-automation"]
 default = []
 # Development-only native UI capture lab. This enables GPUI's direct offscreen
 # Metal renderer without changing the production binary or its package.
-ui-lab = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+ui-lab = ["gpui-kit/test-support", "dep:image"]
 # Development-only native macOS host for local accessibility automation. This
 # deliberately does not enable the offscreen capture dependencies.
 ui-automation = []
@@ -28,8 +28,7 @@ ui-automation = []
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-gpui.workspace = true
-gpui-component.workspace = true
+gpui-kit.workspace = true
 image = { workspace = true, optional = true }
 jira-application = { path = "../../crates/application" }
 jira-desktop-notifications = { path = "../../crates/desktop-notifications" }
@@ -42,21 +41,17 @@ time.workspace = true
 url.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed", default-features = false, features = ["wayland"] }
-gpui-component-assets = { version = "0.5.1", git = "https://github.com/longbridge/gpui-component", rev = "b29ee13379e161c2fb68c14c229c958d52d6ffe4" }
 futures-channel.workspace = true
 keyring.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui_platform = { version = "0.1.0", git = "https://github.com/zed-industries/zed", default-features = false, features = ["runtime_shaders", "font-kit"] }
-gpui-component-assets = { version = "0.5.1", git = "https://github.com/longbridge/gpui-component", rev = "b29ee13379e161c2fb68c14c229c958d52d6ffe4" }
 futures-channel.workspace = true
 keyring = { workspace = true, features = ["apple-native-keyring-store"] }
 zeroize.workspace = true
 
 [dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
 futures-lite.workspace = true
 
 [lints]

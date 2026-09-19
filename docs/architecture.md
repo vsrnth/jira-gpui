@@ -169,7 +169,7 @@ the interaction rather than duplicating them in the shell:
   is a local presentation filter, not a change to the Jira query.
 - In-app outcome messages use the component notification layer. On Linux they
   do not replace Freedesktop desktop alerts. The application registers the
-  `gpui-component-assets` bundle so TitleBar and semantic icon assets render;
+  `gpui-kit-assets` bundle so TitleBar and semantic icon assets render;
   idle minimize, maximize, and close controls stay discoverable, with hover
   styling as an enhancement rather than the only cue.
 

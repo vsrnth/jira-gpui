@@ -1,10 +1,10 @@
 # Jira Desk AppImage packaging
 
-This directory builds the supported Linux x86_64 native Wayland AppImage. The scaffold follows the [AppImage AppDir specification](https://docs.appimage.org/packaging-guide/manual.html) and uses [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) plus [appimagetool](https://github.com/AppImage/appimagetool).
+This directory builds the supported Linux x86_64 native Wayland AppImage. The scaffold follows the [AppImage AppDir specification](https://docs.appimage.org/packaging-guide/manual.html) and uses [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) plus [appimagetool](https://github.com/AppImage/appimagetool). The upstream `gpui-kit` package currently enables both its X11 and Wayland features; that bundled compile-time X11 feature is accepted here, while the supported runtime target remains Wayland.
 
 ## Prerequisites
 
-- A Linux x86_64 host with the Wayland development/runtime libraries required by the GPUI build.
+- A Linux x86_64 host with the Wayland and X11 development/runtime libraries required by the GPUI build (`libwayland-dev`, `wayland-protocols`, `libxkbcommon-dev`, `libxkbcommon-x11-dev`, and `libxcb-xkb-dev` on Debian/Ubuntu).
 - Rust and Cargo with the repository toolchain available.
 - An ImageMagick-compatible `magick` command to render the AppImage root icon as PNG. Local Fedora builds can use ImageMagick 7 directly; Ubuntu 22.04 CI installs ImageMagick 6 and supplies a compatibility launcher.
 - `curl`, `sha256sum`, `desktop-file-validate`, `xmllint`, `ldd`, `file`, and `magick` for the setup and validation commands below. On Debian/Ubuntu, these are provided by packages such as `curl`, `coreutils`, `desktop-file-utils`, `libxml2-utils`, `libc-bin`, `file`, and `imagemagick`.
@@ -139,16 +139,11 @@ if printf '%s\n' "$ldd_output" | grep -Fq 'not found'; then
     echo 'Packaged binary has an unresolved shared-library dependency' >&2
     exit 1
 fi
-if printf '%s\n' "$ldd_output" | grep -Eq 'libX11|libxcb|libXcursor|libXi|libXrandr|libXinerama|libXrender|libXfixes|libXtst|libxkbcommon-x11'; then
-    echo 'Packaged binary links an X11 dependency' >&2
-    exit 1
-fi
-
 cd "$repo_root"
 feature_tree="$(cargo tree --target x86_64-unknown-linux-gnu -e features --locked)"
 printf '%s\n' "$feature_tree"
-if printf '%s\n' "$feature_tree" | grep -Fq 'gpui_linux feature "x11"'; then
-    echo 'gpui_linux x11 feature must not be enabled' >&2
+if ! printf '%s\n' "$feature_tree" | grep -Fq 'gpui-pre-linux feature "wayland"'; then
+    echo 'gpui-pre-linux Wayland feature must be enabled' >&2
     exit 1
 fi
 ```

@@ -2,7 +2,7 @@
 mod desktop_integration;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use gpui::{App, AppContext as _, Bounds, Pixels, Size, WindowBounds, px, size};
+use gpui_kit::{App, AppContext as _, Bounds, Pixels, Size, WindowBounds, px, size};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const INITIAL_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
@@ -44,8 +44,8 @@ fn initial_window_bounds(cx: &App) -> WindowBounds {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
-    use gpui::{WindowDecorations, WindowOptions};
-    use gpui_component::{Root, TitleBar};
+    use gpui_kit::component::{Root, TitleBar};
+    use gpui_kit::{WindowDecorations, WindowOptions};
     use jira_gpui::{AppAssets, AppShell, startup_from_environment};
 
     #[cfg(target_os = "linux")]
@@ -55,10 +55,10 @@ fn main() {
 
     let startup = startup_from_environment();
 
-    gpui_platform::application()
+    gpui_kit::platform::application()
         .with_assets(AppAssets)
         .run(|cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
 
             let window_options = WindowOptions {
                 window_bounds: Some(initial_window_bounds(cx)),

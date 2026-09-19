@@ -5,12 +5,12 @@ use super::{
     MAX_IMAGE_LABEL_BYTES, RenderBudget, RenderContext, RichImage, RichImageRenderState,
     RichImageRenderStates, render_element_ordinal,
 };
-use gpui::{
+use gpui_kit::component::{h_flex, spinner::Spinner, v_flex};
+use gpui_kit::{
     AnyElement, ElementId, ImageSource as GpuiImageSource, InteractiveElement as _,
     IntoElement as _, ObjectFit, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, div, img, rems,
 };
-use gpui_component::{h_flex, spinner::Spinner, v_flex};
 
 pub(super) fn render_image(
     image: &RichImage,
@@ -37,7 +37,7 @@ pub(super) fn render_image(
             render_element_ordinal(context.surface_ordinal, budget.next_element_ordinal()),
         ))
         .accessibility_id(accessibility_id)
-        .role(gpui::accesskit::Role::Image)
+        .role(gpui_kit::accesskit::Role::Image)
         .aria_label(accessible_label);
 
     let diagnostic_context = context.image_states.context_for(

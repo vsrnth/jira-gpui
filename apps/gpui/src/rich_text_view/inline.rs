@@ -5,12 +5,12 @@ use super::{
     RenderBudget, RenderContext, RichAttachmentCard, RichInline, RichMark, RichStatusColor,
     RichTextPalette, presentation_placeholder_label, render_element_ordinal,
 };
-use gpui::{
+use gpui_kit::component::{Icon, IconName, StyledExt as _, button::Button, h_flex, link::Link};
+use gpui_kit::{
     AnyElement, ElementId, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _,
     IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, div, rems,
 };
-use gpui_component::{Icon, IconName, StyledExt as _, button::Button, h_flex, link::Link};
 use std::ops::Range;
 
 pub(super) fn render_inline_line(
@@ -37,7 +37,7 @@ pub(super) fn render_inline_line(
             .accessibility_id(format!("rich-text-paragraph-{ordinal}"))
             // AccessKit maps Label to macOS static text, which keeps the rendered paragraph
             // discoverable to native automation while retaining the bounded flow text.
-            .role(gpui::accesskit::Role::Label)
+            .role(gpui_kit::accesskit::Role::Label)
             .aria_label(aria_label)
             .aria_value(flow.text.clone())
             .child(render_inline_text_flow(flow))
@@ -349,9 +349,9 @@ fn render_link(
     div()
         .id(ElementId::named_usize("rich-text-link-semantic", ordinal))
         .accessibility_id(format!("rich-text-link-{ordinal}"))
-        .role(gpui::accesskit::Role::Link)
+        .role(gpui_kit::accesskit::Role::Link)
         .aria_label(accessibility_label)
-        .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+        .on_a11y_action(gpui_kit::AccessibleAction::Click, move |_, _, cx| {
             cx.open_url(&a11y_href);
         })
         .min_w_0()
@@ -433,7 +433,7 @@ fn render_status(
     h_flex()
         .id(ElementId::named_usize("rich-text-status", ordinal))
         .accessibility_id(format!("rich-text-status-{ordinal}"))
-        .role(gpui::accesskit::Role::Label)
+        .role(gpui_kit::accesskit::Role::Label)
         .aria_label(text.clone())
         .aria_value(text.clone())
         .min_w_0()
@@ -450,7 +450,7 @@ fn render_status(
         .into_any_element()
 }
 
-fn status_tone(color: RichStatusColor, palette: RichTextPalette) -> gpui::Hsla {
+fn status_tone(color: RichStatusColor, palette: RichTextPalette) -> gpui_kit::Hsla {
     match color {
         RichStatusColor::Neutral => palette.muted,
         RichStatusColor::Purple | RichStatusColor::Blue => palette.info,
@@ -573,7 +573,7 @@ pub(super) fn normalize_attachment_filename(value: &str) -> (String, bool) {
 mod tests {
     use super::*;
 
-    fn assert_same_color(actual: gpui::Hsla, expected: gpui::Hsla) {
+    fn assert_same_color(actual: gpui_kit::Hsla, expected: gpui_kit::Hsla) {
         assert_eq!(actual.h, expected.h);
         assert_eq!(actual.s, expected.s);
         assert_eq!(actual.l, expected.l);
@@ -583,31 +583,31 @@ mod tests {
     #[test]
     fn status_colors_use_their_bounded_semantic_palette_tones() {
         let palette = RichTextPalette {
-            muted: gpui::Hsla {
+            muted: gpui_kit::Hsla {
                 h: 0.1,
                 s: 0.2,
                 l: 0.3,
                 a: 1.0,
             },
-            info: gpui::Hsla {
+            info: gpui_kit::Hsla {
                 h: 0.2,
                 s: 0.3,
                 l: 0.4,
                 a: 1.0,
             },
-            warning: gpui::Hsla {
+            warning: gpui_kit::Hsla {
                 h: 0.3,
                 s: 0.4,
                 l: 0.5,
                 a: 1.0,
             },
-            success: gpui::Hsla {
+            success: gpui_kit::Hsla {
                 h: 0.4,
                 s: 0.5,
                 l: 0.6,
                 a: 1.0,
             },
-            danger: gpui::Hsla {
+            danger: gpui_kit::Hsla {
                 h: 0.5,
                 s: 0.6,
                 l: 0.7,

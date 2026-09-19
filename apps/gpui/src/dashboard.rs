@@ -3,14 +3,8 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use chrono::{Local, SecondsFormat};
 use time::UtcOffset;
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px, rems,
-};
-use gpui_component::table::{DataTable, TableEvent, TableState};
-use gpui_component::{
+use gpui_kit::component::table::{DataTable, TableEvent, TableState};
+use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, StyledExt as _, Theme,
     WindowExt as _,
     button::Button,
@@ -25,6 +19,12 @@ use gpui_component::{
     searchable_list::{SearchableListItem, SearchableVec},
     spinner::Spinner,
     v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, rems,
 };
 use jira_application::{
     ApplicationError, AttachmentDownloadRequest, CancellationToken, DEFAULT_JQL_SCOPE,
@@ -408,7 +408,7 @@ struct StatusOption(IssueStatusSelection);
 impl SearchableListItem for StatusOption {
     type Value = IssueStatusSelection;
 
-    fn title(&self) -> gpui::SharedString {
+    fn title(&self) -> gpui_kit::SharedString {
         self.0.label().into()
     }
 
@@ -435,31 +435,31 @@ enum StatusTransitionReadState {
 
 struct StatusTransitionListDelegate {
     transitions: Vec<IssueTransition>,
-    selected: Option<gpui_component::IndexPath>,
+    selected: Option<gpui_kit::component::IndexPath>,
 }
 
 const STATUS_TRANSITION_ROW_HEIGHT_REMS: f32 = 2.5;
 const STATUS_TRANSITION_LIST_MAX_HEIGHT_REMS: f32 = 12.5;
 
-fn status_transition_list_height(count: usize) -> gpui::Rems {
+fn status_transition_list_height(count: usize) -> gpui_kit::Rems {
     rems(
         (count.max(1) as f32 * STATUS_TRANSITION_ROW_HEIGHT_REMS)
             .min(STATUS_TRANSITION_LIST_MAX_HEIGHT_REMS),
     )
 }
 
-impl gpui_component::list::ListDelegate for StatusTransitionListDelegate {
-    type Item = gpui_component::list::ListItem;
+impl gpui_kit::component::list::ListDelegate for StatusTransitionListDelegate {
+    type Item = gpui_kit::component::list::ListItem;
 
-    fn items_count(&self, _: usize, _: &gpui::App) -> usize {
+    fn items_count(&self, _: usize, _: &gpui_kit::App) -> usize {
         self.transitions.len()
     }
 
     fn render_item(
         &mut self,
-        ix: gpui_component::IndexPath,
-        _: &mut gpui::Window,
-        _: &mut Context<gpui_component::list::ListState<Self>>,
+        ix: gpui_kit::component::IndexPath,
+        _: &mut gpui_kit::Window,
+        _: &mut Context<gpui_kit::component::list::ListState<Self>>,
     ) -> Option<Self::Item> {
         let transition = self.transitions.get(ix.row)?.clone();
         let target = transition_option_label(&transition).to_owned();
@@ -467,7 +467,7 @@ impl gpui_component::list::ListDelegate for StatusTransitionListDelegate {
         let has_distinguishing_action = !action.is_empty() && action != target;
         let selector = format!("status-transition-{}", transition.id);
         Some(
-            gpui_component::list::ListItem::new(selector.clone())
+            gpui_kit::component::list::ListItem::new(selector.clone())
                 .selected(self.selected == Some(ix))
                 .child(
                     div()
@@ -488,9 +488,9 @@ impl gpui_component::list::ListDelegate for StatusTransitionListDelegate {
 
     fn set_selected_index(
         &mut self,
-        ix: Option<gpui_component::IndexPath>,
-        _: &mut gpui::Window,
-        cx: &mut Context<gpui_component::list::ListState<Self>>,
+        ix: Option<gpui_kit::component::IndexPath>,
+        _: &mut gpui_kit::Window,
+        cx: &mut Context<gpui_kit::component::list::ListState<Self>>,
     ) {
         self.selected = ix;
         cx.notify();
@@ -499,15 +499,15 @@ impl gpui_component::list::ListDelegate for StatusTransitionListDelegate {
     fn confirm(
         &mut self,
         _: bool,
-        _: &mut gpui::Window,
-        _: &mut Context<gpui_component::list::ListState<Self>>,
+        _: &mut gpui_kit::Window,
+        _: &mut Context<gpui_kit::component::list::ListState<Self>>,
     ) {
     }
 
     fn cancel(
         &mut self,
-        _: &mut gpui::Window,
-        _: &mut Context<gpui_component::list::ListState<Self>>,
+        _: &mut gpui_kit::Window,
+        _: &mut Context<gpui_kit::component::list::ListState<Self>>,
     ) {
     }
 }
@@ -530,7 +530,7 @@ fn status_options() -> SearchableVec<StatusOption> {
     ])
 }
 
-fn status_filter_indices(selection: IssueStatusSelection) -> Vec<gpui_component::IndexPath> {
+fn status_filter_indices(selection: IssueStatusSelection) -> Vec<gpui_kit::component::IndexPath> {
     let selected = selection.values();
     [
         IssueStatusSelection::ToDo,
@@ -541,7 +541,7 @@ fn status_filter_indices(selection: IssueStatusSelection) -> Vec<gpui_component:
     .into_iter()
     .enumerate()
     .filter(|(_, value)| selected.contains(value))
-    .map(|(index, _)| gpui_component::IndexPath::new(index))
+    .map(|(index, _)| gpui_kit::component::IndexPath::new(index))
     .collect()
 }
 
@@ -760,8 +760,8 @@ pub struct Dashboard {
     team_input: Option<Entity<TextareaState>>,
     team_text: String,
     team_feedback: TeamFeedback,
-    team_task: Option<gpui::Task<()>>,
-    team_age_task: Option<gpui::Task<()>>,
+    team_task: Option<gpui_kit::Task<()>>,
+    team_age_task: Option<gpui_kit::Task<()>>,
     team_panes_state: Option<Entity<ResizableState>>,
     team_panes_subscription: Option<Subscription>,
     /// Fixture dashboards use a fixed clock; live dashboards resolve the clock at refresh time.
@@ -772,13 +772,13 @@ pub struct Dashboard {
     site_label: String,
     mode_label: String,
     operation_in_progress: bool,
-    polling_task: Option<gpui::Task<()>>,
+    polling_task: Option<gpui_kit::Task<()>>,
     automatic_polling_paused: bool,
     authenticated_account: Option<AccountId>,
     status_filter: IssueStatusFilter,
     status_combobox: Option<Entity<ComboboxState<SearchableVec<StatusOption>>>>,
     status_subscriptions: Vec<Subscription>,
-    status_list: Option<Entity<gpui_component::list::ListState<StatusTransitionListDelegate>>>,
+    status_list: Option<Entity<gpui_kit::component::list::ListState<StatusTransitionListDelegate>>>,
     status_list_subscriptions: Vec<Subscription>,
     status_transition_items: Vec<IssueTransition>,
     status_transition_items_revision: u64,
@@ -786,7 +786,7 @@ pub struct Dashboard {
     status_popover_open: bool,
     status_transition_state: StatusTransitionReadState,
     status_transition_generation: u64,
-    status_transition_task: Option<gpui::Task<()>>,
+    status_transition_task: Option<gpui_kit::Task<()>>,
     status_transition_cancellation: Option<CancellationToken>,
     #[cfg(test)]
     status_transition_reads_suppressed: bool,
@@ -795,37 +795,37 @@ pub struct Dashboard {
     search_subscriptions: Vec<Subscription>,
     detail_state: DetailState,
     detail_epoch: RequestEpoch<RequestSource, IssueId>,
-    detail_task: Option<gpui::Task<()>>,
-    detail_cache_task: Option<gpui::Task<()>>,
+    detail_task: Option<gpui_kit::Task<()>>,
+    detail_cache_task: Option<gpui_kit::Task<()>>,
     selected_image_states: RichImageRenderStates,
     remote_image_states: RichImageRenderStates,
     remote_lookup: RemoteLookupState,
     remote_lookup_epoch: RequestEpoch<RequestSource, String>,
-    remote_lookup_task: Option<gpui::Task<()>>,
+    remote_lookup_task: Option<gpui_kit::Task<()>>,
     comment_input: Option<Entity<TextareaState>>,
     comment_subscriptions: Vec<Subscription>,
     comment_flow: CommentFlow,
     comment_cancellation: Option<CancellationToken>,
-    comment_task: Option<gpui::Task<()>>,
+    comment_task: Option<gpui_kit::Task<()>>,
     issue_edit_flow: IssueEditFlow,
     issue_edit_cancellation: Option<CancellationToken>,
-    issue_edit_task: Option<gpui::Task<()>>,
+    issue_edit_task: Option<gpui_kit::Task<()>>,
     assignee_input: Option<Entity<InputState>>,
     assignee_subscriptions: Vec<Subscription>,
     attachment_download_state: AttachmentDownloadState,
     attachment_download_generation: u64,
     attachment_download_cancellation: Option<CancellationToken>,
-    attachment_download_task: Option<gpui::Task<()>>,
+    attachment_download_task: Option<gpui_kit::Task<()>>,
     settings_input: Option<Entity<TextareaState>>,
     settings_subscriptions: Vec<Subscription>,
     settings_scope_text: String,
     settings_warning: Option<String>,
     settings_feedback: Option<String>,
-    settings_task: Option<gpui::Task<()>>,
+    settings_task: Option<gpui_kit::Task<()>>,
     saved_login_delete_state: SavedLoginDeleteState,
-    saved_login_delete_task: Option<gpui::Task<()>>,
+    saved_login_delete_task: Option<gpui_kit::Task<()>>,
     desktop_notification_test_state: DesktopNotificationTestState,
-    desktop_notification_test_task: Option<gpui::Task<()>>,
+    desktop_notification_test_task: Option<gpui_kit::Task<()>>,
 }
 
 impl EventEmitter<DashboardEvent> for Dashboard {}
@@ -1189,32 +1189,36 @@ impl Dashboard {
         });
         dashboard.selected_image_states.insert(
             image.attachment_id,
-            crate::rich_text_view::RichImageRenderState::Ready(Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Png,
-                // A valid 1×1 RGBA PNG. Keeping it inline makes this fixture hermetic.
-                vec![
-                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
-                    0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-                    0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44,
-                    0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00,
-                    0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
-                    0x44, 0xae, 0x42, 0x60, 0x82,
-                ],
-            ))),
+            crate::rich_text_view::RichImageRenderState::Ready(Arc::new(
+                gpui_kit::Image::from_bytes(
+                    gpui_kit::ImageFormat::Png,
+                    // A valid 1×1 RGBA PNG. Keeping it inline makes this fixture hermetic.
+                    vec![
+                        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+                        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                        0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+                        0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
+                        0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00,
+                        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+                    ],
+                ),
+            )),
         );
         dashboard.selected_image_states.insert(
             comment_image.attachment_id,
-            crate::rich_text_view::RichImageRenderState::Ready(Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Png,
-                vec![
-                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
-                    0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-                    0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44,
-                    0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00,
-                    0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
-                    0x44, 0xae, 0x42, 0x60, 0x82,
-                ],
-            ))),
+            crate::rich_text_view::RichImageRenderState::Ready(Arc::new(
+                gpui_kit::Image::from_bytes(
+                    gpui_kit::ImageFormat::Png,
+                    vec![
+                        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+                        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                        0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+                        0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
+                        0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00,
+                        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+                    ],
+                ),
+            )),
         );
         dashboard.site_label = "sample".to_owned();
         dashboard
@@ -3268,7 +3272,7 @@ impl Dashboard {
     fn ensure_status_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.status_list.is_none() {
             let state = cx.new(|cx| {
-                gpui_component::list::ListState::new(
+                gpui_kit::component::list::ListState::new(
                     StatusTransitionListDelegate {
                         transitions: self.status_transition_items.clone(),
                         selected: None,
@@ -3281,18 +3285,19 @@ impl Dashboard {
             self.status_list_subscriptions.push(cx.subscribe_in(
                 &state,
                 window,
-                |this, state, event: &gpui_component::list::ListEvent, window, cx| match event {
-                    gpui_component::list::ListEvent::Confirm(ix) => {
+                |this, state, event: &gpui_kit::component::list::ListEvent, window, cx| match event
+                {
+                    gpui_kit::component::list::ListEvent::Confirm(ix) => {
                         let transition = state.read(cx).delegate().transitions.get(ix.row).cloned();
                         if let Some(transition) = transition {
                             this.choose_transition_from_list(transition, window, cx);
                         }
                     }
-                    gpui_component::list::ListEvent::Cancel => {
+                    gpui_kit::component::list::ListEvent::Cancel => {
                         this.status_popover_open = false;
                         cx.notify();
                     }
-                    gpui_component::list::ListEvent::Select(_) => {}
+                    gpui_kit::component::list::ListEvent::Select(_) => {}
                 },
             ));
             self.status_list = Some(state);

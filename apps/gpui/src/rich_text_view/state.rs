@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use gpui::Image;
+use gpui_kit::Image;
 
 use crate::diagnostics::{DiagnosticFlow, DiagnosticsSink, ImageSource as DiagnosticImageSource};
 
@@ -147,7 +147,7 @@ impl<const N: usize> From<[(String, RichImageRenderState); N]> for RichImageRend
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::ImageFormat;
+    use gpui_kit::ImageFormat;
 
     fn ready() -> RichImageRenderState {
         RichImageRenderState::Ready(Arc::new(Image::from_bytes(

@@ -4,8 +4,8 @@
 //! cues. The few common Jira types with a dedicated application asset use the app-owned Lucide
 //! paths, while the rest retain the pinned component catalog's generic icons.
 
-use gpui::SharedString;
-use gpui_component::{IconName, IconNamed};
+use gpui_kit::SharedString;
+use gpui_kit::component::{IconName, IconNamed};
 
 use crate::app_assets::AppIconName;
 
@@ -172,7 +172,7 @@ fn normalize(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_component::IconNamed;
+    use gpui_kit::component::IconNamed;
 
     fn path(icon: impl IconNamed) -> String {
         icon.path().to_string()
