@@ -169,6 +169,106 @@ final class JiraDeskUITests: XCTestCase {
     func testIssues() throws {
         try launchFixture(scenario: "issues")
 
+        let issueSearch = try require(app.descendants(matching: .any)["issue-search"], "issue-search")
+        let searchSubmit = try require(
+            app.buttons["issue-search-submit"],
+            "issue-search-submit"
+        )
+        XCTAssertEqual(searchSubmit.label.isEmpty ? searchSubmit.title : searchSubmit.label, "Find key")
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        XCTAssertGreaterThan(issueSearch.frame.width, 220, "issue search should have enough room for a useful query")
+        XCTAssertGreaterThan(issueSearch.frame.height, 20, "issue search should have a visible control height")
+        XCTAssertGreaterThan(searchSubmit.frame.width, 70, "search action should retain an accessible target")
+        XCTAssertGreaterThan(searchSubmit.frame.height, 20, "search action should retain a visible target")
+        XCTAssertTrue(hostWindow.frame.contains(issueSearch.frame), "issue search should stay inside the host window")
+        XCTAssertTrue(hostWindow.frame.contains(searchSubmit.frame), "search action should stay inside the host window")
+        XCTAssertFalse(issueSearch.frame.intersects(searchSubmit.frame), "search input and action must not overlap")
+
+        let issueListSummary = try require(
+            app.descendants(matching: .any)["issue-list-summary"],
+            "issue-list-summary"
+        )
+
+        // A natural-language summary is a local filter. Pressing Enter must not turn it into a
+        // Jira lookup or surface an unavailable-workspace error.
+        try setValue("MVP", identifier: "issue-search")
+        issueSearch.click()
+        app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
+        XCTAssertFalse(
+            app.descendants(matching: .any)["remote-lookup-error"].exists,
+            "pressing Enter for a local summary must not show a Jira lookup error"
+        )
+        XCTAssertTrue(
+            waitForSemanticText("1 of 5 Jira issues", in: issueListSummary),
+            "summary filtering should expose the deterministic filtered count"
+        )
+        let localSummaryRow = try require(
+            app.descendants(matching: .any)["issue-row-DESK-171"],
+            "issue-row-DESK-171 after local summary search"
+        )
+        XCTAssertTrue(
+            [localSummaryRow.label, localSummaryRow.title, localSummaryRow.value as? String ?? ""]
+                .joined(separator: " ")
+                .contains("Read-only Jira desktop MVP"),
+            "summary search should retain the matching local issue"
+        )
+
+        // Clear the local filter before exercising status filtering.
+        let clearFilters = try require(app.buttons["issue-filters-clear"], "issue-filters-clear")
+        clearFilters.click()
+        XCTAssertEqual(axValue(issueSearch), "", "Clear filters should reset the search input")
+        XCTAssertTrue(waitForSemanticText("5 Jira issues", in: issueListSummary), "Clear filters should restore all local issues")
+
+        // The status trigger and its popover option expose stable semantic IDs.
+        let statusFilter = try require(
+            app.descendants(matching: .any)["issue-status-filter"],
+            "issue-status-filter"
+        )
+        XCTAssertTrue(semanticText(statusFilter).contains("Filter status: All statuses"), "status filter should expose the initial All statuses label")
+        XCTAssertGreaterThan(statusFilter.frame.width, 120, "status filter should have a readable trigger width")
+        statusFilter.click()
+        let inProgressOption = try require(
+            app.descendants(matching: .any)["status-filter-option-in-progress"],
+            "status-filter-option-in-progress"
+        )
+        inProgressOption.click()
+        let activeStatus = try require(
+            app.descendants(matching: .any)["issue-status-filter"],
+            "active issue-status-filter"
+        )
+        XCTAssertTrue(semanticText(activeStatus).contains("Filter status: In progress"), "active status filter should expose its selection")
+        let activeClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after status filter")
+        XCTAssertGreaterThan(activeStatus.frame.width, 120, "active status filter should retain readable width")
+        XCTAssertGreaterThan(activeStatus.frame.height, 20, "active status filter should retain visible height")
+        XCTAssertTrue(hostWindow.frame.contains(activeStatus.frame), "active status filter should remain in the host window")
+        XCTAssertTrue(hostWindow.frame.contains(activeClear.frame), "Clear filters should remain in the host window")
+        XCTAssertFalse(activeStatus.frame.intersects(activeClear.frame), "status filter and Clear filters must not overlap")
+        XCTAssertTrue(waitForSemanticText("3 of 5 Jira issues", in: issueListSummary), "In Progress should show three fixture issues")
+
+        // Add a non-matching local query, then clear both controls with the explicit action.
+        try setValue("no matching issue", identifier: "issue-search")
+        XCTAssertTrue(waitForSemanticText("0 of 5 Jira issues", in: issueListSummary), "combined filters should expose zero results")
+        let clearCombinedFilters = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after combined filter")
+        clearCombinedFilters.click()
+        XCTAssertEqual(axValue(issueSearch), "", "Clear filters should reset the combined search input")
+        XCTAssertTrue(waitForSemanticText("5 Jira issues", in: issueListSummary), "Clear filters should restore the full result count")
+        let resetStatus = try require(
+            app.descendants(matching: .any)["issue-status-filter"],
+            "reset issue-status-filter"
+        )
+        XCTAssertTrue(semanticText(resetStatus).contains("Filter status: All statuses"), "Clear filters should restore All statuses")
+
+        // A locally known, syntactically valid key is still an explicit lookup intent, but the
+        // fixture must resolve it locally rather than manufacturing a remote error.
+        issueSearch.click()
+        try setValue("DESK-171", identifier: "issue-search")
+        searchSubmit.click()
+        let selectedDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after local key lookup")
+        let selectedDetailText = [selectedDetail.label, selectedDetail.title, selectedDetail.value as? String ?? ""].joined(separator: " ")
+        XCTAssertTrue(selectedDetailText.contains("DESK-171"), "exact local key lookup should select DESK-171")
+        let finalClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after key lookup")
+        finalClear.click()
+
         let sidebar = try require(
             app.descendants(matching: .any)["dashboard-sidebar"],
             "dashboard-sidebar"
@@ -1011,6 +1111,23 @@ final class JiraDeskUITests: XCTestCase {
         )
         // Keep this assertion boolean-only so XCTest never emits the input value.
         XCTAssertTrue(XCTWaiter.wait(for: [valueExpectation], timeout: 8) == .completed)
+    }
+
+    private func semanticText(_ element: XCUIElement) -> String {
+        [element.label, element.title, axValue(element)].joined(separator: " ")
+    }
+
+    private func waitForSemanticText(_ expected: String, in element: XCUIElement) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let element = object as? XCUIElement else {
+                    return false
+                }
+                return self.semanticText(element).contains(expected)
+            },
+            object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: 8) == .completed
     }
 
     @discardableResult

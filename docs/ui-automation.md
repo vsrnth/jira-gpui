@@ -257,6 +257,13 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   five stable priority identities and labels, and reselects an issue with a
   genuinely empty cached description to ensure it remains ready without a
   loading spinner while background refresh is deferred.
+- `issues` also verifies the local search contract: summary text remains a
+  local filter when activated with Enter (without a Jira lookup error), exact
+  issue keys still use the explicit `Find key` action and select locally known
+  fixture issues, and `Clear filters` restores the input, `All statuses`, and
+  the fixture's full five-issue result count after combined filters. The
+  search/status controls and count are checked for semantic labels, usable
+  toolbar geometry, and non-overlap inside the host window.
 - `issues` also verifies concise post-refresh status copy, the single
   icon-only `Refresh Jira` Sidebar action beside the username/profile when
   expanded and stacked below the profile in the collapsed rail, and the detail

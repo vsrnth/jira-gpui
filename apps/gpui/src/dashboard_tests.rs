@@ -1,3 +1,4 @@
+use super::issues_view::issue_count_label;
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
 use super::shell_view::{refresh_action_label, should_render_sidebar_sync_message};
 use super::updates_view::update_filter_is_selected;
@@ -18,6 +19,158 @@ use jira_application::{
 use jira_domain::JiraSiteId;
 use std::sync::{Arc, Mutex};
 use time::macros::datetime;
+
+#[test]
+fn issue_count_label_distinguishes_filtered_and_loaded_counts() {
+    assert_eq!(issue_count_label(4, 9, true), "4 of 9 Jira issues");
+    assert_eq!(issue_count_label(9, 9, false), "9 Jira issues");
+}
+
+#[gpui_kit::test]
+fn issue_search_help_wraps_inside_narrow_issue_list(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(350.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let help = visual
+        .debug_bounds("issue-search-help")
+        .expect("search guidance should be visible");
+    assert!(help.size.height > px(16.));
+    assert!(help.origin.x >= px(0.));
+    assert!(help.origin.x + help.size.width <= px(350.));
+}
+
+#[gpui_kit::test]
+fn clear_issue_filters_resets_widgets_and_model_without_touching_selection(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+    let mut dashboard = Dashboard::from_sample_data();
+    let selected = dashboard.domain_issues[0].id.clone();
+    dashboard.selected_issue = Some(selected.clone());
+    let window = cx.open_window(gpui_kit::size(px(900.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.ensure_search_input(window, cx);
+            dashboard.ensure_status_combobox(window, cx);
+            let input = dashboard.search_input.clone().unwrap();
+            input.update(cx, |input, cx| input.set_value("summary", window, cx));
+            dashboard.set_search_query("summary".to_owned(), cx);
+            dashboard
+                .status_combobox
+                .as_ref()
+                .unwrap()
+                .update(cx, |combobox, cx| {
+                    combobox.set_selected_indices(
+                        [gpui_kit::component::IndexPath::new(2)],
+                        window,
+                        cx,
+                    );
+                });
+            dashboard.set_status_filter(IssueStatusFilter::Done, cx);
+            assert_eq!(
+                dashboard.search_input.as_ref().unwrap().read(cx).value(),
+                "summary"
+            );
+            assert!(
+                !dashboard
+                    .status_combobox
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .selection()
+                    .is_empty()
+            );
+            dashboard.clear_issue_filters(window, cx);
+            assert_eq!(dashboard.search_query, "");
+            assert_eq!(dashboard.status_filter, IssueStatusFilter::All);
+            assert_eq!(dashboard.selected_issue.as_ref(), Some(&selected));
+            assert_eq!(
+                dashboard.search_input.as_ref().unwrap().read(cx).value(),
+                ""
+            );
+            assert!(
+                dashboard
+                    .status_combobox
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .selection()
+                    .is_empty()
+            );
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn search_input_enter_ignores_summary_and_selects_local_issue_key(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+    let dashboard = Dashboard::from_sample_data();
+    let issue = dashboard.domain_issues[1].clone();
+    let initially_selected = dashboard.domain_issues[0].id.clone();
+    let issue_id = issue.id.clone();
+    let key = issue.key.to_string();
+    let window = cx.open_window(gpui_kit::size(px(900.), px(700.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.ensure_search_input(window, cx);
+            dashboard.selected_issue = Some(initially_selected.clone());
+            let input = dashboard.search_input.clone().unwrap();
+            input.update(cx, |input, cx| {
+                input.set_value("summary text", window, cx);
+                cx.emit(InputEvent::Change);
+                cx.emit(InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                });
+            });
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, _| {
+            assert!(!dashboard.sync_message.contains("valid issue key"));
+            assert!(matches!(dashboard.remote_lookup, RemoteLookupState::Idle));
+        });
+    });
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            let input = dashboard.search_input.clone().unwrap();
+            input.update(cx, |input, cx| {
+                input.set_value(&key, window, cx);
+                cx.emit(InputEvent::Change);
+            });
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            assert_eq!(dashboard.search_query, key);
+            dashboard.search_input.clone().unwrap().update(cx, |_, cx| {
+                cx.emit(InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                });
+            });
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, _| {
+            // The Enter event is emitted only after Change has been drained, matching typing.
+            assert_eq!(dashboard.selected_issue.as_ref(), Some(&issue_id));
+        });
+    });
+}
 
 struct EmptyJira;
 

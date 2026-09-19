@@ -22,9 +22,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px, rems,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems,
 };
 use jira_application::{
     ApplicationError, AttachmentDownloadRequest, CancellationToken, DEFAULT_JQL_SCOPE,
@@ -414,6 +414,16 @@ impl SearchableListItem for StatusOption {
 
     fn value(&self) -> &Self::Value {
         &self.0
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let slug = self.0.label().to_ascii_lowercase().replace(' ', "-");
+        div()
+            .id(format!("status-filter-option-{slug}"))
+            .accessibility_id(format!("status-filter-option-{slug}"))
+            .role(gpui_kit::accesskit::Role::ListBoxOption)
+            .aria_label(self.0.label())
+            .child(self.0.label())
     }
 }
 
@@ -1805,6 +1815,26 @@ impl Dashboard {
         self.invalidate_comment_selection();
         self.invalidate_attachment_download();
         self.search_query = query;
+        self.rebuild_issue_views(false, cx);
+        cx.notify();
+    }
+
+    /// Clear the local issue filters and keep the input/combobox entities in sync with the
+    /// model. This is deliberately local-only: clearing a filter must never trigger Jira I/O.
+    fn clear_issue_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_remote_lookup();
+        self.invalidate_comment_selection();
+        self.invalidate_attachment_download();
+        self.search_query.clear();
+        if let Some(input) = self.search_input.clone() {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.status_filter = IssueStatusFilter::All;
+        if let Some(combobox) = self.status_combobox.clone() {
+            combobox.update(cx, |combobox, cx| {
+                combobox.set_selected_indices([], window, cx);
+            });
+        }
         self.rebuild_issue_views(false, cx);
         cx.notify();
     }
@@ -3434,7 +3464,16 @@ impl Dashboard {
                     InputEvent::Change => {
                         this.set_search_query(input.read(cx).value().to_string(), cx);
                     }
-                    InputEvent::PressEnter { .. } => this.search_jira(cx),
+                    InputEvent::PressEnter { .. } => {
+                        // Enter is a deliberate issue-key lookup. Summary text is already
+                        // filtered locally as it is typed, so it must not produce a remote-key
+                        // validation error or an unnecessary network request.
+                        if crate::presentation::normalized_issue_key(input.read(cx).value().trim())
+                            .is_some()
+                        {
+                            this.search_jira(cx);
+                        }
+                    }
                     InputEvent::Focus | InputEvent::Blur => {}
                 }
             }));

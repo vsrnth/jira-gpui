@@ -9,6 +9,14 @@ fn issue_row_accessible_label(
     format!("Open {key} ({issue_type}): {summary} · Priority: {priority}")
 }
 
+pub(super) fn issue_count_label(visible: usize, total: usize, filtered: bool) -> String {
+    if filtered {
+        format!("{visible} of {total} Jira issues")
+    } else {
+        format!("{visible} Jira issues")
+    }
+}
+
 /// Resolve a semantic issue-type tone through the active theme's contrast-aware base colors.
 fn issue_type_color_for_theme(
     tone: IssueTypeTone,
@@ -142,6 +150,16 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mobile = layout.is_mobile();
+        let active_query = !self.search_query.trim().is_empty();
+        let active_status = self.status_filter != IssueStatusFilter::All;
+        let has_active_filters = active_query || active_status;
+        let lookup_enabled =
+            crate::presentation::normalized_issue_key(&self.search_query).is_some();
+        let issue_count = issue_count_label(
+            self.issues.len(),
+            self.domain_issues.len(),
+            has_active_filters,
+        );
         let issue_list = v_flex()
             .h_full()
             .w_full()
@@ -164,11 +182,15 @@ impl Dashboard {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(
-                        div()
+                        h_flex()
+                            .id("issue-list-summary")
+                            .accessibility_id("issue-list-summary")
                             .debug_selector(|| "issue-list-summary".to_owned())
                             .flex_shrink_0()
                             .font_semibold()
-                            .child(format!("{} Jira issues", self.issues.len())),
+                            .role(gpui_kit::accesskit::Role::Status)
+                            .aria_label(issue_count.clone())
+                            .child(issue_count),
                     )
                     .child(
                         div()
@@ -206,10 +228,10 @@ impl Dashboard {
                                     .label(if lookup_loading {
                                         "Searching Jira…"
                                     } else {
-                                        "Search Jira"
+                                        "Find key"
                                     })
                                     .loading(lookup_loading)
-                                    .disabled(lookup_loading)
+                                    .disabled(lookup_loading || !lookup_enabled)
                                     .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
                             ),
                     )
@@ -237,15 +259,29 @@ impl Dashboard {
                                     .label(if lookup_loading {
                                         "Searching Jira…"
                                     } else {
-                                        "Search Jira"
+                                        "Find key"
                                     })
                                     .loading(lookup_loading)
-                                    .disabled(lookup_loading)
+                                    .disabled(lookup_loading || !lookup_enabled)
                                     .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
                             ),
                     )
                 }
             })
+            .child(
+                div()
+                    .id("issue-search-help")
+                    .accessibility_id("issue-search-help")
+                    .debug_selector(|| "issue-search-help".to_owned())
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .px_3()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Filter loaded issues as you type. Find key looks up a Jira key."),
+            )
             .when(mobile, |this| {
                 this.when_some(self.remote_lookup_list_status(cx), |this, status| {
                     this.child(status)
@@ -260,7 +296,25 @@ impl Dashboard {
                     .min_w_0()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(self.status_filter_dropdown()),
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .child(self.status_filter_dropdown()),
+                    )
+                    .when(has_active_filters, |this| {
+                        this.child(
+                            Button::new("clear-issue-filters")
+                                .compact()
+                                .ghost()
+                                .flex_shrink_0()
+                                .accessibility_id("issue-filters-clear")
+                                .label("Clear filters")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.clear_issue_filters(window, cx);
+                                })),
+                        )
+                    }),
             )
             .child(
                 v_flex()
@@ -387,6 +441,13 @@ impl Dashboard {
                     trigger.selection().iter().map(|(_, item)| *item.value()),
                 );
                 div()
+                    .id("issue-status-filter")
+                    .accessibility_id("issue-status-filter")
+                    .role(gpui_kit::accesskit::Role::Button)
+                    .aria_label(format!(
+                        "Filter status: {}",
+                        status_filter_trigger_label(selection)
+                    ))
                     .min_w_0()
                     .w_full()
                     .truncate()
