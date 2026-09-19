@@ -624,9 +624,16 @@ fn remote_lookup_result_is_current(
             .eq_ignore_ascii_case(expected_query.trim())
 }
 
-fn local_issue_id_for_key(issues: &[Issue], key: &IssueKey) -> Option<IssueId> {
-    issues
+fn issue_id_for_key_in_sources(
+    key: &IssueKey,
+    domain_issues: &[Issue],
+    team_issues: &[Issue],
+    selected_issue_core: Option<&Issue>,
+) -> Option<IssueId> {
+    domain_issues
         .iter()
+        .chain(team_issues.iter())
+        .chain(selected_issue_core)
         .find(|issue| issue.key.as_str().eq_ignore_ascii_case(key.as_str()))
         .map(|issue| issue.id.clone())
 }
@@ -2002,7 +2009,21 @@ impl Dashboard {
             return;
         };
 
-        if let Some(issue_id) = local_issue_id_for_key(&self.domain_issues, &key) {
+        self.search_jira_for_key(key, query, cx);
+    }
+
+    fn search_jira_for_key(
+        &mut self,
+        key: IssueKey,
+        expected_query: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(issue_id) = issue_id_for_key_in_sources(
+            &key,
+            &self.domain_issues,
+            &self.team_issues,
+            self.selected_issue_core.as_ref(),
+        ) {
             self.clear_remote_lookup();
             self.select_issue(issue_id, cx, true);
             return;
@@ -2010,7 +2031,6 @@ impl Dashboard {
 
         let load_token = self.diagnostics.begin_image_load();
         self.invalidate_comment_selection();
-        let expected_query = query.clone();
         let ticket = self
             .remote_lookup_epoch
             .begin(RequestSource::RemoteLookup, expected_query.clone());
@@ -2021,7 +2041,7 @@ impl Dashboard {
             self.remote_lookup_epoch.finish(&ticket);
             self.remote_image_states.clear();
             self.remote_lookup = RemoteLookupState::Error {
-                query,
+                query: expected_query,
                 copy: lookup_workspace_unavailable_copy(),
             };
             cx.notify();
@@ -2144,6 +2164,30 @@ impl Dashboard {
         });
         self.remote_lookup_task = Some(task);
         cx.notify();
+    }
+
+    /// Opens a typed relationship target. Local issues are selected immediately; otherwise the
+    /// existing guarded Jira lookup path is reused without putting a key from the payload in a
+    /// browser URL or issuing a write.
+    fn open_related_issue_key(&mut self, key: IssueKey, cx: &mut Context<Self>) {
+        if self.issue_edit_flow.is_submitting() {
+            self.sync_message =
+                "Finish the confirmed Jira change before changing issues".to_owned();
+            cx.notify();
+            return;
+        }
+        if let Some(issue_id) = issue_id_for_key_in_sources(
+            &key,
+            &self.domain_issues,
+            &self.team_issues,
+            self.selected_issue_core.as_ref(),
+        ) {
+            self.clear_remote_lookup();
+            self.select_issue(issue_id, cx, true);
+            return;
+        }
+
+        self.search_jira_for_key(key.clone(), key.to_string(), cx);
     }
 
     fn invalidate_detail_selection(&mut self) {

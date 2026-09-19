@@ -83,6 +83,52 @@ fn maps_the_same_fixture_into_the_domain_model() {
 }
 
 #[test]
+fn maps_inward_and_outward_links_and_skips_malformed_members() {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+    payload["fields"]["issuelinks"] = serde_json::json!([
+        {
+            "type": {"inward": "is blocked by", "outward": "blocks"},
+            "inwardIssue": {"id": "10002", "key": "ENG-43", "fields": {"summary": "Blocked work", "status": {"name": "Open"}}}
+        },
+        {
+            "type": {"inward": "is blocked by", "outward": "blocks"},
+            "outwardIssue": {"id": "10003", "key": "ENG-44", "fields": {"summary": "Related work", "status": {"name": "Done"}}}
+        },
+        null,
+        {"type": {"inward": "is blocked by"}, "inwardIssue": "malformed"},
+        {"type": {"inward": "is blocked by"}, "inwardIssue": {"key": "ENG-45"}},
+        {"type": {"inward": " "}, "inwardIssue": {"id": "10005", "key": "ENG-46"}}
+    ]);
+    let issue: JiraIssue = serde_json::from_value(payload).unwrap();
+
+    let detail = IssueMapper
+        .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+        .unwrap();
+    assert_eq!(detail.issue.linked_issues.len(), 2);
+    assert_eq!(detail.issue.linked_issues[0].key.as_str(), "ENG-43");
+    assert_eq!(detail.issue.linked_issues[0].relationship, "is blocked by");
+    assert_eq!(
+        detail.issue.linked_issues[0].status.as_deref(),
+        Some("Open")
+    );
+    assert_eq!(detail.issue.linked_issues[1].key.as_str(), "ENG-44");
+    assert_eq!(detail.issue.linked_issues[1].relationship, "blocks");
+}
+
+#[test]
+fn null_issue_links_are_treated_as_empty() {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/issue-detail.json")).unwrap();
+    payload["fields"]["issuelinks"] = serde_json::Value::Null;
+    let issue: JiraIssue = serde_json::from_value(payload).unwrap();
+    let detail = IssueMapper
+        .map_domain_issue_detail(JiraSiteId::new("site-123").unwrap(), issue)
+        .unwrap();
+    assert!(detail.issue.linked_issues.is_empty());
+}
+
+#[test]
 fn preserves_valid_issue_assignee_and_reporter_display_names() {
     let mut page: EnhancedSearchPage =
         serde_json::from_str(include_str!("../tests/fixtures/enhanced-search-page.json")).unwrap();

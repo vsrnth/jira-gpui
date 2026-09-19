@@ -1598,7 +1598,84 @@ fn exact_local_key_hit_returns_id_without_remote_lookup() {
         .find(|issue| issue.key == key)
         .map(|issue| issue.id.clone());
 
-    assert_eq!(local_issue_id_for_key(&issues, &key), expected);
+    assert_eq!(
+        issue_id_for_key_in_sources(&key, &issues, &[], None),
+        expected
+    );
+}
+
+#[test]
+fn related_issue_source_precedence_is_domain_then_team_then_selected_core() {
+    let domain = sample_issues();
+    let team = sample_issues();
+    let selected = sample_issues().into_iter().last().expect("selected issue");
+
+    let domain_key = domain[0].key.clone();
+    assert_eq!(
+        issue_id_for_key_in_sources(&domain_key, &domain, &team, Some(&selected)),
+        Some(domain[0].id.clone())
+    );
+
+    let team_only_key = IssueKey::new("TEAM-1").expect("team key");
+    let mut team_only = team[0].clone();
+    team_only.key = team_only_key.clone();
+    assert_eq!(
+        issue_id_for_key_in_sources(&team_only_key, &[], &[team_only.clone()], None),
+        Some(team_only.id)
+    );
+
+    let selected_key = IssueKey::new("REMOTE-1").expect("selected key");
+    let mut selected = selected;
+    selected.key = selected_key.clone();
+    assert_eq!(
+        issue_id_for_key_in_sources(&selected_key, &[], &[], Some(&selected)),
+        Some(selected.id.clone())
+    );
+    assert!(
+        issue_id_for_key_in_sources(
+            &IssueKey::new("MISSING-1").expect("missing key"),
+            &domain,
+            &team,
+            Some(&selected)
+        )
+        .is_none()
+    );
+}
+
+#[gpui_kit::test]
+fn related_navigation_does_not_bypass_a_confirmed_write(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let dashboard = cx.new(|_| Dashboard::from_sample_data());
+    cx.update_entity(&dashboard, |dashboard, _| {
+        dashboard.search_query = "existing filter".to_owned();
+        dashboard.issue_edit_flow.set_submitting_for_test(
+            dashboard.domain_issues[0].id.clone(),
+            "assignee Amina Yusuf".to_owned(),
+        );
+    });
+    cx.update_entity(&dashboard, |dashboard, cx| {
+        dashboard.open_related_issue_key(IssueKey::new("DESK-171").expect("parent key"), cx);
+        assert_eq!(dashboard.search_query, "existing filter");
+        assert_eq!(dashboard.remote_lookup, RemoteLookupState::Idle);
+        assert!(dashboard.sync_message.contains("Finish the confirmed"));
+    });
+}
+
+#[gpui_kit::test]
+fn unknown_related_lookup_preserves_search_filter_when_workspace_is_unavailable(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+    let dashboard = cx.new(|_| Dashboard::from_sample_data());
+    cx.update_entity(&dashboard, |dashboard, cx| {
+        dashboard.search_query = "existing filter".to_owned();
+        dashboard.open_related_issue_key(IssueKey::new("REMOTE-404").expect("remote key"), cx);
+        assert_eq!(dashboard.search_query, "existing filter");
+        assert!(matches!(
+            dashboard.remote_lookup,
+            RemoteLookupState::Error { ref query, .. } if query == "REMOTE-404"
+        ));
+    });
 }
 
 #[gpui_kit::test]
@@ -2186,7 +2263,8 @@ fn empty_issue_detail_status_stays_within_detail_pane(cx: &mut gpui_kit::TestApp
 fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::component::init);
 
-    let issue = sample_issues().into_iter().next().expect("sample issue");
+    let mut issue = sample_issues().into_iter().next().expect("sample issue");
+    issue.linked_issues.clear();
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Team;
     dashboard.team_members = vec![PersistedTeamMember {
@@ -2194,7 +2272,9 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
         account_id: "amina".to_owned(),
         display_name: "Amina Yusuf".to_owned(),
     }];
+    dashboard.domain_issues[0].linked_issues.clear();
     dashboard.team_issues = sample_issues();
+    dashboard.team_issues[0].linked_issues.clear();
     dashboard.selected_issue = Some(issue.id.clone());
     dashboard.detail_state = DetailState::Loaded(IssueDetailViewModel {
         description: issue

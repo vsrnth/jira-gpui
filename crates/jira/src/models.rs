@@ -139,8 +139,59 @@ pub struct JiraIssueFields {
     pub description: Option<Value>,
     #[serde(default)]
     pub attachment: Vec<JiraAttachment>,
+    #[serde(default, deserialize_with = "deserialize_issue_links")]
+    pub issuelinks: Vec<JiraIssueLink>,
     #[serde(default)]
     pub resolution: Option<JiraNamedEntity>,
+}
+
+/// A Jira issue link. Jira returns either `inwardIssue` or `outwardIssue` for
+/// each link, with sparse fields depending on the site's permissions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueLink {
+    #[serde(default)]
+    pub inward_issue: Option<JiraLinkedIssue>,
+    #[serde(default)]
+    pub outward_issue: Option<JiraLinkedIssue>,
+    #[serde(rename = "type", default)]
+    pub link_type: Option<JiraIssueLinkType>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraIssueLinkType {
+    #[serde(default)]
+    pub inward: Option<String>,
+    #[serde(default)]
+    pub outward: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraLinkedIssue {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub fields: Option<JiraLinkedIssueFields>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraLinkedIssueFields {
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub status: Option<JiraLinkedIssueStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraLinkedIssueStatus {
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Metadata returned in an issue's `attachment` field. Content URLs are intentionally not
@@ -201,6 +252,17 @@ where
         StringOrNumber::String(value) => Ok(value),
         StringOrNumber::Number(value) => Ok(value.to_string()),
     }
+}
+
+fn deserialize_issue_links<'de, D>(deserializer: D) -> Result<Vec<JiraIssueLink>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Option::<Vec<Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(values
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

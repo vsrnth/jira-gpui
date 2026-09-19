@@ -26,8 +26,9 @@ pub use mapping::{DomainIssuePage, IssueMapper, MappingError};
 pub use models::{
     EnhancedSearchPage, EnhancedSearchRequest, JiraAttachment, JiraBulkChangelogRequest,
     JiraBulkChangelogResponse, JiraChangeHistory, JiraChangeItem, JiraComment, JiraCommentPage,
-    JiraIssue, JiraIssueChangeLog, JiraIssueFields, JiraNamedEntity, JiraParentIssue, JiraProject,
-    JiraUser,
+    JiraIssue, JiraIssueChangeLog, JiraIssueFields, JiraIssueLink, JiraIssueLinkType,
+    JiraLinkedIssue, JiraLinkedIssueFields, JiraLinkedIssueStatus, JiraNamedEntity,
+    JiraParentIssue, JiraProject, JiraUser,
 };
 
 /// The fields requested by the initial assigned-issues sync.
@@ -51,7 +52,7 @@ pub const ASSIGNED_ISSUE_FIELDS: &[&str] = &[
 ];
 
 /// Fields that are only needed in addition to the baseline fields for an issue detail fetch.
-pub const ISSUE_DETAIL_ONLY_FIELDS: &[&str] = &["description", "attachment"];
+pub const ISSUE_DETAIL_ONLY_FIELDS: &[&str] = &["description", "attachment", "issuelinks"];
 
 /// Returns the complete field set required to construct the core domain issue plus detail data.
 /// Building this from the baseline prevents the two request shapes from silently drifting.
@@ -92,12 +93,16 @@ mod detail_field_tests {
             "resolution",
             "description",
             "attachment",
+            "issuelinks",
         ] {
             assert!(issue_detail_fields().contains(&field), "missing {field}");
         }
         assert!(ASSIGNED_ISSUE_FIELDS.contains(&"reporter"));
         assert_eq!(issue_detail_fields_query(), issue_detail_fields().join(","));
-        assert_eq!(ISSUE_DETAIL_ONLY_FIELDS, &["description", "attachment"]);
+        assert_eq!(
+            ISSUE_DETAIL_ONLY_FIELDS,
+            &["description", "attachment", "issuelinks"]
+        );
         assert_eq!(
             issue_detail_fields().len(),
             issue_detail_fields()

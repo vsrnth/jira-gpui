@@ -1,4 +1,4 @@
-use jira_domain::{Issue, IssueDetail, IssueKey, RichTextDocument, User};
+use jira_domain::{Issue, IssueDetail, IssueKey, LinkedIssue, ParentIssue, RichTextDocument, User};
 
 use super::{format, identity::IdentityDirectory};
 
@@ -140,7 +140,8 @@ pub struct IssueViewModel {
     pub priority: String,
     pub assignee: String,
     pub reporter: String,
-    pub parent: Option<String>,
+    pub parent: Option<ParentIssue>,
+    pub linked_issues: Vec<LinkedIssue>,
     pub labels: Vec<String>,
     pub description: String,
     pub rich_description: Option<RichTextDocument>,
@@ -180,12 +181,8 @@ impl IssueViewModel {
                 .unwrap_or_else(|| "None".to_owned()),
             assignee: identities.display(issue.assignee.as_ref(), "Unassigned"),
             reporter: identities.display(issue.reporter.as_ref(), "Unassigned"),
-            parent: issue.parent.as_ref().map(|parent| {
-                parent.summary.as_ref().map_or_else(
-                    || parent.key.to_string(),
-                    |summary| format!("{} · {summary}", parent.key),
-                )
-            }),
+            parent: issue.parent.clone(),
+            linked_issues: issue.linked_issues.clone(),
             labels: issue.labels.clone(),
             description: issue
                 .description_text

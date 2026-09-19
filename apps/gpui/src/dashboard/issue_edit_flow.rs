@@ -465,6 +465,19 @@ impl IssueEditFlow {
     pub(super) fn set_state_for_test(&mut self, state: IssueEditState) {
         self.state = state;
     }
+
+    #[cfg(test)]
+    pub(super) fn set_submitting_for_test(&mut self, issue_id: IssueId, target: String) {
+        self.generation = 1;
+        self.state = IssueEditState::Submitting {
+            identity: SubmissionIdentity {
+                issue_id,
+                operation: IssueEditOperation::Assignee,
+                generation: self.generation,
+            },
+            target,
+        };
+    }
 }
 
 #[cfg(test)]

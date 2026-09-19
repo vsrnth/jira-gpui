@@ -9,8 +9,8 @@ use jira_application::{
 };
 use jira_domain::{
     AccountId, AttachmentMetadata, Issue, IssueComment, IssueCommentAuthor, IssueDetailCore,
-    IssueId, IssueKey, IssueType, JiraSiteId, ParentIssue, Priority, Project, Status, Timestamp,
-    User,
+    IssueId, IssueKey, IssueType, JiraSiteId, LinkedIssue, ParentIssue, Priority, Project, Status,
+    Timestamp, User,
 };
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -39,10 +39,12 @@ impl IssueMapper {
             .map_or((None, None), |(document, text)| {
                 (Some(document), Some(text))
             });
+        let linked_issues = map_linked_issues(&issue.fields.issuelinks);
         let mut domain_issue = self.map_domain_issue(site_id, issue)?;
         domain_issue.description_text = description;
         domain_issue.rich_description = rich_description;
         domain_issue.detail_loaded = true;
+        domain_issue.linked_issues = linked_issues;
         Ok(IssueDetailCore::new(domain_issue, attachments))
     }
 
@@ -262,6 +264,37 @@ fn map_attachment(attachment: &JiraAttachment) -> Result<AttachmentMetadata, Map
         attachment.mime_type.clone(),
     )
     .map_err(MappingError::InvalidDomainValue)
+}
+
+fn map_linked_issues(links: &[crate::models::JiraIssueLink]) -> Vec<LinkedIssue> {
+    links
+        .iter()
+        .filter_map(|link| {
+            let link_type = link.link_type.as_ref()?;
+            let (linked, relationship) = match (&link.inward_issue, &link.outward_issue) {
+                (Some(issue), None) => (issue, link_type.inward.as_deref()?),
+                (None, Some(issue)) => (issue, link_type.outward.as_deref()?),
+                _ => return None,
+            };
+            let relationship =
+                (!relationship.trim().is_empty()).then(|| relationship.to_owned())?;
+            Some(LinkedIssue {
+                id: IssueId::new(linked.id.as_ref()?.clone()).ok()?,
+                key: IssueKey::new(linked.key.as_ref()?.clone()).ok()?,
+                summary: linked
+                    .fields
+                    .as_ref()
+                    .and_then(|fields| fields.summary.clone()),
+                status: linked.fields.as_ref().and_then(|fields| {
+                    fields
+                        .status
+                        .as_ref()
+                        .and_then(|status| status.name.clone())
+                }),
+                relationship,
+            })
+        })
+        .collect()
 }
 
 fn map_comment(comment: JiraComment) -> Result<IssueComment, MappingError> {

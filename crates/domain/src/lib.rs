@@ -12,7 +12,8 @@ mod user_set;
 mod value;
 
 pub use issue::{
-    Issue, IssueField, IssueLifecycle, IssueType, ParentIssue, Priority, Project, Status,
+    Issue, IssueField, IssueLifecycle, IssueType, LinkedIssue, ParentIssue, Priority, Project,
+    Status,
 };
 pub use issue_detail::{
     AttachmentMetadata, IssueComment, IssueCommentAuthor, IssueDetail, IssueDetailCore,

@@ -4,8 +4,8 @@
 //! services does not change the dashboard or its presentation model.
 
 use jira_domain::{
-    AccountId, ChangeValue, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, ParentIssue,
-    Priority, Project, Status, UpdateEvent, UpdateKind, User, UserSetId,
+    AccountId, ChangeValue, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, LinkedIssue,
+    ParentIssue, Priority, Project, Status, UpdateEvent, UpdateKind, User, UserSetId,
 };
 use time::macros::{date, datetime};
 
@@ -18,7 +18,7 @@ pub fn sample_users() -> Vec<User> {
 }
 
 pub fn sample_issues() -> Vec<Issue> {
-    vec![
+    let mut issues = vec![
         issue(IssueSpec {
             id: "10184",
             key: "DESK-184",
@@ -94,7 +94,35 @@ pub fn sample_issues() -> Vec<Issue> {
             description: "Keep Jira transport pagination details inside the adapter and expose stable application page cursors.",
             parent: Some(("DESK-150", "Read-only Jira desktop MVP")),
         }),
-    ]
+    ];
+
+    // Keep relationship fixtures local and typed so the detail view exercises the same
+    // breadcrumb and linked-row navigation path without network access.
+    let parent = issues[3].clone();
+    let blocked_issue = issues[1].clone();
+    let related_issue = issues[2].clone();
+    issues[0].parent = Some(ParentIssue {
+        id: parent.id,
+        key: parent.key,
+        summary: Some(parent.summary),
+    });
+    issues[0].linked_issues = vec![
+        LinkedIssue {
+            id: blocked_issue.id,
+            key: blocked_issue.key,
+            summary: Some(blocked_issue.summary),
+            status: Some(blocked_issue.status.name),
+            relationship: "blocks".to_owned(),
+        },
+        LinkedIssue {
+            id: related_issue.id,
+            key: related_issue.key,
+            summary: Some(related_issue.summary),
+            status: Some(related_issue.status.name),
+            relationship: "is blocked by".to_owned(),
+        },
+    ];
+    issues
 }
 
 pub fn sample_updates() -> Vec<UpdateEvent> {

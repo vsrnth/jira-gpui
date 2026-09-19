@@ -889,6 +889,86 @@ final class JiraDeskUITests: XCTestCase {
         add(screenshot)
     }
 
+    func testRelationships() throws {
+        try launchFixture(scenario: "issues")
+
+        let row = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184")
+        row.click()
+        let initialDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail for DESK-184")
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-184", in: initialDetail), "DESK-184 detail should be selected")
+
+        let breadcrumbs = try require(
+            app.descendants(matching: .any)["issue-detail-breadcrumbs"],
+            "issue-detail-breadcrumbs"
+        )
+        XCTAssertGreaterThan(breadcrumbs.frame.width, 0, "issue breadcrumbs should have visible width")
+        XCTAssertGreaterThan(breadcrumbs.frame.height, 0, "issue breadcrumbs should have visible height")
+        let parent = try require(
+            app.buttons["issue-detail-parent-breadcrumb"],
+            "issue-detail-parent-breadcrumb"
+        )
+        XCTAssertEqual(parent.label.isEmpty ? parent.title : parent.label, "DESK-171", "DESK-184 should expose its parent breadcrumb")
+        XCTAssertGreaterThan(parent.frame.width, 60, "parent breadcrumb should remain readable")
+        parent.click()
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-171", in: initialDetail), "parent navigation should select DESK-171")
+        XCTAssertFalse(
+            app.descendants(matching: .any)["issue-detail-parent-breadcrumb"].exists,
+            "the parent issue should expose the empty parent state"
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["issue-detail-linked-issues"].exists,
+            "the parent fixture should expose the empty linked-issues state"
+        )
+
+        row.click()
+        let detail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail with relationships")
+        let linked = try require(
+            app.descendants(matching: .any)["issue-detail-linked-issues"],
+            "issue-detail-linked-issues"
+        )
+        XCTAssertGreaterThan(linked.frame.width, 180, "linked issue surface should retain usable width")
+        XCTAssertLessThan(linked.frame.height, 500, "linked issue surface should remain bounded")
+        let expectedLinks = [(0, "blocks", "DESK-179"), (1, "is blocked by", "DESK-176")]
+        for (index, direction, key) in expectedLinks {
+            let linkRow = try require(
+                app.descendants(matching: .any)["issue-detail-linked-\(index)"],
+                "issue-detail-linked-\(index)"
+            )
+            assertFiniteBounded(linkRow.frame, name: "issue-detail-linked-\(index)")
+            let link = try require(
+                app.buttons["issue-detail-linked-key-\(index)"],
+                "issue-detail-linked-key-\(index)"
+            )
+            XCTAssertTrue(semanticText(linkRow).contains(direction), "linked issue \(index) should expose its direction")
+            XCTAssertTrue(semanticText(linkRow).contains(key), "linked issue \(index) should expose its key")
+            XCTAssertTrue(semanticText(link).contains(key), "linked issue key \(index) should remain actionable")
+        }
+
+        let firstLink = try require(app.buttons["issue-detail-linked-key-0"], "first linked issue key")
+        XCTAssertGreaterThanOrEqual(linked.frame.minX, detail.frame.minX - 1, "linked issue surface should stay inside detail horizontally")
+        XCTAssertLessThanOrEqual(linked.frame.maxX, detail.frame.maxX + 1, "linked issue surface should stay inside detail horizontally")
+        for index in 0..<2 {
+            let row = app.descendants(matching: .any)["issue-detail-linked-\(index)"]
+            XCTAssertGreaterThanOrEqual(row.frame.minX, detail.frame.minX - 1, "linked row \(index) should stay inside detail horizontally")
+            XCTAssertLessThanOrEqual(row.frame.maxX, detail.frame.maxX + 1, "linked row \(index) should stay inside detail horizontally")
+        }
+        for _ in 0..<6 where !firstLink.isHittable {
+            detail.swipeUp()
+        }
+        XCTAssertTrue(firstLink.isHittable, "first linked issue key should become hittable within a bounded scroll")
+        firstLink.click()
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-179", in: detail), "first linked navigation should select DESK-179")
+
+        row.click()
+        let secondLink = try require(app.buttons["issue-detail-linked-key-1"], "second linked issue key")
+        for _ in 0..<6 where !secondLink.isHittable {
+            detail.swipeUp()
+        }
+        XCTAssertTrue(secondLink.isHittable, "second linked issue key should become hittable within a bounded scroll")
+        secondLink.click()
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-176", in: detail), "second linked navigation should select DESK-176")
+    }
+
     func testKitComponentSemanticsAndBoundedGeometry() throws {
         try launchFixture(scenario: "components")
 

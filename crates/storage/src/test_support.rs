@@ -11,7 +11,7 @@ use jira_application::{
     UpdateFeedQuery, UserSetDraft, UserSetPort,
 };
 use jira_domain::{
-    AccountId, ChangeValue, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId,
+    AccountId, ChangeValue, EventId, Issue, IssueId, IssueKey, IssueType, JiraSiteId, LinkedIssue,
     NotificationDelivery, Priority, Project, RichBlock, RichInline, RichTextDocument, Status,
     Timestamp, UpdateEvent, UpdateKind, User, UserSetId,
 };
@@ -284,6 +284,13 @@ where
         false,
     ));
     detailed.detail_loaded = true;
+    detailed.linked_issues.push(LinkedIssue {
+        id: IssueId::new("701").expect("linked issue id"),
+        key: IssueKey::new("APP-701").expect("linked issue key"),
+        summary: Some("blocked work".into()),
+        status: Some("Open".into()),
+        relationship: "blocks".into(),
+    });
     assert!(block_on(store.cache_detail_issue(&detailed)).expect("cache detail"));
     assert!(!block_on(store.cache_detail_issue(&detailed)).expect("unchanged detail"));
     assert_eq!(
@@ -311,10 +318,12 @@ where
     assert!(preserved.detail_loaded);
     assert_eq!(preserved.description_text, detailed.description_text);
     assert_eq!(preserved.rich_description, detailed.rich_description);
+    assert_eq!(preserved.linked_issues, detailed.linked_issues);
 
     let mut cleared = preserved;
     cleared.description_text = None;
     cleared.rich_description = None;
+    cleared.linked_issues = Vec::new();
     cleared.detail_loaded = true;
     assert!(block_on(store.cache_detail_issue(&cleared)).expect("clear detail"));
     let cleared_snapshot = block_on(store.get_issue(&site_id, &baseline.id))
@@ -323,6 +332,7 @@ where
     assert!(cleared_snapshot.detail_loaded);
     assert_eq!(cleared_snapshot.description_text, None);
     assert_eq!(cleared_snapshot.rich_description, None);
+    assert!(cleared_snapshot.linked_issues.is_empty());
     assert_eq!(
         block_on(store.issues_for_user_set(&site_id, &user_set_id))
             .expect("membership lookup")

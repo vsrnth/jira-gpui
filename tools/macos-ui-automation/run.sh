@@ -10,7 +10,7 @@ trap stop_suite INT TERM HUP
 usage() {
     printf '%s\n' \
         'Usage: tools/macos-ui-automation/run.sh [--scenario NAME | --suite | --list | --self-test] [--artifact-dir ABSOLUTE_DIR]' \
-        'Scenarios: onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings, virtualized, alert, assignee, components' >&2
+        'Scenarios: onboarding, onboarding-busy, issues, relationships, rich-content, comment-confirmation, updates, team, settings, virtualized, alert, assignee, components' >&2
 }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -64,13 +64,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-scenarios='onboarding onboarding-busy issues rich-content comment-confirmation updates team settings virtualized alert assignee components'
+scenarios='onboarding onboarding-busy issues relationships rich-content comment-confirmation updates team settings virtualized alert assignee components'
 if [ "$list" -eq 1 ]; then
     if [ -n "$scenario" ] || [ "$suite" -eq 1 ] || [ "$self_test" -eq 1 ] || [ -n "$artifact_dir" ]; then
         usage
         exit 2
     fi
-    printf '%s\n' onboarding onboarding-busy issues rich-content comment-confirmation updates team settings virtualized alert assignee components
+    printf '%s\n' onboarding onboarding-busy issues relationships rich-content comment-confirmation updates team settings virtualized alert assignee components
     exit 0
 fi
 if [ "$self_test" -eq 1 ] && { [ -n "$scenario" ] || [ "$suite" -eq 1 ]; }; then
@@ -141,6 +141,7 @@ method_for_scenario() {
         onboarding) printf '%s\n' testOnboarding ;;
         onboarding-busy) printf '%s\n' testOnboardingBusy ;;
         issues) printf '%s\n' testIssues ;;
+        relationships) printf '%s\n' testRelationships ;;
         rich-content) printf '%s\n' testRichContent ;;
         comment-confirmation) printf '%s\n' testCommentConfirmationActions ;;
         updates) printf '%s\n' testUpdates ;;
@@ -204,7 +205,7 @@ run_one() {
 
 if [ "$suite" -eq 1 ]; then
     failures=0
-    for name in onboarding onboarding-busy issues rich-content comment-confirmation updates team settings virtualized alert assignee components; do
+    for name in onboarding onboarding-busy issues relationships rich-content comment-confirmation updates team settings virtualized alert assignee components; do
         if ! run_one "$name"; then
             failures=$((failures + 1))
         fi

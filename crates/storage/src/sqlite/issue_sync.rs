@@ -291,6 +291,7 @@ fn insert_issue(transaction: &Transaction<'_>, issue: &Issue) -> Result<(), Appl
                 let mut merged = issue.clone();
                 merged.description_text = existing.description_text;
                 merged.rich_description = existing.rich_description;
+                merged.linked_issues = existing.linked_issues;
                 merged.detail_loaded = existing.detail_loaded;
                 merged
             })

@@ -267,6 +267,7 @@ impl IssueCachePort for InMemoryStore {
                             let mut merged = issue.clone();
                             merged.description_text = existing.description_text.clone();
                             merged.rich_description = existing.rich_description.clone();
+                            merged.linked_issues = existing.linked_issues.clone();
                             merged.detail_loaded = existing.detail_loaded;
                             merged
                         })

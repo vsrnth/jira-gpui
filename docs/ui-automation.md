@@ -177,6 +177,7 @@ tools/macos-ui-automation/run.sh --suite
 tools/macos-ui-automation/run.sh --scenario onboarding
 tools/macos-ui-automation/run.sh --scenario onboarding-busy
 tools/macos-ui-automation/run.sh --scenario issues
+tools/macos-ui-automation/run.sh --scenario relationships
 tools/macos-ui-automation/run.sh --scenario rich-content
 tools/macos-ui-automation/run.sh --scenario updates
 tools/macos-ui-automation/run.sh --scenario team
@@ -187,7 +188,9 @@ tools/macos-ui-automation/run.sh --scenario assignee
 tools/macos-ui-automation/run.sh --scenario virtualized
 ```
 
-`components` covers kit Tags, Empty, and attachments; `alert` covers the inert
+`relationships` reuses the deterministic issues fixture to verify parent breadcrumbs,
+directional linked issue labels, bounded relationship geometry, empty relationship
+states, and read-only navigation through linked issues. `components` covers kit Tags, Empty, and attachments; `alert` covers the inert
 kit Alert fixture; `assignee` covers keyboard selection through confirmation;
 and `virtualized` covers scrolling, filtering, variable row measurement, and
 update expansion. These scenarios are local-only and never contact Jira or
@@ -238,7 +241,9 @@ For another local run, replace the run ID and scenario in the path:
 
 The fixture host accepts exactly `onboarding`, `onboarding-busy`, `issues`,
 `rich-content`, `comment-confirmation`, `updates`, `team`, `settings`,
-`components`, `alert`, `assignee`, and `virtualized`.
+`components`, `alert`, `assignee`, and `virtualized`. The `relationships`
+runner scenario launches the `issues` fixture and selects the dedicated
+relationship test method; it does not add a separate host fixture.
 The XCUITest target performs bounded semantic waits and read-only actions:
 
 - `onboarding` opens the connection dialog, selects each field by its exact

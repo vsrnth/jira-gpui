@@ -43,6 +43,19 @@ pub struct ParentIssue {
     pub summary: Option<String>,
 }
 
+/// A read-only issue relationship returned by Jira's issue links field.
+///
+/// `relationship` is the directional description supplied by Jira (for example,
+/// `blocks` or `is blocked by`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedIssue {
+    pub id: IssueId,
+    pub key: IssueKey,
+    pub summary: Option<String>,
+    pub status: Option<String>,
+    pub relationship: String,
+}
+
 /// Whether a cached issue is still part of the latest synchronized result set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +85,8 @@ pub struct Issue {
     #[serde(default)]
     pub reporter_display_name: Option<String>,
     pub parent: Option<ParentIssue>,
+    #[serde(default)]
+    pub linked_issues: Vec<LinkedIssue>,
     pub labels: Vec<String>,
     /// Compatibility plain-text projection of the bounded structured description.
     /// Raw Jira ADF JSON is never stored in the domain model.
@@ -127,6 +142,7 @@ impl Issue {
             reporter,
             reporter_display_name: None,
             parent,
+            linked_issues: Vec::new(),
             labels,
             description_text: None,
             rich_description: None,
@@ -213,7 +229,9 @@ mod tests {
         let object = value.as_object().expect("issue object");
         let mut legacy = object.clone();
         legacy.remove("detail_loaded");
+        legacy.remove("linked_issues");
         let restored: Issue = serde_json::from_value(legacy.into()).expect("legacy issue");
         assert!(!restored.detail_loaded);
+        assert!(restored.linked_issues.is_empty());
     }
 }

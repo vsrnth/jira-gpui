@@ -376,7 +376,18 @@ impl Dashboard {
         let assignee = issue.assignee.clone();
         let reporter = issue.reporter.clone();
         let status_category = issue.status_category.clone();
-        let parent = issue.parent.clone().unwrap_or_else(|| "None".to_owned());
+        let parent = issue
+            .parent
+            .as_ref()
+            .map(|parent| {
+                parent.summary.as_ref().map_or_else(
+                    || parent.key.to_string(),
+                    |summary| format!("{} · {summary}", parent.key),
+                )
+            })
+            .unwrap_or_else(|| "None".to_owned());
+        let parent_breadcrumb = issue.parent.clone();
+        let linked_issues = issue.linked_issues.clone();
         let created = issue.created.clone();
         let updated = issue.updated.clone();
         let due_date = issue.due_date.clone();
@@ -401,12 +412,34 @@ impl Dashboard {
                     .gap_2()
                     .child(
                         h_flex()
+                            .id("issue-detail-breadcrumbs")
+                            .accessibility_id("issue-detail-breadcrumbs")
+                            .role(gpui_kit::accesskit::Role::List)
                             .min_w_0()
                             .gap_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(div().min_w_0().truncate().child(project))
                             .child("/")
+                            .when_some(parent_breadcrumb, |this, parent| {
+                                let parent_key = parent.key.clone();
+                                let parent_label = parent.key.to_string();
+                                let parent_description =
+                                    parent.summary.clone().unwrap_or_else(|| {
+                                        "Open the immediate parent issue".to_owned()
+                                    });
+                                this.child(
+                                    Button::new("issue-detail-parent-breadcrumb")
+                                        .compact()
+                                        .accessibility_id("issue-detail-parent-breadcrumb")
+                                        .label(parent_label)
+                                        .tooltip(format!("{} · {}", parent_key, parent_description))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_related_issue_key(parent_key.clone(), cx);
+                                        })),
+                                )
+                                .child("/")
+                            })
                             .child(
                                 h_flex().min_w_0().child(
                                     div()
@@ -513,6 +546,83 @@ impl Dashboard {
                             .child(description_content),
                     ),
             )
+            .when(!linked_issues.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .id("issue-detail-linked-issues")
+                        .accessibility_id("issue-detail-linked-issues")
+                        .role(gpui_kit::accesskit::Role::Group)
+                        .aria_label("Linked issues")
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(div().text_sm().font_semibold().child("Linked issues"))
+                        .children(linked_issues.iter().enumerate().map(|(index, linked)| {
+                            let key = linked.key.clone();
+                            let summary = linked
+                                .summary
+                                .clone()
+                                .unwrap_or_else(|| "No summary supplied".to_owned());
+                            let status = linked.status.clone();
+                            let relationship = linked.relationship.clone();
+                            let accessible_label = status.as_ref().map_or_else(
+                                || format!("{} {}: {}", relationship, key, summary),
+                                |status| {
+                                    format!(
+                                        "{} {}: {}, status {}",
+                                        relationship, key, summary, status
+                                    )
+                                },
+                            );
+                            v_flex()
+                                .id(("issue-detail-linked-row", index))
+                                .accessibility_id(format!("issue-detail-linked-{index}"))
+                                .role(gpui_kit::accesskit::Role::Group)
+                                .aria_label(accessible_label.clone())
+                                .w_full()
+                                .min_w_0()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .whitespace_normal()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(relationship.clone()),
+                                )
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .items_start()
+                                        .gap_2()
+                                        .child(
+                                            Button::new(("issue-detail-linked", index))
+                                                .compact()
+                                                .accessibility_id(format!(
+                                                    "issue-detail-linked-key-{index}"
+                                                ))
+                                                .label(key.to_string())
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.open_related_issue_key(key.clone(), cx);
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .whitespace_normal()
+                                                .text_sm()
+                                                .child(summary),
+                                        )
+                                        .when_some(status, |this, status| {
+                                            this.child(self.tag(status))
+                                        }),
+                                )
+                                .into_any_element()
+                        })),
+                )
+            })
             .child(
                 v_flex()
                     .id("issue-detail-details")
