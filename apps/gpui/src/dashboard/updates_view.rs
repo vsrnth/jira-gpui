@@ -22,6 +22,14 @@ pub(super) fn update_filter_is_selected(current: UpdateFilter, option: UpdateFil
     current == option
 }
 
+fn should_show_row_timestamp(
+    event_count: usize,
+    latest_occurred_at: &str,
+    row_occurred_at: &str,
+) -> bool {
+    event_count != 1 || row_occurred_at != latest_occurred_at
+}
+
 impl Dashboard {
     pub(super) fn render_updates(
         &self,
@@ -424,7 +432,9 @@ impl Dashboard {
                         v_flex().gap_1().children(
                             rows.iter().take(visible_row_count).enumerate().map(
                                 |(row_index, row)| {
-                                    self.update_row_element(index, row_index, row, mobile, cx)
+                                    self.update_row_element(
+                                        index, row_index, row, group, mobile, cx,
+                                    )
                                 },
                             ),
                         ),
@@ -500,6 +510,7 @@ impl Dashboard {
         group_index: usize,
         row_index: usize,
         row: &CompactedUpdateRow,
+        group: &UpdateGroupViewModel,
         mobile: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -509,6 +520,8 @@ impl Dashboard {
                 (generic_summary_label(*count), occurred_at.clone())
             }
         };
+        let show_timestamp =
+            should_show_row_timestamp(group.events.len(), &group.latest_occurred_at, &occurred_at);
         h_flex()
             .id(format!("update-row-{group_index}-{row_index}"))
             .debug_selector(move || format!("update-row-{group_index}-{row_index}"))
@@ -523,14 +536,39 @@ impl Dashboard {
                     .when(mobile, |this| this.w_full().line_clamp(2))
                     .child(change),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .when(!mobile, |this| this.flex_shrink_0())
-                    .when(mobile, |this| this.w_full().truncate())
-                    .text_color(cx.theme().muted_foreground)
-                    .child(occurred_at),
-            )
+            .when(show_timestamp, |this| {
+                this.child(
+                    div()
+                        .min_w_0()
+                        .when(!mobile, |this| this.flex_shrink_0())
+                        .when(mobile, |this| this.w_full().truncate())
+                        .text_color(cx.theme().muted_foreground)
+                        .child(occurred_at),
+                )
+            })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_show_row_timestamp;
+
+    #[test]
+    fn row_timestamp_only_omits_singleton_duplicate() {
+        let cases = [
+            (1, "Sep 23, 10:00", "Sep 23, 10:00", false),
+            (1, "Sep 23, 10:00", "Sep 22, 09:00", true),
+            (2, "Sep 23, 10:00", "Sep 23, 10:00", true),
+            (2, "Sep 23, 10:00", "Sep 22, 09:00", true),
+        ];
+
+        for (event_count, latest, row, expected) in cases {
+            assert_eq!(
+                should_show_row_timestamp(event_count, latest, row),
+                expected,
+                "event_count={event_count}, latest={latest}, row={row}"
+            );
+        }
     }
 }
