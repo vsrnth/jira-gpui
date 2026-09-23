@@ -101,24 +101,9 @@ pub(super) async fn read_created_comment(
     if status != StatusCode::CREATED {
         return Err(comment_status_error(status, response.headers()));
     }
-    let mut response = response;
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(write_unknown_outcome());
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    let body = read_response::collect_bounded_body(response, max_bytes)
         .await
-        .map_err(|_| write_unknown_outcome())?
-    {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(write_unknown_outcome());
-        }
-        body.extend_from_slice(&chunk);
-    }
+        .map_err(|_| write_unknown_outcome())?;
     map_created_comment_body(&body)
 }
 

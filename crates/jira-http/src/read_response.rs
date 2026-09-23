@@ -5,7 +5,7 @@ use reqwest::{Response, StatusCode, header};
 use serde::de::DeserializeOwned;
 
 #[derive(Debug, Eq, PartialEq)]
-enum BodyReadFailure {
+pub(super) enum BodyReadFailure {
     Read,
     TooLarge,
 }
@@ -39,7 +39,7 @@ pub(super) async fn read_body(
         })
 }
 
-async fn collect_bounded_body(
+pub(super) async fn collect_bounded_body(
     response: Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, BodyReadFailure> {
