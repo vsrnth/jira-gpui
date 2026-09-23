@@ -107,6 +107,12 @@ struct BackendNotification {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+struct BackendReceipt {
+    #[cfg(target_os = "linux")]
+    notification_id: u32,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug)]
 struct BackendError;
 
@@ -228,6 +234,26 @@ impl FreedesktopNotificationPort {
             Err(poisoned) => poisoned.into_inner(),
         };
         retained_handles.retain(handle);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn show_and_retain(
+        &self,
+        notification: notify_rust::Notification,
+    ) -> Result<BackendReceipt, ApplicationError> {
+        let result = self
+            .backend
+            .show(notification)
+            .await
+            .map_err(|_| notification_error())?;
+        #[cfg(target_os = "linux")]
+        let receipt = BackendReceipt {
+            notification_id: result.notification_id,
+        };
+        #[cfg(target_os = "macos")]
+        let receipt = BackendReceipt {};
+        self.retain_handle(result.handle);
+        Ok(receipt)
     }
 
     #[cfg(all(test, target_os = "linux"))]
@@ -370,12 +396,7 @@ impl FreedesktopNotificationPort {
     async fn deliver_notification(&self, event: UpdateEvent) -> Result<(), ApplicationError> {
         #[cfg(target_os = "linux")]
         {
-            let result = self
-                .backend
-                .show(event_notification(&event))
-                .await
-                .map_err(|_| notification_error())?;
-            self.retain_handle(result.handle);
+            self.show_and_retain(event_notification(&event)).await?;
             Ok(())
         }
 
@@ -389,12 +410,7 @@ impl FreedesktopNotificationPort {
             {
                 return Err(notification_error());
             }
-            let result = self
-                .backend
-                .show(event_notification(&event))
-                .await
-                .map_err(|_| notification_error())?;
-            self.retain_handle(result.handle);
+            self.show_and_retain(event_notification(&event)).await?;
             Ok(())
         }
 
@@ -408,15 +424,10 @@ impl FreedesktopNotificationPort {
     async fn send_test_notification(&self) -> Result<DesktopNotificationReceipt, ApplicationError> {
         #[cfg(target_os = "linux")]
         {
-            let result = self
-                .backend
-                .show(test_notification())
-                .await
-                .map_err(|_| notification_error())?;
+            let backend_receipt = self.show_and_retain(test_notification()).await?;
             let receipt = DesktopNotificationReceipt {
-                notification_id: result.notification_id,
+                notification_id: backend_receipt.notification_id,
             };
-            self.retain_handle(result.handle);
             Ok(receipt)
         }
 
@@ -430,15 +441,10 @@ impl FreedesktopNotificationPort {
             {
                 return Err(notification_error());
             }
-            let result = self
-                .backend
-                .show(test_notification())
-                .await
-                .map_err(|_| notification_error())?;
+            self.show_and_retain(test_notification()).await?;
             let receipt = DesktopNotificationReceipt {
                 notification_id: allocate_nonzero_receipt(&NEXT_MAC_RECEIPT),
             };
-            self.retain_handle(result.handle);
             Ok(receipt)
         }
 
