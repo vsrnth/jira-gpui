@@ -776,8 +776,18 @@ fn parse_task_list_block(
             continue;
         };
         match kind {
-            "taskItem" => items.push(parse_task_item(child, depth + 1, state)),
-            "blockTaskItem" => items.push(parse_block_task_item(child, depth + 2, state)),
+            "taskItem" => items.push(parse_task_item(
+                child,
+                depth + 1,
+                state,
+                TaskItemContent::Inline,
+            )),
+            "blockTaskItem" => items.push(parse_task_item(
+                child,
+                depth + 2,
+                state,
+                TaskItemContent::Blocks,
+            )),
             "taskList" => {
                 let nested = parse_task_list_block(child, depth + 1, state);
                 if let Some(previous) = items.last_mut() {
@@ -798,55 +808,52 @@ fn parse_task_list_block(
     RichBlock::TaskList(items)
 }
 
+#[derive(Clone, Copy)]
+enum TaskItemContent {
+    Inline,
+    Blocks,
+}
+
 fn parse_task_item(
     object: &serde_json::Map<String, Value>,
     depth: usize,
     state: &mut AdfParserState<'_>,
+    content_kind: TaskItemContent,
 ) -> RichTaskItem {
     let Some(task_state) = task_state(object) else {
         state.truncated = true;
         return task_placeholder_item();
     };
-    let Some(content) = object.get("content") else {
-        return RichTaskItem {
-            state: task_state,
-            content: Vec::new(),
-        };
-    };
-    let Some(content) = content.as_array() else {
-        state.truncated = true;
-        return task_placeholder_item_with_state(task_state);
+    let content = match content_kind {
+        TaskItemContent::Inline => match object.get("content") {
+            None => Vec::new(),
+            Some(content) => match content.as_array() {
+                Some(content) => vec![RichBlock::Paragraph(parse_inlines(
+                    content,
+                    depth + 1,
+                    state,
+                ))],
+                None => {
+                    state.truncated = true;
+                    return task_placeholder_item_with_state(task_state);
+                }
+            },
+        },
+        TaskItemContent::Blocks => {
+            let Some(content) = object.get("content").and_then(Value::as_array) else {
+                state.truncated = true;
+                return task_placeholder_item_with_state(task_state);
+            };
+            if content.is_empty() {
+                state.truncated = true;
+                return task_placeholder_item_with_state(task_state);
+            }
+            parse_blocks(content, depth, state)
+        }
     };
     RichTaskItem {
         state: task_state,
-        content: vec![RichBlock::Paragraph(parse_inlines(
-            content,
-            depth + 1,
-            state,
-        ))],
-    }
-}
-
-fn parse_block_task_item(
-    object: &serde_json::Map<String, Value>,
-    depth: usize,
-    state: &mut AdfParserState<'_>,
-) -> RichTaskItem {
-    let Some(task_state) = task_state(object) else {
-        state.truncated = true;
-        return task_placeholder_item();
-    };
-    let Some(content) = object.get("content").and_then(Value::as_array) else {
-        state.truncated = true;
-        return task_placeholder_item_with_state(task_state);
-    };
-    if content.is_empty() {
-        state.truncated = true;
-        return task_placeholder_item_with_state(task_state);
-    }
-    RichTaskItem {
-        state: task_state,
-        content: parse_blocks(content, depth, state),
+        content,
     }
 }
 
