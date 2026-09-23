@@ -221,51 +221,10 @@ where
         }
     };
 
-    let mut resolved = Vec::new();
-    for identifier in identifiers {
-        if identifier.contains('@') {
-            let users = match port.search_users(identifier.clone()).await {
-                Ok(users) => users
-                    .into_iter()
-                    .filter(|user| user.active)
-                    .collect::<Vec<_>>(),
-                Err(_) => {
-                    return TeamSaveResult::Failed(TeamSaveFailure::Unchanged(
-                        TeamUnchangedFailure::Search,
-                    ));
-                }
-            };
-            match users.as_slice() {
-                [] => {
-                    return TeamSaveResult::Failed(TeamSaveFailure::Unchanged(
-                        TeamUnchangedFailure::EmailNotFound,
-                    ));
-                }
-                [_] => {
-                    let user = &users[0];
-                    resolved.push(PersistedTeamMember {
-                        identifier,
-                        account_id: user.account_id.to_string(),
-                        display_name: user.display_name.clone(),
-                    });
-                }
-                _ => {
-                    return TeamSaveResult::Failed(TeamSaveFailure::Unchanged(
-                        TeamUnchangedFailure::EmailAmbiguous,
-                    ));
-                }
-            }
-        } else {
-            match persisted_direct_team_member(identifier) {
-                Ok(member) => resolved.push(member),
-                Err(message) => {
-                    return TeamSaveResult::Failed(TeamSaveFailure::Unchanged(
-                        TeamUnchangedFailure::InvalidInput(message),
-                    ));
-                }
-            }
-        }
-    }
+    let resolved = match resolve_team_members(port, identifiers).await {
+        Ok(resolved) => resolved,
+        Err(failure) => return TeamSaveResult::Failed(TeamSaveFailure::Unchanged(failure)),
+    };
 
     let normalized = match normalize_team_members(resolved) {
         Ok(normalized) => normalized,
@@ -307,6 +266,44 @@ where
         members: normalized,
         refreshed,
     }
+}
+
+async fn resolve_team_members<P: SettingsPort>(
+    port: &P,
+    identifiers: Vec<String>,
+) -> Result<Vec<PersistedTeamMember>, TeamUnchangedFailure> {
+    let mut resolved = Vec::new();
+    for identifier in identifiers {
+        if identifier.contains('@') {
+            let users = match port.search_users(identifier.clone()).await {
+                Ok(users) => users
+                    .into_iter()
+                    .filter(|user| user.active)
+                    .collect::<Vec<_>>(),
+                Err(_) => {
+                    return Err(TeamUnchangedFailure::Search);
+                }
+            };
+            match users.as_slice() {
+                [] => return Err(TeamUnchangedFailure::EmailNotFound),
+                [_] => {
+                    let user = &users[0];
+                    resolved.push(PersistedTeamMember {
+                        identifier,
+                        account_id: user.account_id.to_string(),
+                        display_name: user.display_name.clone(),
+                    });
+                }
+                _ => return Err(TeamUnchangedFailure::EmailAmbiguous),
+            }
+        } else {
+            match persisted_direct_team_member(identifier) {
+                Ok(member) => resolved.push(member),
+                Err(message) => return Err(TeamUnchangedFailure::InvalidInput(message)),
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 async fn restore_team<P: SettingsPort>(
