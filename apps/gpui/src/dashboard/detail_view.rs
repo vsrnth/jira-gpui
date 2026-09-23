@@ -183,7 +183,103 @@ impl Dashboard {
             .or_else(|| self.selected_issue_view())
     }
 
-    pub(super) fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
+    fn issue_detail_status_surface(
+        &self,
+        detail_state: &DetailState,
+        layout: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let status_surface = match detail_state {
+            DetailState::RemoteLoading { query } => v_flex()
+                .id("issue-detail-remote-loading")
+                .role(gpui_kit::accesskit::Role::Status)
+                .aria_label(format!(
+                    "Jira lookup in progress for {}",
+                    normalized_lookup_query(query)
+                ))
+                .gap_2()
+                .child(div().text_base().font_semibold().child("Jira lookup"))
+                .child(
+                    h_flex().gap_2().child(Spinner::new()).child(
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "Looking up {}…",
+                                normalized_lookup_query(query)
+                            )),
+                    ),
+                ),
+            DetailState::RemoteError { query, copy } => v_flex()
+                .id("issue-detail-remote-error")
+                .debug_selector(|| "issue-detail-remote-error".to_owned())
+                .accessibility_id("issue-detail-remote-error")
+                .role(gpui_kit::accesskit::Role::Group)
+                .aria_label(format!(
+                    "Jira lookup failed for {}: {}",
+                    normalized_lookup_query(query),
+                    copy.message()
+                ))
+                .child(
+                    Alert::error("issue-detail-remote-error", copy.message().to_owned()).title(
+                        format!("Jira lookup failed for {}", normalized_lookup_query(query)),
+                    ),
+                ),
+            DetailState::Error { copy, .. } => v_flex()
+                .id("issue-detail-error-surface")
+                .debug_selector(|| "issue-detail-error-surface".to_owned())
+                .accessibility_id("issue-detail-error-surface")
+                .role(gpui_kit::accesskit::Role::Group)
+                .aria_label(format!("Unable to load issue details: {}", copy.message()))
+                .child(
+                    Alert::error("issue-detail-error-surface", copy.message().to_owned())
+                        .title("Unable to load issue details"),
+                ),
+            DetailState::Loading { .. } => v_flex()
+                .id("issue-detail-loading-surface")
+                .role(gpui_kit::accesskit::Role::Status)
+                .aria_label("Loading issue details")
+                .gap_2()
+                .child(div().text_base().font_semibold().child("Loading issue details"))
+                .child(h_flex().gap_2().child(Spinner::new())),
+            DetailState::Empty | DetailState::Loaded(_) | DetailState::Refreshing { .. } => v_flex()
+                .id("issue-detail-empty-surface")
+                .gap_2()
+                .child(div().text_base().font_semibold().child("Select an issue"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Choose a Jira issue to view its description, fields, comments, and attachments."),
+                ),
+        };
+        v_flex()
+            .id("issue-detail")
+            .debug_selector(|| "issue-detail".to_owned())
+            .accessibility_id("issue-detail")
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label("Issue detail")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .p(rems(layout.detail_padding() / 16.0))
+            .child(
+                status_surface
+                    .debug_selector(|| "issue-detail-status".to_owned())
+                    .w_full()
+                    .max_w_full()
+                    .min_w_0(),
+            )
+            .into_any_element()
+    }
+
+    fn issue_detail_content(&self) -> (Option<IssueViewModel>, DetailState) {
         let issue = match &self.remote_lookup {
             RemoteLookupState::Loaded { .. } => self.remote_lookup_view(),
             RemoteLookupState::Loading { .. } | RemoteLookupState::Error { .. } => None,
@@ -200,90 +296,13 @@ impl Dashboard {
             },
             RemoteLookupState::Idle => self.detail_state.clone(),
         };
+        (issue, detail_state)
+    }
+
+    pub(super) fn issue_detail(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
+        let (issue, detail_state) = self.issue_detail_content();
         let Some(issue) = issue else {
-            let status_surface = match &detail_state {
-                DetailState::RemoteLoading { query } => v_flex()
-                    .id("issue-detail-remote-loading")
-                    .role(gpui_kit::accesskit::Role::Status)
-                    .aria_label(format!(
-                        "Jira lookup in progress for {}",
-                        normalized_lookup_query(query)
-                    ))
-                    .gap_2()
-                    .child(div().text_base().font_semibold().child("Jira lookup"))
-                    .child(
-                        h_flex().gap_2().child(Spinner::new()).child(
-                            div()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!(
-                                    "Looking up {}…",
-                                    normalized_lookup_query(query)
-                                )),
-                        ),
-                    ),
-                DetailState::RemoteError { query, copy } => v_flex()
-                    .id("issue-detail-remote-error")
-                    .debug_selector(|| "issue-detail-remote-error".to_owned())
-                    .accessibility_id("issue-detail-remote-error")
-                    .role(gpui_kit::accesskit::Role::Group)
-                    .aria_label(format!(
-                        "Jira lookup failed for {}: {}",
-                        normalized_lookup_query(query),
-                        copy.message()
-                    ))
-                    .child(Alert::error("issue-detail-remote-error", copy.message().to_owned())
-                        .title(format!("Jira lookup failed for {}", normalized_lookup_query(query)))),
-                DetailState::Error { copy, .. } => v_flex()
-                    .id("issue-detail-error-surface")
-                    .debug_selector(|| "issue-detail-error-surface".to_owned())
-                    .accessibility_id("issue-detail-error-surface")
-                    .role(gpui_kit::accesskit::Role::Group)
-                    .aria_label(format!("Unable to load issue details: {}", copy.message()))
-                    .child(Alert::error("issue-detail-error-surface", copy.message().to_owned())
-                        .title("Unable to load issue details")),
-                DetailState::Loading { .. } => v_flex()
-                    .id("issue-detail-loading-surface")
-                    .role(gpui_kit::accesskit::Role::Status)
-                    .aria_label("Loading issue details")
-                    .gap_2()
-                    .child(div().text_base().font_semibold().child("Loading issue details"))
-                    .child(h_flex().gap_2().child(Spinner::new())),
-                DetailState::Empty | DetailState::Loaded(_) | DetailState::Refreshing { .. } => v_flex()
-                    .id("issue-detail-empty-surface")
-                    .gap_2()
-                    .child(div().text_base().font_semibold().child("Select an issue"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Choose a Jira issue to view its description, fields, comments, and attachments."),
-                    ),
-            };
-            return v_flex()
-                .id("issue-detail")
-                .debug_selector(|| "issue-detail".to_owned())
-                .accessibility_id("issue-detail")
-                .role(gpui_kit::accesskit::Role::Group)
-                .aria_label("Issue detail")
-                .w_full()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .p(rems(layout.detail_padding() / 16.0))
-                .child(
-                    status_surface
-                        .debug_selector(|| "issue-detail-status".to_owned())
-                        .w_full()
-                        .max_w_full()
-                        .min_w_0(),
-                )
-                .into_any_element();
+            return self.issue_detail_status_surface(&detail_state, layout, cx);
         };
         let project = issue.project.clone();
         let key = issue.key.clone();
