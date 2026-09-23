@@ -780,10 +780,13 @@ fn sidebar_header_and_footer_rows_stay_bounded_and_toggle_is_reachable(
     let profile = visual
         .debug_bounds("sidebar-profile")
         .expect("expanded sidebar should expose account footer");
-    assert!(
-        visual.debug_bounds("nav-settings").is_none(),
-        "settings must be opened from the account menu, not the primary navigation"
-    );
+    let settings = visual
+        .debug_bounds("nav-settings")
+        .expect("expanded sidebar should expose settings navigation");
+    assert!(settings.origin.x >= sidebar.origin.x);
+    assert!(settings.origin.x + settings.size.width <= sidebar.origin.x + sidebar.size.width);
+    assert!(settings.origin.y >= sidebar.origin.y);
+    assert!(settings.origin.y + settings.size.height <= sidebar.origin.y + sidebar.size.height);
     assert!(refresh.size.width <= px(24.));
     assert!(refresh.size.height <= px(24.));
     assert!(refresh.origin.x >= profile_actions.origin.x);
@@ -914,7 +917,16 @@ fn account_menu_exposes_settings_categories_and_selects_settings_section(
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
 
-    assert!(visual.debug_bounds("nav-settings").is_none());
+    let sidebar = visual
+        .debug_bounds("dashboard-sidebar")
+        .expect("sidebar should be laid out");
+    let settings = visual
+        .debug_bounds("nav-settings")
+        .expect("settings should be visible in desktop navigation");
+    assert!(settings.origin.x >= sidebar.origin.x);
+    assert!(settings.origin.x + settings.size.width <= sidebar.origin.x + sidebar.size.width);
+    assert!(settings.origin.y >= sidebar.origin.y);
+    assert!(settings.origin.y + settings.size.height <= sidebar.origin.y + sidebar.size.height);
     let profile = visual
         .debug_bounds("sidebar-profile")
         .expect("profile should be a visible account-menu trigger");

@@ -187,6 +187,13 @@ impl Dashboard {
                 self.section == Section::Team,
                 Section::Team,
                 cx,
+            ))
+            .child(self.sidebar_menu_item(
+                "Settings",
+                0,
+                self.section == Section::Settings,
+                Section::Settings,
+                cx,
             ));
 
         let workspace = h_flex()

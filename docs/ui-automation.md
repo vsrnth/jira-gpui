@@ -312,9 +312,9 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   `Open Jira issue ENG-43`), and no Link role for a rejected hostile
   scheme. It never clicks links or opens a browser.
 - `settings` starts on the fixture's Settings/Appearance screen and verifies
-  that Settings is absent from the desktop primary sidebar. The GPUI mobile
-  navigation coverage keeps the Settings destination available. It opens the
-  named profile's accessible account-menu button, checks that the native dropdown exposes
+  that Settings is selected and accessible in the desktop primary sidebar. The
+  GPUI mobile navigation coverage also keeps the Settings destination available.
+  It opens the named profile's accessible account-menu button, checks that the native dropdown exposes
   Appearance, Issue scope, Team tracker, Desktop notifications, and Saved Jira
   login as semantic menu items, selects each item using bounded center-coordinate
   activation, and checks the distinct category controls (appearance, JQL scope,

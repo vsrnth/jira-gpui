@@ -1180,8 +1180,13 @@ final class JiraDeskUITests: XCTestCase {
     func testSettings() throws {
         try launchFixture(scenario: "settings")
         let sidebar = try require(app.descendants(matching: .any)["dashboard-sidebar"], "dashboard-sidebar")
-        let navSettings = app.descendants(matching: .any)["nav-settings"]
-        XCTAssertFalse(navSettings.exists, "settings must not be a primary sidebar navigation item")
+        let navIssues = try require(app.descendants(matching: .any)["nav-issues"], "nav-issues")
+        let navSettings = try require(app.descendants(matching: .any)["nav-settings"], "nav-settings")
+        navIssues.click()
+        _ = try require(app.descendants(matching: .any)["issue-search"], "issue-search after selecting Issues")
+        navSettings.click()
+        XCTAssertTrue(waitForAbsence(app.descendants(matching: .any)["issue-search"]), "Settings should replace Issues content")
+        _ = try require(app.descendants(matching: .any)["appearance-dark"], "appearance-dark")
 
         let profile = try require(app.buttons["sidebar-profile"], "sidebar-profile")
         let profileName = profile.label.isEmpty ? profile.title : profile.label
@@ -1278,6 +1283,21 @@ final class JiraDeskUITests: XCTestCase {
             2.0,
             "collapsed workspace header and toggle should share a center line"
         )
+        let collapsedIssues = try require(
+            app.descendants(matching: .any)["nav-issues"],
+            "nav-issues in collapsed sidebar"
+        )
+        let collapsedSettings = try require(
+            app.descendants(matching: .any)["nav-settings"],
+            "nav-settings in collapsed sidebar"
+        )
+        XCTAssertTrue(sidebar.frame.contains(collapsedSettings.frame), "Settings should remain inside the collapsed rail")
+        assertFiniteBounded(collapsedSettings.frame, name: "collapsed nav-settings")
+        collapsedIssues.click()
+        _ = try require(app.descendants(matching: .any)["issue-search"], "issue-search from collapsed navigation")
+        collapsedSettings.click()
+        XCTAssertTrue(waitForAbsence(app.descendants(matching: .any)["issue-search"]), "collapsed Settings should replace Issues content")
+        _ = try require(app.descendants(matching: .any)["appearance-dark"], "appearance-dark after collapsed navigation")
     }
 
     func testUpdates() throws {
