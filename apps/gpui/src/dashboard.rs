@@ -652,21 +652,13 @@ fn selected_issue_view_from_sources(
         .find(|issue| &issue.id == selected)
         .cloned()
         .or_else(|| {
-            domain_issues
-                .iter()
-                .find(|issue| &issue.id == selected)
-                .map(|issue| IssueViewModel::from_domain(issue, users))
-        })
-        .or_else(|| {
-            team_issues
-                .iter()
-                .find(|issue| &issue.id == selected)
-                .map(|issue| IssueViewModel::from_domain(issue, users))
-        })
-        .or_else(|| {
-            selected_issue_core
-                .filter(|issue| &issue.id == selected)
-                .map(|issue| IssueViewModel::from_domain(issue, users))
+            selected_issue_from_sources(
+                Some(selected),
+                domain_issues,
+                team_issues,
+                selected_issue_core,
+            )
+            .map(|issue| IssueViewModel::from_domain(issue, users))
         })
 }
 

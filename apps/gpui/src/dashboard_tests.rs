@@ -2991,6 +2991,52 @@ fn filtered_selected_issue_resolves_header_from_domain_cache() {
 }
 
 #[test]
+fn selected_issue_lookup_prefers_visible_view_then_domain_team_and_core() {
+    let mut domain = sample_issues().into_iter().next().expect("issue");
+    let mut team = domain.clone();
+    let mut core = domain.clone();
+    let selected = domain.id.clone();
+    domain.summary = "domain copy".to_owned();
+    team.summary = "team copy".to_owned();
+    core.summary = "core copy".to_owned();
+    let users = sample_users();
+
+    assert_eq!(
+        selected_issue_from_sources(
+            Some(&selected),
+            &[domain.clone()],
+            &[team.clone()],
+            Some(&core)
+        )
+        .map(|issue| issue.summary.as_str()),
+        Some("domain copy")
+    );
+    assert_eq!(
+        selected_issue_from_sources(Some(&selected), &[], &[team.clone()], Some(&core))
+            .map(|issue| issue.summary.as_str()),
+        Some("team copy")
+    );
+    assert_eq!(
+        selected_issue_from_sources(Some(&selected), &[], &[], Some(&core))
+            .map(|issue| issue.summary.as_str()),
+        Some("core copy")
+    );
+
+    let mut visible = vec![IssueViewModel::from_domain(&domain, &users)];
+    visible[0].summary = "visible copy".to_owned();
+    let view = selected_issue_view_from_sources(
+        Some(&selected),
+        &visible,
+        &[domain],
+        &[team],
+        Some(&core),
+        &users,
+    )
+    .expect("selected view");
+    assert_eq!(view.summary, "visible copy");
+}
+
+#[test]
 fn fetched_detail_updates_matching_domain_and_team_snapshots() {
     let issue = sample_issues().into_iter().next().expect("issue");
     let mut fetched = issue.clone();
