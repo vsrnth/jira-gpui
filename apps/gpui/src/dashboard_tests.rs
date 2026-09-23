@@ -1,4 +1,6 @@
-use super::issues_view::issue_count_label;
+use super::issues_view::{
+    compact_issue_workspace_summary, issue_count_label, issue_workspace_summary,
+};
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
 use super::shell_view::{refresh_action_label, should_render_sidebar_sync_message};
 use super::updates_view::update_filter_is_selected;
@@ -26,6 +28,62 @@ fn issue_count_label_distinguishes_filtered_and_loaded_counts() {
     assert_eq!(issue_count_label(9, 9, false), "9 Jira issues");
 }
 
+#[test]
+fn issue_workspace_summary_pluralizes_honest_local_counts() {
+    assert_eq!(
+        issue_workspace_summary(3, 2),
+        "3 tickets with unread updates · 2 issues in progress"
+    );
+    assert_eq!(
+        issue_workspace_summary(1, 1),
+        "1 ticket with unread updates · 1 issue in progress"
+    );
+    assert_eq!(
+        issue_workspace_summary(0, 0),
+        "0 tickets with unread updates · 0 issues in progress"
+    );
+    assert_eq!(compact_issue_workspace_summary(3, 2), "3 unread · 2 active");
+}
+
+#[gpui_kit::test]
+fn mobile_issue_workspace_uses_compact_counts_and_non_overlapping_actions(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert_eq!(compact_issue_workspace_summary(3, 3), "3 unread · 3 active");
+    let overview = visual
+        .debug_bounds("issues-workspace-summary")
+        .expect("mobile issue workspace overview should be laid out");
+    let counts = visual
+        .debug_bounds("issues-workspace-summary-counts")
+        .expect("mobile compact counts should be laid out");
+    let updates = visual
+        .debug_bounds("issues-review-updates")
+        .expect("mobile Updates action should be laid out");
+    let active = visual
+        .debug_bounds("issues-show-active")
+        .expect("mobile Active action should be laid out");
+
+    assert!(overview.size.height < px(90.));
+    assert!(counts.size.width > px(0.) && counts.size.height > px(0.));
+    assert!(updates.size.width > px(0.) && updates.size.height > px(0.));
+    assert!(active.size.width > px(0.) && active.size.height > px(0.));
+    assert!(updates.origin.x + updates.size.width <= active.origin.x);
+    for bounds in [counts, updates, active] {
+        assert!(bounds.origin.x >= overview.origin.x);
+        assert!(bounds.origin.y >= overview.origin.y);
+        assert!(bounds.origin.x + bounds.size.width <= overview.origin.x + overview.size.width);
+        assert!(bounds.origin.y + bounds.size.height <= overview.origin.y + overview.size.height);
+    }
+}
+
 #[gpui_kit::test]
 fn issue_search_help_wraps_inside_narrow_issue_list(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::component::init);
@@ -41,6 +99,40 @@ fn issue_search_help_wraps_inside_narrow_issue_list(cx: &mut gpui_kit::TestAppCo
     assert!(help.size.height > px(16.));
     assert!(help.origin.x >= px(0.));
     assert!(help.origin.x + help.size.width <= px(350.));
+}
+
+#[gpui_kit::test]
+fn long_issue_summary_keeps_narrow_issue_row_bounded(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(350.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            let issue = dashboard
+                .domain_issues
+                .iter_mut()
+                .find(|issue| issue.id.as_str() == "10184")
+                .expect("fixture issue should exist");
+            issue.summary = "A reliable issue summary stays readable when the workspace list is narrow and the source ticket title is exceptionally long. "
+                .repeat(18);
+            dashboard.rebuild_issue_views(false, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let row = visual
+        .debug_bounds("issue-row-10184")
+        .expect("mutated fixture issue row should be rendered");
+    assert!(row.size.width > px(0.) && row.size.height > px(0.));
+    assert!(
+        row.size.height < px(190.),
+        "long summary should remain clamped in a bounded row: {row:?}"
+    );
 }
 
 #[gpui_kit::test]

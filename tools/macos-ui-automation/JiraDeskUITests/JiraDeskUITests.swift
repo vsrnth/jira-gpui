@@ -189,6 +189,36 @@ final class JiraDeskUITests: XCTestCase {
             app.descendants(matching: .any)["issue-list-summary"],
             "issue-list-summary"
         )
+        let workspaceSummary = try require(
+            app.descendants(matching: .any)["issues-workspace-summary"],
+            "issues-workspace-summary"
+        )
+        XCTAssertTrue(
+            semanticText(workspaceSummary).contains("3 tickets with unread updates · 3 issues in progress"),
+            "issue workspace should summarize actual unread groups and unfiltered active issues"
+        )
+        XCTAssertGreaterThan(workspaceSummary.frame.width, 220, "workspace summary should remain scannable")
+        XCTAssertLessThan(workspaceSummary.frame.height, 90, "workspace summary should remain one compact band")
+        XCTAssertTrue(hostWindow.frame.contains(workspaceSummary.frame), "workspace summary should stay in the host window")
+        let reviewUpdates = try require(app.buttons["issues-review-updates"], "issues-review-updates")
+        let showActive = try require(app.buttons["issues-show-active"], "issues-show-active")
+        XCTAssertEqual(reviewUpdates.label.isEmpty ? reviewUpdates.title : reviewUpdates.label, "Review updates")
+        XCTAssertEqual(showActive.label.isEmpty ? showActive.title : showActive.label, "Show active work")
+        XCTAssertFalse(reviewUpdates.frame.intersects(showActive.frame), "workspace actions must not overlap")
+        reviewUpdates.click()
+        _ = try require(app.descendants(matching: .any)["update-list"], "update-list from issue workspace")
+        let navIssues = try require(app.descendants(matching: .any)["nav-issues"], "nav-issues after reviewing updates")
+        navIssues.click()
+        _ = try require(app.descendants(matching: .any)["issues-workspace-summary"], "issue workspace after returning")
+        let returnedShowActive = try require(app.buttons["issues-show-active"], "issues-show-active after returning")
+        returnedShowActive.click()
+        XCTAssertTrue(
+            waitForSemanticText("3 of 5 Jira issues", in: issueListSummary),
+            "Show active work should apply the local in-progress filter"
+        )
+        let summaryClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after active-work shortcut")
+        summaryClear.click()
+        XCTAssertTrue(waitForSemanticText("5 Jira issues", in: issueListSummary), "clearing should restore all loaded issues")
 
         // Selection is communicated by the narrow accent rail. The row surface itself should
         // remain the same neutral list surface as its neighbors.
@@ -199,6 +229,14 @@ final class JiraDeskUITests: XCTestCase {
         let neighboringRow = try require(
             app.descendants(matching: .any)["issue-row-DESK-171"],
             "issue-row-DESK-171 for selection styling"
+        )
+        XCTAssertGreaterThan(selectedRow.frame.height, 70, "issue rows should retain readable metadata")
+        XCTAssertLessThan(selectedRow.frame.height, 120, "issue rows should remain compact and scannable")
+        XCTAssertGreaterThan(neighboringRow.frame.height, 70, "neighboring issue row should retain readable metadata")
+        XCTAssertLessThan(neighboringRow.frame.height, 120, "neighboring issue row should remain compact")
+        XCTAssertTrue(
+            semanticText(selectedRow).contains("DESK-184 (Story)") && semanticText(selectedRow).contains("Priority:"),
+            "compact row should retain issue type, key, summary, and secondary metadata semantics"
         )
         selectedRow.click()
         XCTAssertTrue(selectedRow.exists, "selected issue row should remain discoverable")
