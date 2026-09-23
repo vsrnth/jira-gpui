@@ -1,5 +1,8 @@
-use crate::event_semantics::{
-    normalize_matching_user_set_ids, same_event_identity, union_matching_user_set_ids,
+use crate::{
+    event_semantics::{
+        normalize_matching_user_set_ids, same_event_identity, union_matching_user_set_ids,
+    },
+    issue_snapshot::preserve_cached_detail,
 };
 
 use std::{
@@ -259,22 +262,8 @@ impl IssueCachePort for InMemoryStore {
 
             for issue in commit.issues {
                 let key = (commit.site_id.clone(), issue.id.clone());
-                let issue = if !issue.detail_loaded {
-                    state
-                        .issues
-                        .get(&key)
-                        .map(|existing| {
-                            let mut merged = issue.clone();
-                            merged.description_text = existing.description_text.clone();
-                            merged.rich_description = existing.rich_description.clone();
-                            merged.linked_issues = existing.linked_issues.clone();
-                            merged.detail_loaded = existing.detail_loaded;
-                            merged
-                        })
-                        .unwrap_or(issue)
-                } else {
-                    issue
-                };
+                let mut issue = issue;
+                preserve_cached_detail(&mut issue, state.issues.get(&key));
                 state.issues.insert(key, issue);
             }
 
