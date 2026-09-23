@@ -16,95 +16,10 @@ pub(crate) const MAX_RICH_IMAGES: usize = policy::MAX_RICH_IMAGES;
 /// one global cap.
 #[cfg(test)]
 fn collect_rich_images(document: &RichTextDocument) -> Vec<RichImage> {
-    let mut images = Vec::new();
-    let mut seen = HashSet::new();
-    for block in &document.blocks {
-        collect_rich_images_from_block(block, &mut seen, &mut images);
-        if images.len() == MAX_RICH_IMAGES {
-            break;
-        }
-    }
-    for image in &document.fallback_images {
-        if seen.insert(image.attachment_id.clone()) {
-            images.push(image.clone());
-        }
-        if images.len() == MAX_RICH_IMAGES {
-            break;
-        }
-    }
-    images
-}
-
-#[cfg(test)]
-fn collect_rich_images_from_block(
-    block: &RichBlock,
-    seen: &mut HashSet<String>,
-    images: &mut Vec<RichImage>,
-) {
-    if images.len() == MAX_RICH_IMAGES {
-        return;
-    }
-    match block {
-        RichBlock::Image(image) => {
-            if seen.insert(image.attachment_id.clone()) {
-                images.push(image.clone());
-            }
-        }
-        RichBlock::BlockQuote(children)
-        | RichBlock::Panel {
-            content: children, ..
-        }
-        | RichBlock::Expand {
-            content: children, ..
-        }
-        | RichBlock::NestedExpand {
-            content: children, ..
-        } => {
-            for child in children {
-                collect_rich_images_from_block(child, seen, images);
-                if images.len() == MAX_RICH_IMAGES {
-                    break;
-                }
-            }
-        }
-        RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
-            for item in items {
-                for child in &item.blocks {
-                    collect_rich_images_from_block(child, seen, images);
-                    if images.len() == MAX_RICH_IMAGES {
-                        return;
-                    }
-                }
-            }
-        }
-        RichBlock::TaskList(items) => {
-            for item in items {
-                for child in &item.content {
-                    collect_rich_images_from_block(child, seen, images);
-                    if images.len() == MAX_RICH_IMAGES {
-                        return;
-                    }
-                }
-            }
-        }
-        RichBlock::Table(table) => {
-            for row in &table.rows {
-                for cell in &row.cells {
-                    for child in &cell.content {
-                        collect_rich_images_from_block(child, seen, images);
-                        if images.len() == MAX_RICH_IMAGES {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        RichBlock::Paragraph(_)
-        | RichBlock::Heading { .. }
-        | RichBlock::DecisionList(_)
-        | RichBlock::CodeBlock { .. }
-        | RichBlock::Placeholder { .. } => {}
-    }
+    collect_rich_images_with_context(document, 0)
+        .into_iter()
+        .map(|(image, _, _)| image)
+        .collect()
 }
 
 pub(crate) fn collect_detail_images_with_context(
@@ -199,75 +114,82 @@ fn collect_rich_images_from_block_with_context(
         }
         | RichBlock::NestedExpand {
             content: children, ..
-        } => {
-            for child in children {
-                collect_rich_images_from_block_with_context(
-                    child,
-                    seen,
-                    images,
-                    surface_ordinal,
-                    source,
-                );
-                if images.len() == MAX_RICH_IMAGES {
-                    break;
-                }
-            }
-        }
+        } => collect_rich_images_from_blocks_with_context(
+            children.iter(),
+            seen,
+            images,
+            surface_ordinal,
+            source,
+        ),
         RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => {
-            for item in items {
-                for child in &item.blocks {
-                    collect_rich_images_from_block_with_context(
-                        child,
-                        seen,
-                        images,
-                        surface_ordinal,
-                        source,
-                    );
-                    if images.len() == MAX_RICH_IMAGES {
-                        return;
-                    }
-                }
-            }
+            collect_rich_images_from_groups_with_context(
+                items.iter().map(|item| item.blocks.as_slice()),
+                seen,
+                images,
+                surface_ordinal,
+                source,
+            );
         }
         RichBlock::TaskList(items) => {
-            for item in items {
-                for child in &item.content {
-                    collect_rich_images_from_block_with_context(
-                        child,
-                        seen,
-                        images,
-                        surface_ordinal,
-                        source,
-                    );
-                    if images.len() == MAX_RICH_IMAGES {
-                        return;
-                    }
-                }
-            }
+            collect_rich_images_from_groups_with_context(
+                items.iter().map(|item| item.content.as_slice()),
+                seen,
+                images,
+                surface_ordinal,
+                source,
+            );
         }
-        RichBlock::Table(table) => {
-            for row in &table.rows {
-                for cell in &row.cells {
-                    for child in &cell.content {
-                        collect_rich_images_from_block_with_context(
-                            child,
-                            seen,
-                            images,
-                            surface_ordinal,
-                            source,
-                        );
-                        if images.len() == MAX_RICH_IMAGES {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+        RichBlock::Table(table) => collect_rich_images_from_groups_with_context(
+            table
+                .rows
+                .iter()
+                .flat_map(|row| row.cells.iter().map(|cell| cell.content.as_slice())),
+            seen,
+            images,
+            surface_ordinal,
+            source,
+        ),
         RichBlock::Paragraph(_)
         | RichBlock::Heading { .. }
         | RichBlock::DecisionList(_)
         | RichBlock::CodeBlock { .. }
         | RichBlock::Placeholder { .. } => {}
+    }
+}
+
+fn collect_rich_images_from_blocks_with_context<'a>(
+    blocks: impl IntoIterator<Item = &'a RichBlock>,
+    seen: &mut HashSet<String>,
+    images: &mut Vec<(RichImage, usize, ImageSource)>,
+    surface_ordinal: usize,
+    source: ImageSource,
+) {
+    for block in blocks {
+        if images.len() == MAX_RICH_IMAGES {
+            return;
+        }
+        collect_rich_images_from_block_with_context(block, seen, images, surface_ordinal, source);
+    }
+}
+
+fn collect_rich_images_from_groups_with_context<'a>(
+    groups: impl IntoIterator<Item = &'a [RichBlock]>,
+    seen: &mut HashSet<String>,
+    images: &mut Vec<(RichImage, usize, ImageSource)>,
+    surface_ordinal: usize,
+    source: ImageSource,
+) {
+    for blocks in groups {
+        collect_rich_images_from_blocks_with_context(
+            blocks.iter(),
+            seen,
+            images,
+            surface_ordinal,
+            source,
+        );
+        if images.len() == MAX_RICH_IMAGES {
+            return;
+        }
     }
 }
 
@@ -363,6 +285,46 @@ mod tests {
                 .map(|image| image.attachment_id.as_str())
                 .collect::<Vec<_>>(),
             ["task-image", "nested-image"]
+        );
+    }
+
+    #[test]
+    fn list_and_table_images_keep_depth_first_document_order() {
+        let document = RichTextDocument::new(
+            vec![RichBlock::BulletList(vec![
+                jira_domain::RichListItem {
+                    blocks: vec![
+                        RichBlock::Image(test_image("list-first")),
+                        RichBlock::Table(jira_domain::RichTable {
+                            rows: vec![jira_domain::RichTableRow {
+                                cells: vec![
+                                    jira_domain::RichTableCell {
+                                        header: false,
+                                        content: vec![RichBlock::Image(test_image("cell-first"))],
+                                    },
+                                    jira_domain::RichTableCell {
+                                        header: false,
+                                        content: vec![RichBlock::Image(test_image("cell-second"))],
+                                    },
+                                ],
+                            }],
+                        }),
+                    ],
+                },
+                jira_domain::RichListItem {
+                    blocks: vec![RichBlock::Image(test_image("list-last"))],
+                },
+            ])],
+            false,
+        );
+
+        let images = collect_rich_images(&document);
+        assert_eq!(
+            images
+                .iter()
+                .map(|image| image.attachment_id.as_str())
+                .collect::<Vec<_>>(),
+            ["list-first", "cell-first", "cell-second", "list-last"]
         );
     }
 
