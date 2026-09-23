@@ -46,6 +46,37 @@ struct NotificationStats {
     failures: usize,
 }
 
+fn notification_issue_ids(
+    request: &SyncRequest,
+    issues: &[jira_domain::Issue],
+) -> Option<HashSet<jira_domain::IssueId>> {
+    request.notification_assignees.as_deref().map(|assignees| {
+        issues
+            .iter()
+            .filter(|issue| {
+                issue
+                    .assignee
+                    .as_ref()
+                    .is_some_and(|assignee| assignees.contains(assignee))
+            })
+            .map(|issue| issue.id.clone())
+            .collect()
+    })
+}
+
+fn updated_since(
+    state: &SyncState,
+    mode: SyncMode,
+    overlap: Duration,
+) -> Option<time::OffsetDateTime> {
+    match mode {
+        SyncMode::Incremental => state
+            .last_incremental_succeeded_at
+            .map(|cursor| cursor - overlap),
+        SyncMode::Baseline | SyncMode::Reconciliation => None,
+    }
+}
+
 impl SyncService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -122,59 +153,14 @@ impl SyncService {
             .unwrap_or_else(|| {
                 SyncState::new(request.site_id.clone(), request.user_set_id.clone())
             });
-        let updated_since = match request.mode {
-            SyncMode::Incremental => previous_state
-                .last_incremental_succeeded_at
-                .map(|cursor| cursor - self.config.overlap),
-            SyncMode::Baseline | SyncMode::Reconciliation => None,
-        };
-
-        let mut pagination = IssuePagination::new(
-            self.config.page_size,
-            self.config.max_pages,
-            "invalid sync pagination configuration",
-        )?;
-        loop {
-            let page_cursor = pagination.prepare_request(cancellation)?;
-            let page = self
-                .jira
-                .fetch_issue_page(
-                    &fetch_scope.issue_fetch_request(
-                        updated_since,
-                        page_cursor,
-                        self.config.page_size,
-                    ),
-                    cancellation,
-                )
-                .await?;
-            let page_stats = pagination.accept_page(page, cancellation)?;
-            self.events.publish(ApplicationEvent::SyncPageFetched {
-                user_set_id: request.user_set_id.clone(),
-                page: page_stats.page,
-                issue_count: page_stats.issue_count,
-                total_issue_count: page_stats.total_issue_count,
-            });
-            if !pagination.has_next_page() {
-                break;
-            }
-        }
-
-        let pagination_outcome = pagination.finish();
+        let updated_since = updated_since(&previous_state, request.mode, self.config.overlap);
+        let pagination_outcome = self
+            .fetch_issues(request, fetch_scope, updated_since, cancellation)
+            .await?;
         let issues = pagination_outcome.issues;
         let pages_fetched = pagination_outcome.pages_fetched;
         let server_time = pagination_outcome.server_time;
-        let notification_issue_ids = request.notification_assignees.as_deref().map(|assignees| {
-            issues
-                .iter()
-                .filter(|issue| {
-                    issue
-                        .assignee
-                        .as_ref()
-                        .is_some_and(|assignee| assignees.contains(assignee))
-                })
-                .map(|issue| issue.id.clone())
-                .collect::<HashSet<_>>()
-        });
+        let notification_issue_ids = notification_issue_ids(request, &issues);
         let cursor = server_time.unwrap_or_else(|| self.clock.now());
         let existing = if request.mode.emits_updates() {
             self.cache
@@ -260,66 +246,113 @@ impl SyncService {
             delivered: 0,
             failures: 0,
         };
-        if mode.emits_updates() {
-            for event in inserted_events {
-                if !matches!(event.kind, UpdateKind::CommentAdded { .. })
-                    && notification_issue_ids
-                        .is_some_and(|issue_ids| !issue_ids.contains(&event.issue_id))
-                {
-                    let _ = self
-                        .cache
-                        .record_notification_delivery(
-                            &event.id,
-                            NotificationDelivery::SuppressedByPolicy,
-                            self.clock.now(),
-                        )
-                        .await;
-                    continue;
+        if !mode.emits_updates() {
+            return stats;
+        }
+        for event in inserted_events {
+            let outcome = self
+                .deliver_notification(event, notification_issue_ids)
+                .await;
+            stats.delivered += outcome.delivered;
+            stats.failures += outcome.failures;
+        }
+        stats
+    }
+
+    async fn fetch_issues(
+        &self,
+        request: &SyncRequest,
+        fetch_scope: &IssueFetchScope,
+        updated_since: Option<time::OffsetDateTime>,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::issue_pagination::IssuePaginationOutcome, ApplicationError> {
+        let mut pagination = IssuePagination::new(
+            self.config.page_size,
+            self.config.max_pages,
+            "invalid sync pagination configuration",
+        )?;
+        loop {
+            let page_cursor = pagination.prepare_request(cancellation)?;
+            let page = self
+                .jira
+                .fetch_issue_page(
+                    &fetch_scope.issue_fetch_request(
+                        updated_since,
+                        page_cursor,
+                        self.config.page_size,
+                    ),
+                    cancellation,
+                )
+                .await?;
+            let page_stats = pagination.accept_page(page, cancellation)?;
+            self.events.publish(ApplicationEvent::SyncPageFetched {
+                user_set_id: request.user_set_id.clone(),
+                page: page_stats.page,
+                issue_count: page_stats.issue_count,
+                total_issue_count: page_stats.total_issue_count,
+            });
+            if !pagination.has_next_page() {
+                break;
+            }
+        }
+        Ok(pagination.finish())
+    }
+
+    async fn deliver_notification(
+        &self,
+        event: &UpdateEvent,
+        notification_issue_ids: Option<&HashSet<jira_domain::IssueId>>,
+    ) -> NotificationStats {
+        if !matches!(event.kind, UpdateKind::CommentAdded { .. })
+            && notification_issue_ids.is_some_and(|ids| !ids.contains(&event.issue_id))
+        {
+            self.record_notification(event, NotificationDelivery::SuppressedByPolicy)
+                .await;
+            return NotificationStats {
+                delivered: 0,
+                failures: 0,
+            };
+        }
+        if !self.notification_policy.should_notify(event) {
+            self.record_notification(event, NotificationDelivery::SuppressedByPolicy)
+                .await;
+            return NotificationStats {
+                delivered: 0,
+                failures: 0,
+            };
+        }
+
+        let delivery = self
+            .notifications
+            .deliver(NotificationRequest {
+                event: event.clone(),
+            })
+            .await;
+        match delivery {
+            Ok(()) => {
+                self.record_notification(event, NotificationDelivery::Delivered)
+                    .await;
+                NotificationStats {
+                    delivered: 1,
+                    failures: 0,
                 }
-                if self.notification_policy.should_notify(event) {
-                    match self
-                        .notifications
-                        .deliver(NotificationRequest {
-                            event: event.clone(),
-                        })
-                        .await
-                    {
-                        Ok(()) => {
-                            stats.delivered += 1;
-                            let _ = self
-                                .cache
-                                .record_notification_delivery(
-                                    &event.id,
-                                    NotificationDelivery::Delivered,
-                                    self.clock.now(),
-                                )
-                                .await;
-                        }
-                        Err(_) => {
-                            stats.failures += 1;
-                            let _ = self
-                                .cache
-                                .record_notification_delivery(
-                                    &event.id,
-                                    NotificationDelivery::Unavailable,
-                                    self.clock.now(),
-                                )
-                                .await;
-                        }
-                    }
-                } else {
-                    let _ = self
-                        .cache
-                        .record_notification_delivery(
-                            &event.id,
-                            NotificationDelivery::SuppressedByPolicy,
-                            self.clock.now(),
-                        )
-                        .await;
+            }
+            Err(_) => {
+                self.record_notification(event, NotificationDelivery::Unavailable)
+                    .await;
+                NotificationStats {
+                    delivered: 0,
+                    failures: 1,
                 }
             }
         }
-        stats
+    }
+
+    async fn record_notification(&self, event: &UpdateEvent, delivery: NotificationDelivery) {
+        let _ = self
+            .cache
+            .record_notification_delivery(&event.id, delivery, self.clock.now())
+            .await;
     }
 
     fn validate(&self, request: &SyncRequest) -> Result<IssueFetchScope, ApplicationError> {
