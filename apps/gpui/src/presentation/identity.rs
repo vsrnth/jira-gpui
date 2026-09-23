@@ -27,13 +27,13 @@ impl IdentityDirectory {
             issue.assignee.as_ref(),
             issue.assignee_display_name.as_deref(),
         ) {
-            self.insert_if_missing(account_id.clone(), display_name);
+            self.insert(account_id.clone(), display_name);
         }
         if let (Some(account_id), Some(display_name)) = (
             issue.reporter.as_ref(),
             issue.reporter_display_name.as_deref(),
         ) {
-            self.insert_if_missing(account_id.clone(), display_name);
+            self.insert(account_id.clone(), display_name);
         }
     }
 
@@ -42,7 +42,7 @@ impl IdentityDirectory {
             return;
         };
         if let Some(display_name) = author.display_name.as_deref() {
-            self.insert_if_missing(author.account_id.clone(), display_name);
+            self.insert(author.account_id.clone(), display_name);
         }
     }
 
@@ -56,10 +56,6 @@ impl IdentityDirectory {
                 .entry(account_id)
                 .or_insert_with(|| display_name.to_owned());
         }
-    }
-
-    fn insert_if_missing(&mut self, account_id: jira_domain::AccountId, display_name: &str) {
-        self.insert(account_id, display_name);
     }
 
     pub fn display(&self, account_id: Option<&jira_domain::AccountId>, unassigned: &str) -> String {

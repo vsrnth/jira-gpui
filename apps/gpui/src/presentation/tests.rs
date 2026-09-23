@@ -1114,9 +1114,9 @@ fn groups_non_adjacent_events_without_reordering_groups_or_events() {
     let first = &issues[0];
     let second = &issues[1];
     let events = vec![
-        test_update_event("event-a1", first, datetime!(2026-08-16 10:00 UTC)),
+        test_update_event("event-a1", first, datetime!(2026-08-16 08:00 UTC)),
         test_update_event("event-b1", second, datetime!(2026-08-16 09:00 UTC)),
-        test_update_event("event-a2", first, datetime!(2026-08-16 08:00 UTC)),
+        test_update_event("event-a2", first, datetime!(2026-08-16 10:00 UTC)),
     ];
 
     let groups = update_groups_for_events(&events, &issues, &[]);
@@ -1143,6 +1143,10 @@ fn groups_non_adjacent_events_without_reordering_groups_or_events() {
             .map(|event| event.event_id.as_str())
             .collect::<Vec<_>>(),
         vec!["event-b1"]
+    );
+    assert_eq!(
+        groups[0].latest_occurred_at,
+        format_timestamp(datetime!(2026-08-16 10:00 UTC))
     );
 }
 

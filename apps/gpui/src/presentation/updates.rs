@@ -82,8 +82,8 @@ pub(crate) fn update_groups_for_events_with_offset(
         })
         .collect();
     let mut groups: Vec<UpdateGroupViewModel> = Vec::new();
-    let mut group_indexes: HashMap<jira_domain::IssueId, usize> = HashMap::new();
-    let mut latest_times: HashMap<jira_domain::IssueId, jira_domain::Timestamp> = HashMap::new();
+    let mut group_positions: HashMap<jira_domain::IssueId, (usize, jira_domain::Timestamp)> =
+        HashMap::new();
 
     for event in events {
         let issue = issues_by_id.get(&event.issue_id).copied();
@@ -94,22 +94,18 @@ pub(crate) fn update_groups_for_events_with_offset(
             offset,
         );
         let event_id = event.issue_id.clone();
-        if let Some(&group_index) = group_indexes.get(&event_id) {
-            let group = &mut groups[group_index];
+        if let Some((group_index, latest_time)) = group_positions.get_mut(&event_id) {
+            let group = &mut groups[*group_index];
             group.unread_count += usize::from(update.unread);
             group.unread |= update.unread;
             group.events.push(update);
-            if latest_times
-                .get(&event_id)
-                .is_none_or(|latest| event.occurred_at > *latest)
-            {
-                latest_times.insert(event_id, event.occurred_at);
+            if event.occurred_at > *latest_time {
+                *latest_time = event.occurred_at;
                 group.latest_occurred_at = format::format_timestamp_for(event.occurred_at, offset);
             }
         } else {
             let group_index = groups.len();
-            group_indexes.insert(event_id.clone(), group_index);
-            latest_times.insert(event_id, event.occurred_at);
+            group_positions.insert(event_id, (group_index, event.occurred_at));
             groups.push(UpdateGroupViewModel {
                 issue_id: update.issue_id.clone(),
                 issue_key: update.issue_key.clone(),
