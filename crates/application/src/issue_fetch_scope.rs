@@ -28,16 +28,8 @@ impl IssueFetchScope {
         duplicate_watchers_message: &'static str,
     ) -> Result<Self, ApplicationError> {
         validate_jql_scope(jql_scope.as_deref()).map_err(ApplicationError::invalid_input)?;
-        if let Some(assignees) = &assignees
-            && assignees.iter().collect::<HashSet<_>>().len() != assignees.len()
-        {
-            return Err(ApplicationError::invalid_input(duplicate_assignees_message));
-        }
-        if let Some(watchers) = &watchers
-            && watchers.iter().collect::<HashSet<_>>().len() != watchers.len()
-        {
-            return Err(ApplicationError::invalid_input(duplicate_watchers_message));
-        }
+        validate_unique_accounts(assignees.as_deref(), duplicate_assignees_message)?;
+        validate_unique_accounts(watchers.as_deref(), duplicate_watchers_message)?;
 
         Ok(Self {
             site_id,
@@ -65,6 +57,18 @@ impl IssueFetchScope {
             page_size,
         }
     }
+}
+
+fn validate_unique_accounts(
+    accounts: Option<&[AccountId]>,
+    error_message: &'static str,
+) -> Result<(), ApplicationError> {
+    if let Some(accounts) = accounts
+        && accounts.iter().collect::<HashSet<_>>().len() != accounts.len()
+    {
+        return Err(ApplicationError::invalid_input(error_message));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -188,5 +192,18 @@ mod tests {
         )
         .expect_err("duplicate watchers");
         assert_eq!(watcher_error.message(), "sync watchers must be unique");
+    }
+
+    #[test]
+    fn validates_duplicate_assignees_before_duplicate_watchers() {
+        let error = scope(
+            Some(vec![account("same"), account("same")]),
+            Some(vec![account("same"), account("same")]),
+            None,
+        )
+        .expect_err("both restrictions contain duplicates");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.message(), "pull assignees must be unique");
     }
 }
