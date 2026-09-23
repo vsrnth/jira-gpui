@@ -552,39 +552,32 @@ fn block_mentions_account(block: &RichBlock, account_id: &AccountId) -> bool {
         RichBlock::Paragraph(content) | RichBlock::Heading { content, .. } => {
             inline_mentions_account(content, account_id)
         }
-        RichBlock::BulletList(items) => items.iter().any(|item| {
-            item.blocks
-                .iter()
-                .any(|block| block_mentions_account(block, account_id))
-        }),
-        RichBlock::TaskList(items) => items.iter().any(|item| {
-            item.content
-                .iter()
-                .any(|block| block_mentions_account(block, account_id))
-        }),
+        RichBlock::BulletList(items) | RichBlock::OrderedList { items, .. } => items
+            .iter()
+            .any(|item| blocks_mention_account(&item.blocks, account_id)),
+        RichBlock::TaskList(items) => items
+            .iter()
+            .any(|item| blocks_mention_account(&item.content, account_id)),
         RichBlock::DecisionList(items) => items
             .iter()
             .any(|item| inline_mentions_account(&item.content, account_id)),
-        RichBlock::OrderedList { items, .. } => items.iter().any(|item| {
-            item.blocks
-                .iter()
-                .any(|block| block_mentions_account(block, account_id))
-        }),
-        RichBlock::BlockQuote(content) | RichBlock::Panel { content, .. } => content
-            .iter()
-            .any(|block| block_mentions_account(block, account_id)),
-        RichBlock::Expand { content, .. } | RichBlock::NestedExpand { content, .. } => content
-            .iter()
-            .any(|block| block_mentions_account(block, account_id)),
+        RichBlock::BlockQuote(content)
+        | RichBlock::Panel { content, .. }
+        | RichBlock::Expand { content, .. }
+        | RichBlock::NestedExpand { content, .. } => blocks_mention_account(content, account_id),
         RichBlock::Table(table) => table.rows.iter().any(|row| {
-            row.cells.iter().any(|cell| {
-                cell.content
-                    .iter()
-                    .any(|block| block_mentions_account(block, account_id))
-            })
+            row.cells
+                .iter()
+                .any(|cell| blocks_mention_account(&cell.content, account_id))
         }),
         RichBlock::CodeBlock { .. } | RichBlock::Image(_) | RichBlock::Placeholder { .. } => false,
     }
+}
+
+fn blocks_mention_account(blocks: &[RichBlock], account_id: &AccountId) -> bool {
+    blocks
+        .iter()
+        .any(|block| block_mentions_account(block, account_id))
 }
 
 fn inline_mentions_account(content: &[RichInline], account_id: &AccountId) -> bool {
@@ -604,8 +597,9 @@ mod tests {
     use crate::AccountId;
 
     use super::{
-        HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichImage, RichInline, RichListItem,
-        RichStatusColor, RichTable, RichTableCell, RichTableRow, RichTextDocument,
+        HORIZONTAL_RULE_LABEL, PanelKind, RichBlock, RichDecisionItem, RichDecisionState,
+        RichImage, RichInline, RichListItem, RichStatusColor, RichTable, RichTableCell,
+        RichTableRow, RichTaskItem, RichTaskState, RichTextDocument,
     };
 
     #[test]
@@ -864,6 +858,37 @@ mod tests {
         );
 
         assert!(document.mentions_account(&account));
+    }
+
+    #[test]
+    fn mentions_account_traverses_task_decision_and_table_content() {
+        let account = AccountId::new("account-1").expect("account");
+        let mention = || RichInline::Mention {
+            account_id: Some(account.clone()),
+            label: "@Asha".to_owned(),
+        };
+        let blocks = [
+            RichBlock::TaskList(vec![RichTaskItem {
+                state: RichTaskState::Todo,
+                content: vec![RichBlock::Paragraph(vec![mention()])],
+            }]),
+            RichBlock::DecisionList(vec![RichDecisionItem {
+                state: RichDecisionState::Decided,
+                content: vec![mention()],
+            }]),
+            RichBlock::Table(RichTable {
+                rows: vec![RichTableRow {
+                    cells: vec![RichTableCell {
+                        header: false,
+                        content: vec![RichBlock::Paragraph(vec![mention()])],
+                    }],
+                }],
+            }),
+        ];
+
+        for block in blocks {
+            assert!(RichTextDocument::new(vec![block], false).mentions_account(&account));
+        }
     }
 
     #[test]
