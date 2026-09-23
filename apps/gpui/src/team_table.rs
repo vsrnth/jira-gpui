@@ -21,14 +21,12 @@ use crate::presentation::{
     IdentityDirectory, describe_update_with_directory, format_timestamp_for,
 };
 
-const DENSE_COLUMN_COUNT: usize = 5;
+const DENSE_COLUMN_COUNT: usize = 4;
 const WIDE_COLUMN_COUNT: usize = 7;
-// Keep the compact table within the pane's fixed 596 px budget while reserving enough native
-// padding for the two high-scan fields. Ticket keys and statuses otherwise lose their final
-// characters even when the values themselves are short (for example, `DESK-171` and
-// `In Progress`). Activity remains intentionally compact; its complete value is still exposed
-// through the cell tooltip and accessibility label.
-const DENSE_COLUMN_WIDTHS: [f32; DENSE_COLUMN_COUNT] = [96.0, 170.0, 96.0, 112.0, 122.0];
+// The compact table has a fixed 596 px budget. Status is implicit because this tracker contains
+// only in-progress issues. Activity remains available in the wide table, local updates, and the
+// compact Age cell's tooltip and accessibility label.
+const DENSE_COLUMN_WIDTHS: [f32; DENSE_COLUMN_COUNT] = [96.0, 270.0, 150.0, 80.0];
 const WIDE_COLUMN_WIDTHS: [f32; WIDE_COLUMN_COUNT] =
     [100.0, 280.0, 150.0, 125.0, 260.0, 190.0, 85.0];
 
@@ -63,7 +61,6 @@ enum SortColumn {
     LatestUpdate,
     LastUpdated,
     Elapsed,
-    Activity,
 }
 
 impl SortColumn {
@@ -75,8 +72,8 @@ impl SortColumn {
             0 => Self::Key,
             1 => Self::Summary,
             2 => Self::Assignee,
+            3 if dense_columns => Self::Elapsed,
             3 => Self::Status,
-            4 if dense_columns => Self::Activity,
             4 => Self::LatestUpdate,
             5 => Self::LastUpdated,
             6 => Self::Elapsed,
@@ -350,7 +347,6 @@ impl TableDelegate for TeamTicketTableDelegate {
                 .width(width)
                 .sort(sort),
             SortColumn::Elapsed => Column::new("elapsed", "Age").width(width).sort(sort),
-            SortColumn::Activity => Column::new("activity", "Activity").width(width).sort(sort),
         }
     }
 
@@ -402,11 +398,11 @@ impl TableDelegate for TeamTicketTableDelegate {
         let Some(column) = SortColumn::from_index(col_ix, self.dense_columns) else {
             return div().into_any_element();
         };
-        let value = cell_value(row, column);
+        let (visible_value, accessible_value) = cell_values(row, column, self.dense_columns);
         // Keep the compact visual width while exposing the complete value (including the exact
-        // localized Updated timestamp in Activity cells) to assistive technology and keyboard
-        // users. The table's generic cell renderer truncates the visible text by design.
-        let value_for_tooltip = value.to_owned();
+        // localized Updated timestamp) to assistive technology and keyboard users. The table's
+        // generic cell renderer truncates the visible text by design.
+        let value_for_tooltip = accessible_value.to_owned();
         let accessibility_id = cell_accessibility_id(row, row_ix, col_ix, column);
         let mut cell = div()
             .id(accessibility_id.clone())
@@ -414,9 +410,9 @@ impl TableDelegate for TeamTicketTableDelegate {
             .truncate()
             .role(gpui_kit::accesskit::Role::Cell)
             .accessibility_id(accessibility_id)
-            .aria_label(value.to_owned())
+            .aria_label(accessible_value.to_owned())
             .tooltip(move |window, cx| Tooltip::new(value_for_tooltip.clone()).build(window, cx))
-            .child(value.to_owned());
+            .child(visible_value.to_owned());
         cell = match column {
             SortColumn::Key => cell.text_color(cx.theme().link).text_sm(),
             // In Progress is a workflow state, not a success outcome. Use the regular
@@ -426,7 +422,6 @@ impl TableDelegate for TeamTicketTableDelegate {
                 .text_color(age_color(row.elapsed_seconds, cx))
                 .text_xs(),
             SortColumn::LastUpdated => cell.text_color(cx.theme().muted_foreground).text_xs(),
-            SortColumn::Activity => cell.text_color(cx.theme().foreground).text_xs(),
             _ => cell.text_color(cx.theme().foreground).text_sm(),
         };
         cell.into_any_element()
@@ -451,8 +446,17 @@ fn cell_value(row: &TeamTicketRow, column: SortColumn) -> &str {
         SortColumn::LatestUpdate => row.latest_update.as_str(),
         SortColumn::LastUpdated => row.last_updated.as_str(),
         SortColumn::Elapsed => row.elapsed.as_str(),
-        SortColumn::Activity => row.activity.as_str(),
     }
+}
+
+fn cell_values(row: &TeamTicketRow, column: SortColumn, dense_columns: bool) -> (&str, &str) {
+    let visible_value = cell_value(row, column);
+    let accessible_value = if dense_columns && column == SortColumn::Elapsed {
+        row.activity.as_str()
+    } else {
+        visible_value
+    };
+    (visible_value, accessible_value)
 }
 
 fn cell_accessibility_id(
@@ -483,11 +487,7 @@ fn sort_column_is_visible(column: SortColumn, dense_columns: bool) -> bool {
     if dense_columns {
         matches!(
             column,
-            SortColumn::Key
-                | SortColumn::Summary
-                | SortColumn::Assignee
-                | SortColumn::Status
-                | SortColumn::Activity
+            SortColumn::Key | SortColumn::Summary | SortColumn::Assignee | SortColumn::Elapsed
         )
     } else {
         matches!(
@@ -596,7 +596,6 @@ fn compare_rows(left: &TeamTicketRow, right: &TeamTicketRow, column: SortColumn)
         // Age is a derived value, so its ascending order means freshest first. This is
         // intentionally different from the default LastUpdated sort, which is oldest first.
         SortColumn::Elapsed => left.elapsed_seconds.cmp(&right.elapsed_seconds),
-        SortColumn::Activity => left.last_updated_at.cmp(&right.last_updated_at),
     }
 }
 
@@ -671,7 +670,7 @@ mod tests {
 
     #[test]
     fn dense_column_widths_match_the_bounded_table_contract() {
-        assert_eq!(DENSE_COLUMN_WIDTHS, [96.0, 170.0, 96.0, 112.0, 122.0]);
+        assert_eq!(DENSE_COLUMN_WIDTHS, [96.0, 270.0, 150.0, 80.0]);
         assert_eq!(DENSE_COLUMN_WIDTHS.iter().sum::<f32>(), 596.0);
     }
 
@@ -787,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_activity_keeps_change_timestamp_and_age_discoverable() {
+    fn dense_age_is_visible_while_full_activity_is_accessible() {
         let table = TeamTicketTableDelegate::new(
             &sample_issues(),
             &[],
@@ -800,9 +799,18 @@ mod tests {
             .find(|row| row.key == "DESK-184")
             .unwrap();
 
-        assert!(row.activity.contains(&row.latest_update));
-        assert!(row.activity.contains(&row.last_updated));
-        assert!(row.activity.contains(&row.elapsed));
+        let (visible, accessible) = cell_values(row, SortColumn::Elapsed, true);
+        assert_eq!(visible, row.elapsed);
+        assert_eq!(accessible, row.activity);
+        assert_ne!(visible, accessible);
+        assert!(accessible.contains(&row.latest_update));
+        assert!(accessible.contains(&row.last_updated));
+
+        assert_eq!(
+            cell_values(row, SortColumn::Elapsed, false),
+            (row.elapsed.as_str(), row.elapsed.as_str()),
+            "wide table behavior must remain unchanged"
+        );
     }
 
     #[test]
@@ -897,7 +905,7 @@ mod tests {
 
     #[test]
     fn dense_columns_fit_compact_dashboard_content() {
-        assert_eq!(column_widths(true), &[96.0, 170.0, 96.0, 112.0, 122.0]);
+        assert_eq!(column_widths(true), &[96.0, 270.0, 150.0, 80.0]);
         assert_eq!(column_widths(true).iter().sum::<f32>(), 596.0);
         assert!(column_widths(false).iter().sum::<f32>() > 900.0);
     }
@@ -913,8 +921,7 @@ mod tests {
                 Some(SortColumn::Key),
                 Some(SortColumn::Summary),
                 Some(SortColumn::Assignee),
-                Some(SortColumn::Status),
-                Some(SortColumn::Activity),
+                Some(SortColumn::Elapsed),
             ]
         );
         assert_eq!(SortColumn::from_index(DENSE_COLUMN_COUNT, true), None);
@@ -922,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_refresh_restores_default_when_wide_only_sort_would_be_hidden() {
+    fn density_switch_preserves_age_sort_and_resets_wide_only_sort() {
         let mut table = TeamTicketTableDelegate::new_with_density(
             &sample_issues(),
             &[],
@@ -935,12 +942,12 @@ mod tests {
         table.sort_rows();
         table.set_dense_columns(true);
 
-        assert_eq!(table.sort_column, SortColumn::LastUpdated);
-        assert_eq!(table.sort_order, ColumnSort::Ascending);
+        assert_eq!(table.sort_column, SortColumn::Elapsed);
+        assert_eq!(table.sort_order, ColumnSort::Descending);
         assert_eq!(table.rows()[0].key, "DESK-171");
         assert_eq!(
-            table.sort_for_column(SortColumn::Activity),
-            ColumnSort::Default
+            table.sort_for_column(SortColumn::Elapsed),
+            ColumnSort::Descending
         );
 
         table.set_dense_columns(false);
@@ -951,12 +958,11 @@ mod tests {
         assert_eq!(table.sort_column, SortColumn::LastUpdated);
         assert_eq!(table.sort_order, ColumnSort::Ascending);
 
-        table.set_dense_columns(true);
-        table.sort_column = SortColumn::Activity;
-        table.sort_order = ColumnSort::Descending;
+        table.sort_column = SortColumn::Elapsed;
+        table.sort_order = ColumnSort::Ascending;
         table.sort_rows();
         table.set_dense_columns(false);
-        assert_eq!(table.sort_column, SortColumn::LastUpdated);
+        assert_eq!(table.sort_column, SortColumn::Elapsed);
         assert_eq!(table.sort_order, ColumnSort::Ascending);
     }
 

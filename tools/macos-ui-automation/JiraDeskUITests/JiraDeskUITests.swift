@@ -1356,28 +1356,43 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertTrue(hostWindow.frame.contains(detail.frame), "Team Tracker detail should remain inside the host window")
         XCTAssertTrue(table.frame.maxX <= detail.frame.minX + 2, "Team Tracker panes should not overlap")
 
-        for (key, expectedStatus) in [("DESK-171", "In Progress"), ("DESK-184", "In Progress")] {
+        let expectedRows = [
+            (key: "DESK-171", summary: "Read-only Jira desktop MVP", assignee: "Amina Yusuf", age: "2d"),
+            (key: "DESK-184", summary: "Surface Jira update notifications in the desktop feed", assignee: "Amina Yusuf", age: "1d"),
+        ]
+        let compactCells = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "team-ticket-cell-")
+        )
+        for expected in expectedRows {
             let keyCell = try require(
-                app.descendants(matching: .any)["team-ticket-key-\(key)"],
-                "team-ticket-key-\(key)"
+                app.descendants(matching: .any)["team-ticket-key-\(expected.key)"],
+                "team-ticket-key-\(expected.key)"
             )
-            let statusCell = try require(
-                app.descendants(matching: .any)["team-ticket-status-\(key)"],
-                "team-ticket-status-\(key)"
-            )
-            let keySemanticText = [keyCell.label, keyCell.title, keyCell.value as? String ?? ""]
-                .joined(separator: " ")
-            let statusSemanticText = [statusCell.label, statusCell.title, statusCell.value as? String ?? ""]
-                .joined(separator: " ")
-            XCTAssertTrue(keySemanticText.contains(key), "dense table should expose exact ticket key identity for \(key)")
-            XCTAssertTrue(statusSemanticText.contains(expectedStatus), "dense table should expose exact status for \(key)")
-            XCTAssertGreaterThanOrEqual(keyCell.frame.width, 74, "ticket key cell must retain readable width for \(key)")
-            XCTAssertGreaterThanOrEqual(statusCell.frame.width, 88, "status cell must retain readable width for \(key)")
-            XCTAssertLessThan(keyCell.frame.width, 110, "ticket key cell must remain within its dense column")
-            XCTAssertLessThan(statusCell.frame.width, 125, "status cell must remain within its dense column")
-            XCTAssertTrue(table.frame.contains(keyCell.frame), "ticket key cell should remain inside the table")
-            XCTAssertTrue(table.frame.contains(statusCell.frame), "status cell should remain inside the table")
-            XCTAssertFalse(keyCell.frame.intersects(statusCell.frame), "key and status cells must not overlap for \(key)")
+            var rowCells: [XCUIElement] = []
+            for index in 0..<compactCells.count {
+                let cell = compactCells.element(boundBy: index)
+                if abs(cell.frame.midY - keyCell.frame.midY) <= 2 {
+                    rowCells.append(cell)
+                }
+            }
+            rowCells.sort { $0.frame.minX < $1.frame.minX }
+            XCTAssertEqual(rowCells.count, 3, "compact row should expose Summary, Assignee, and Age for \(expected.key)")
+            guard rowCells.count == 3 else { continue }
+
+            XCTAssertTrue(semanticText(keyCell).contains(expected.key), "compact table should expose ticket key \(expected.key)")
+            XCTAssertTrue(semanticText(rowCells[0]).contains(expected.summary), "compact table should expose summary for \(expected.key)")
+            XCTAssertTrue(semanticText(rowCells[1]).contains(expected.assignee), "compact table should expose assignee for \(expected.key)")
+            XCTAssertTrue(semanticText(rowCells[2]).contains(expected.age), "compact table should expose age for \(expected.key)")
+            XCTAssertEqual(rowCells[0].frame.minX - keyCell.frame.minX, 96, accuracy: 3, "Ticket should retain its 96 px compact column")
+            XCTAssertEqual(rowCells[1].frame.minX - rowCells[0].frame.minX, 270, accuracy: 3, "Summary should retain its 270 px compact column")
+            XCTAssertEqual(rowCells[2].frame.minX - rowCells[1].frame.minX, 150, accuracy: 3, "Assignee should retain its 150 px compact column")
+            XCTAssertEqual(rowCells[2].frame.width + 16, 80, accuracy: 3, "Age content plus cell padding should retain its 80 px compact column")
+            for cell in [keyCell] + rowCells {
+                XCTAssertTrue(table.frame.contains(cell.frame), "compact cell should remain inside the table for \(expected.key)")
+            }
+            for index in 1..<rowCells.count {
+                XCTAssertFalse(rowCells[index - 1].frame.intersects(rowCells[index].frame), "compact cells must not overlap for \(expected.key)")
+            }
         }
     }
 
