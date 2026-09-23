@@ -380,98 +380,134 @@ fn append_block_text(block: &RichBlock, output: &mut PlainTextBuilder, depth: us
     }
     match block {
         RichBlock::Paragraph(content) | RichBlock::Heading { content, .. } => {
-            append_inline_text(content, output, depth + 1);
-            output.push_str("\n");
+            append_paragraph_text(content, output, depth + 1);
         }
-        RichBlock::BulletList(items) => {
-            for item in items {
-                if output.truncated {
-                    break;
-                }
-                output.push_str("• ");
-                append_list_item_text(item, output, depth + 1);
-            }
-        }
-        RichBlock::TaskList(items) => {
-            for item in items {
-                if output.truncated {
-                    break;
-                }
-                output.push_str(match item.state {
-                    RichTaskState::Todo => "☐ ",
-                    RichTaskState::Done => "☑ ",
-                });
-                for child in &item.content {
-                    append_block_text(child, output, depth + 1);
-                }
-            }
-        }
-        RichBlock::DecisionList(items) => {
-            for item in items {
-                if output.truncated {
-                    break;
-                }
-                output.push_str(match item.state {
-                    RichDecisionState::Decided => "✓ ",
-                    RichDecisionState::Undecided => "? ",
-                    RichDecisionState::Unknown => "• ",
-                });
-                append_inline_text(&item.content, output, depth + 1);
-                output.push_str("\n");
-            }
-        }
+        RichBlock::BulletList(items) => append_bullet_list_text(items, output, depth + 1),
+        RichBlock::TaskList(items) => append_task_list_text(items, output, depth + 1),
+        RichBlock::DecisionList(items) => append_decision_list_text(items, output, depth + 1),
         RichBlock::OrderedList { order, items } => {
-            for (offset, item) in items.iter().enumerate() {
-                if output.truncated {
-                    break;
-                }
-                output.push_str(&(order.saturating_add(offset as u32)).to_string());
-                output.push_str(". ");
-                append_list_item_text(item, output, depth + 1);
-            }
+            append_ordered_list_text(*order, items, output, depth + 1)
         }
         RichBlock::CodeBlock { text, .. } => {
             output.push_str(text);
             output.push_str("\n");
         }
         RichBlock::BlockQuote(content) | RichBlock::Panel { content, .. } => {
-            for child in content {
-                if output.truncated {
-                    break;
-                }
-                append_block_text(child, output, depth + 1);
-            }
+            append_nested_blocks_text(content, output, depth + 1);
         }
         RichBlock::Expand { title, content } | RichBlock::NestedExpand { title, content } => {
-            if let Some(title) = title {
-                output.push_str(title);
-                output.push_str("\n");
-            }
-            for child in content {
-                if output.truncated {
-                    break;
-                }
-                append_block_text(child, output, depth + 1);
-            }
+            append_expand_text(title.as_deref(), content, output, depth + 1);
         }
         RichBlock::Table(table) => append_table_text(table, output, depth + 1),
-        RichBlock::Image(image) => {
-            output.push_str("[image: ");
-            output.push_str(
-                image
-                    .alt_text
-                    .as_deref()
-                    .filter(|alt| !alt.is_empty())
-                    .unwrap_or(&image.filename),
-            );
-            output.push_str("]\n");
+        RichBlock::Image(image) => append_image_text(image, output),
+        RichBlock::Placeholder { label } => append_placeholder_text(label, output),
+    }
+}
+
+fn append_paragraph_text(content: &[RichInline], output: &mut PlainTextBuilder, depth: usize) {
+    append_inline_text(content, output, depth);
+    output.push_str("\n");
+}
+
+fn append_bullet_list_text(items: &[RichListItem], output: &mut PlainTextBuilder, depth: usize) {
+    for item in items {
+        if output.truncated {
+            break;
         }
-        RichBlock::Placeholder { label } if label == HORIZONTAL_RULE_LABEL => {}
-        RichBlock::Placeholder { label } => {
-            output.push_str(label);
-            output.push_str("\n");
+        output.push_str("• ");
+        append_list_item_text(item, output, depth);
+    }
+}
+
+fn append_task_list_text(items: &[RichTaskItem], output: &mut PlainTextBuilder, depth: usize) {
+    for item in items {
+        if output.truncated {
+            break;
+        }
+        output.push_str(match item.state {
+            RichTaskState::Todo => "☐ ",
+            RichTaskState::Done => "☑ ",
+        });
+        for child in &item.content {
+            append_block_text(child, output, depth);
         }
     }
+}
+
+fn append_decision_list_text(
+    items: &[RichDecisionItem],
+    output: &mut PlainTextBuilder,
+    depth: usize,
+) {
+    for item in items {
+        if output.truncated {
+            break;
+        }
+        output.push_str(match item.state {
+            RichDecisionState::Decided => "✓ ",
+            RichDecisionState::Undecided => "? ",
+            RichDecisionState::Unknown => "• ",
+        });
+        append_paragraph_text(&item.content, output, depth);
+    }
+}
+
+fn append_ordered_list_text(
+    order: u32,
+    items: &[RichListItem],
+    output: &mut PlainTextBuilder,
+    depth: usize,
+) {
+    for (offset, item) in items.iter().enumerate() {
+        if output.truncated {
+            break;
+        }
+        output.push_str(&order.saturating_add(offset as u32).to_string());
+        output.push_str(". ");
+        append_list_item_text(item, output, depth);
+    }
+}
+
+fn append_nested_blocks_text(blocks: &[RichBlock], output: &mut PlainTextBuilder, depth: usize) {
+    for block in blocks {
+        if output.truncated {
+            break;
+        }
+        append_block_text(block, output, depth);
+    }
+}
+
+fn append_expand_text(
+    title: Option<&str>,
+    content: &[RichBlock],
+    output: &mut PlainTextBuilder,
+    depth: usize,
+) {
+    if let Some(title) = title {
+        output.push_str(title);
+        output.push_str("\n");
+    }
+    append_nested_blocks_text(content, output, depth);
+}
+
+fn append_image_text(image: &RichImage, output: &mut PlainTextBuilder) {
+    output.push_str("[image: ");
+    output.push_str(
+        image
+            .alt_text
+            .as_deref()
+            .filter(|alt| !alt.is_empty())
+            .unwrap_or(&image.filename),
+    );
+    output.push_str("]\n");
+}
+
+fn append_placeholder_text(label: &str, output: &mut PlainTextBuilder) {
+    if label == HORIZONTAL_RULE_LABEL {
+        return;
+    }
+    output.push_str(label);
+    output.push_str("\n");
 }
 
 fn append_list_item_text(item: &RichListItem, output: &mut PlainTextBuilder, depth: usize) {
@@ -732,6 +768,70 @@ mod tests {
         let document = RichTextDocument::new(vec![RichBlock::Table(table)], false);
 
         assert_eq!(document.plain_text(), "Criterion | Expected result");
+    }
+
+    #[test]
+    fn list_and_expand_blocks_keep_their_text_order_and_prefixes() {
+        let text = |value: &str| RichInline::Text {
+            text: value.to_owned(),
+            marks: Vec::new(),
+        };
+        let paragraph = |value: &str| RichBlock::Paragraph(vec![text(value)]);
+        let document = RichTextDocument::new(
+            vec![
+                RichBlock::BulletList(vec![RichListItem {
+                    blocks: vec![
+                        paragraph("bullet"),
+                        RichBlock::CodeBlock {
+                            language: None,
+                            text: "body".to_owned(),
+                        },
+                    ],
+                }]),
+                RichBlock::OrderedList {
+                    order: 3,
+                    items: vec![
+                        RichListItem {
+                            blocks: vec![paragraph("alpha")],
+                        },
+                        RichListItem {
+                            blocks: vec![paragraph("beta")],
+                        },
+                    ],
+                },
+                RichBlock::TaskList(vec![
+                    RichTaskItem {
+                        state: RichTaskState::Todo,
+                        content: vec![paragraph("open")],
+                    },
+                    RichTaskItem {
+                        state: RichTaskState::Done,
+                        content: vec![paragraph("done")],
+                    },
+                ]),
+                RichBlock::DecisionList(vec![
+                    RichDecisionItem {
+                        state: RichDecisionState::Decided,
+                        content: vec![text("approved")],
+                    },
+                    RichDecisionItem {
+                        state: RichDecisionState::Undecided,
+                        content: vec![text("pending")],
+                    },
+                ]),
+                RichBlock::Expand {
+                    title: Some("Details".to_owned()),
+                    content: vec![paragraph("nested")],
+                },
+                RichBlock::horizontal_rule(),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            document.plain_text(),
+            "• bullet\nbody\n3. alpha\n4. beta\n☐ open\n☑ done\n✓ approved\n? pending\nDetails\nnested"
+        );
     }
 
     #[test]
