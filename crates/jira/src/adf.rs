@@ -183,13 +183,29 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
         .and_then(Value::as_str)
         .unwrap_or_default();
     let content = object.get("content").and_then(Value::as_array);
-    let block = match kind {
+    Some(
+        parse_text_block(kind, object, content, depth, state)
+            .or_else(|| parse_container_block(kind, object, content, depth, state))
+            .or_else(|| parse_embedded_block(kind, object, content, depth, state))
+            .or_else(|| parse_card_or_status_block(kind, object, state))
+            .unwrap_or_else(unsupported_block),
+    )
+}
+
+fn parse_text_block(
+    kind: &str,
+    object: &serde_json::Map<String, Value>,
+    content: Option<&Vec<Value>>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Option<RichBlock> {
+    Some(match kind {
         "paragraph" => match object.get("content") {
             None => RichBlock::Paragraph(Vec::new()),
-            Some(content) => match content.as_array() {
-                Some(content) => RichBlock::Paragraph(parse_inlines(content, depth + 1, state)),
-                None => malformed_block(state),
-            },
+            Some(Value::Array(content)) => {
+                RichBlock::Paragraph(parse_inlines(content, depth + 1, state))
+            }
+            Some(_) => malformed_block(state),
         },
         "heading" => match content {
             Some(content) => RichBlock::Heading {
@@ -205,29 +221,6 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
             },
             None => malformed_block(state),
         },
-        "bulletList" => match content {
-            Some(content) => RichBlock::BulletList(parse_list_items(content, depth + 1, state)),
-            None => malformed_block(state),
-        },
-        "orderedList" => match content {
-            Some(content) => RichBlock::OrderedList {
-                order: object
-                    .get("attrs")
-                    .and_then(Value::as_object)
-                    .and_then(|attrs| attrs.get("order"))
-                    .and_then(Value::as_u64)
-                    .and_then(|order| u32::try_from(order).ok())
-                    .unwrap_or(1),
-                items: parse_list_items(content, depth + 1, state),
-            },
-            None => malformed_block(state),
-        },
-        "taskList" => parse_task_list_block(object, depth, state),
-        "decisionList" => parse_decision_list_block(object, depth, state),
-        "listItem" => match content {
-            Some(content) => RichBlock::BlockQuote(parse_blocks(content, depth + 1, state)),
-            None => malformed_block(state),
-        },
         "codeBlock" => match content {
             Some(content) => RichBlock::CodeBlock {
                 language: object
@@ -241,98 +234,145 @@ fn parse_block(value: &Value, depth: usize, state: &mut AdfParserState<'_>) -> O
             },
             None => malformed_block(state),
         },
-        "blockquote" => match content {
+        _ => return None,
+    })
+}
+
+fn parse_container_block(
+    kind: &str,
+    object: &serde_json::Map<String, Value>,
+    content: Option<&Vec<Value>>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Option<RichBlock> {
+    match kind {
+        "bulletList" => Some(match content {
+            Some(content) => RichBlock::BulletList(parse_list_items(content, depth + 1, state)),
+            None => malformed_block(state),
+        }),
+        "orderedList" => Some(match content {
+            Some(content) => RichBlock::OrderedList {
+                order: object
+                    .get("attrs")
+                    .and_then(Value::as_object)
+                    .and_then(|attrs| attrs.get("order"))
+                    .and_then(Value::as_u64)
+                    .and_then(|order| u32::try_from(order).ok())
+                    .unwrap_or(1),
+                items: parse_list_items(content, depth + 1, state),
+            },
+            None => malformed_block(state),
+        }),
+        "listItem" | "blockquote" => Some(match content {
             Some(content) => RichBlock::BlockQuote(parse_blocks(content, depth + 1, state)),
             None => malformed_block(state),
-        },
+        }),
         "panel" => {
-            let kind = object
+            let panel = object
                 .get("attrs")
                 .and_then(Value::as_object)
                 .and_then(|attrs| attrs.get("panelType"))
                 .and_then(Value::as_str)
                 .and_then(panel_kind);
-            match (kind, content) {
+            Some(match (panel, content) {
                 (Some(kind), Some(content)) => RichBlock::Panel {
                     kind,
                     content: parse_blocks(content, depth + 1, state),
                 },
                 _ => malformed_block(state),
-            }
+            })
         }
-        "expand" => parse_expand_block(object, depth, state, false),
-        "nestedExpand" => parse_expand_block(object, depth, state, true),
-        "doc" => RichBlock::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
-        },
-        "media" => parse_media_node(object, state),
-        "mediaSingle" | "mediaGroup" => match content {
-            Some(content) if state.media.is_some() => {
+        "taskList" => Some(parse_task_list_block(object, depth, state)),
+        "decisionList" => Some(parse_decision_list_block(object, depth, state)),
+        "table" => Some(parse_table_block(object, depth, state)),
+        _ => None,
+    }
+}
+
+fn parse_embedded_block(
+    kind: &str,
+    object: &serde_json::Map<String, Value>,
+    content: Option<&Vec<Value>>,
+    depth: usize,
+    state: &mut AdfParserState<'_>,
+) -> Option<RichBlock> {
+    match kind {
+        "expand" => Some(parse_expand_block(object, depth, state, false)),
+        "nestedExpand" => Some(parse_expand_block(object, depth, state, true)),
+        "media" => Some(parse_media_node(object, state)),
+        "mediaSingle" | "mediaGroup" => Some(match (content, state.media.is_some()) {
+            (Some(content), true) => {
                 let blocks = parse_media_container(content, depth, state);
                 match blocks.as_slice() {
                     [block] => block.clone(),
                     _ => RichBlock::BlockQuote(blocks),
                 }
             }
-            _ => RichBlock::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
+            _ => unsupported_block(),
+        }),
+        "mediaInline" => Some(media_inline_as_block(parse_media_inline_attachment_card(
+            object, state,
+        ))),
+        "rule" => Some(
+            if object.get("content").is_none() && object.get("attrs").is_none() {
+                RichBlock::horizontal_rule()
+            } else {
+                malformed_block(state)
             },
-        },
-        "mediaInline" => match parse_media_inline_attachment_card(object, state) {
-            RichInline::AttachmentCard(card) => {
-                RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
-            }
-            RichInline::Placeholder { label } => RichBlock::Placeholder { label },
-            _ => RichBlock::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
-            },
-        },
-        "rule" if object.get("content").is_none() && object.get("attrs").is_none() => {
-            RichBlock::horizontal_rule()
+        ),
+        _ => None,
+    }
+}
+
+fn parse_card_or_status_block(
+    kind: &str,
+    object: &serde_json::Map<String, Value>,
+    state: &mut AdfParserState<'_>,
+) -> Option<RichBlock> {
+    match kind {
+        "status" => Some(RichBlock::Paragraph(vec![parse_status_inline(
+            object, state,
+        )])),
+        "inlineCard" | "blockCard" => Some(card_inline_as_block(parse_inline_attachment_card(
+            object, state,
+        ))),
+        "doc" | "tableCell" | "tableHeader" | "tableRow" | "blockTaskItem" | "emoji" | "date" => {
+            Some(unsupported_block())
         }
-        "rule" => malformed_block(state),
-        "table" => parse_table_block(object, depth, state),
-        "status" => RichBlock::Paragraph(vec![parse_status_inline(object, state)]),
-        "tableCell" | "tableHeader" | "tableRow" | "blockTaskItem" | "emoji" | "date" => {
-            RichBlock::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
-            }
+        _ => None,
+    }
+}
+
+fn media_inline_as_block(inline: RichInline) -> RichBlock {
+    match inline {
+        RichInline::AttachmentCard(card) => {
+            RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
         }
-        "inlineCard" => match parse_inline_attachment_card(object, state) {
-            RichInline::AttachmentCard(card) => {
-                RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
-            }
-            RichInline::Text { text, marks } => {
-                RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
-            }
-            RichInline::JiraIssueLink(link) => {
-                RichBlock::Paragraph(vec![RichInline::JiraIssueLink(link)])
-            }
-            RichInline::Placeholder { label } => RichBlock::Placeholder { label },
-            _ => RichBlock::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
-            },
-        },
-        "blockCard" => match parse_inline_attachment_card(object, state) {
-            RichInline::AttachmentCard(card) => {
-                RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
-            }
-            RichInline::Text { text, marks } => {
-                RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
-            }
-            RichInline::JiraIssueLink(link) => {
-                RichBlock::Paragraph(vec![RichInline::JiraIssueLink(link)])
-            }
-            RichInline::Placeholder { label } => RichBlock::Placeholder { label },
-            _ => RichBlock::Placeholder {
-                label: UNSUPPORTED_CONTENT.to_owned(),
-            },
-        },
-        _ => RichBlock::Placeholder {
-            label: UNSUPPORTED_CONTENT.to_owned(),
-        },
-    };
-    Some(block)
+        RichInline::Placeholder { label } => RichBlock::Placeholder { label },
+        _ => unsupported_block(),
+    }
+}
+
+fn card_inline_as_block(inline: RichInline) -> RichBlock {
+    match inline {
+        RichInline::AttachmentCard(card) => {
+            RichBlock::Paragraph(vec![RichInline::AttachmentCard(card)])
+        }
+        RichInline::Text { text, marks } => {
+            RichBlock::Paragraph(vec![RichInline::Text { text, marks }])
+        }
+        RichInline::JiraIssueLink(link) => {
+            RichBlock::Paragraph(vec![RichInline::JiraIssueLink(link)])
+        }
+        RichInline::Placeholder { label } => RichBlock::Placeholder { label },
+        _ => unsupported_block(),
+    }
+}
+
+fn unsupported_block() -> RichBlock {
+    RichBlock::Placeholder {
+        label: UNSUPPORTED_CONTENT.to_owned(),
+    }
 }
 
 fn parse_table_block(
