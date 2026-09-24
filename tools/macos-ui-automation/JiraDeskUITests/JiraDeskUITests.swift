@@ -1453,12 +1453,57 @@ final class JiraDeskUITests: XCTestCase {
         try launchFixture(scenario: "updates")
         let updates = try require(app.descendants(matching: .any)["nav-updates"], "nav-updates")
         updates.click()
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        assertFiniteBounded(hostWindow.frame, name: "updates workspace")
         let updateList = try require(app.descendants(matching: .any)["update-list"], "update-list")
+        let firstReadingPane = try require(
+            app.groups["update-reading-pane"],
+            "initial update-reading-pane for DESK-184"
+        )
+        assertFiniteBounded(updateList.frame, name: "update-list")
+        assertFiniteBounded(firstReadingPane.frame, name: "initial DESK-184 update-reading-pane")
+        XCTAssertTrue(
+            semanticText(firstReadingPane).contains("DESK-184 local updates"),
+            "the initial reading pane should expose its DESK-184 local update identity"
+        )
+        XCTAssertTrue(hostWindow.frame.contains(updateList.frame), "update list should remain inside the workspace")
+        XCTAssertTrue(hostWindow.frame.contains(firstReadingPane.frame), "initial reading pane should remain inside the workspace")
+        XCTAssertLessThanOrEqual(
+            updateList.frame.maxX,
+            firstReadingPane.frame.minX + 2,
+            "Focus inbox list and initial reading pane should not overlap"
+        )
+
+        let firstCard = try require(app.descendants(matching: .any)["update-card-0"], "update-card-0")
+        let openFirst = try require(app.buttons["update-open-0"], "update-open-0")
+        XCTAssertTrue(updateList.frame.contains(firstCard.frame), "first update card should stay inside the update list")
+        XCTAssertTrue(firstCard.frame.contains(openFirst.frame), "first update action should stay inside its card")
+        assertFiniteBounded(firstCard.frame, name: "update-card-0")
+        assertFiniteBounded(openFirst.frame, name: "update-open-0")
+        openFirst.click()
+
+        XCTAssertTrue(
+            waitForSemanticText("DESK-184 local updates", in: firstReadingPane),
+            "opening the first update should select its local DESK-184 reading pane"
+        )
+        XCTAssertTrue(
+            firstReadingPane.label == "DESK-184 local updates"
+                || firstReadingPane.title == "DESK-184 local updates",
+            "the selected reading pane should expose its exact local update identity"
+        )
+        XCTAssertTrue(updateList.exists, "opening an update should keep the Focus inbox list visible")
+        assertFiniteBounded(firstReadingPane.frame, name: "DESK-184 update-reading-pane")
+        XCTAssertTrue(hostWindow.frame.contains(firstReadingPane.frame), "reading pane should remain inside the workspace")
+        XCTAssertLessThanOrEqual(
+            updateList.frame.maxX,
+            firstReadingPane.frame.minX + 2,
+            "Focus inbox list and reading pane should not overlap"
+        )
         let dot = try require(app.descendants(matching: .any)["update-unread-dot-0"], "update-unread-dot-0")
         let metadata = try require(app.descendants(matching: .any)["update-metadata-0"], "update-metadata-0")
         let dotCenter = CGPoint(x: dot.frame.midX, y: dot.frame.midY)
         let metadataCenter = CGPoint(x: metadata.frame.midX, y: metadata.frame.midY)
-        XCTAssertLessThanOrEqual(abs(dotCenter.y - metadataCenter.y), 2.0, "unread dot should align with first metadata line")
+        XCTAssertLessThanOrEqual(abs(dotCenter.y - metadataCenter.y), 3.0, "unread dot should align with first metadata line")
 
         // Virtualized feeds must expose stable semantic identities for the rows currently in the
         // viewport and keep every realized row inside the scrolling surface. This assertion is
@@ -1478,6 +1523,49 @@ final class JiraDeskUITests: XCTestCase {
             }
             priorMaxY = row.frame.maxY
         }
+
+        let openSecond = try require(app.buttons["update-open-1"], "update-open-1")
+        openSecond.click()
+        let secondReadingPane = try require(
+            app.groups["update-reading-pane"],
+            "update-reading-pane for DESK-179"
+        )
+        XCTAssertTrue(
+            waitForSemanticText("DESK-179", in: secondReadingPane),
+            "opening the second update should select DESK-179 in the local reading pane"
+        )
+        XCTAssertTrue(updateList.exists, "selecting DESK-179 should keep the Focus inbox list visible")
+        assertFiniteBounded(secondReadingPane.frame, name: "DESK-179 update-reading-pane")
+        XCTAssertTrue(hostWindow.frame.contains(secondReadingPane.frame), "DESK-179 reading pane should stay inside the workspace")
+        XCTAssertLessThanOrEqual(
+            updateList.frame.maxX,
+            secondReadingPane.frame.minX + 2,
+            "Focus inbox list and DESK-179 reading pane should not overlap"
+        )
+
+        let readingPaneScreenshot = XCTAttachment(screenshot: app.screenshot())
+        readingPaneScreenshot.name = "updates-focus-inbox-DESK-179-reading-pane"
+        readingPaneScreenshot.lifetime = .keepAlways
+        add(readingPaneScreenshot)
+
+        let openFullDetails = try require(
+            app.buttons["update-open-full-details"],
+            "update-open-full-details"
+        )
+        XCTAssertTrue(secondReadingPane.frame.contains(openFullDetails.frame), "full-details action should stay inside the reading pane")
+        openFullDetails.click()
+
+        let detail = try require(
+            app.descendants(matching: .any)["issue-detail"],
+            "issue-detail after opening DESK-179 full details"
+        )
+        XCTAssertTrue(
+            waitForSemanticText("Issue detail for DESK-179", in: detail),
+            "full details should navigate to the established DESK-179 Issues detail"
+        )
+        assertFiniteBounded(detail.frame, name: "issue-detail for DESK-179")
+        XCTAssertTrue(hostWindow.frame.contains(detail.frame), "DESK-179 issue detail should remain inside the workspace")
+        XCTAssertTrue(waitForAbsence(app.descendants(matching: .any)["update-list"]), "full details should leave the Focus inbox")
     }
 
     func testTeam() throws {

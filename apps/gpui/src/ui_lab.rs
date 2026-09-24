@@ -36,6 +36,8 @@ pub enum UiLabScenario {
     Issues,
     /// The local update ledger surface.
     Updates,
+    /// The local update ledger with the first ticket's mobile reading pane open.
+    UpdatesReading,
     /// The team tracker surface.
     Team,
     /// The settings surface in disconnected preview mode.
@@ -50,6 +52,7 @@ impl UiLabScenario {
             Self::OnboardingDialog => "onboarding-dialog",
             Self::Issues => "issues",
             Self::Updates => "updates",
+            Self::UpdatesReading => "updates-reading",
             Self::Team => "team",
             Self::Settings => "settings",
         }
@@ -62,10 +65,11 @@ impl UiLabScenario {
             "onboarding-dialog" => Ok(Self::OnboardingDialog),
             "issues" => Ok(Self::Issues),
             "updates" => Ok(Self::Updates),
+            "updates-reading" => Ok(Self::UpdatesReading),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, onboarding-dialog, issues, updates, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-dialog, issues, updates, updates-reading, team, settings"
             ),
         }
     }
@@ -223,6 +227,13 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
                 UiLabScenario::Onboarding | UiLabScenario::OnboardingDialog => None,
                 UiLabScenario::Issues => Some(fixture_dashboard(SampleSection::Issues)),
                 UiLabScenario::Updates => Some(fixture_dashboard(SampleSection::Updates)),
+                UiLabScenario::UpdatesReading => {
+                    let mut dashboard =
+                        Dashboard::from_sample_data_for_section(SampleSection::Updates);
+                    dashboard.prepare_mobile_update_reading_for_ui_lab();
+                    dashboard.initialize_appearance_preference(fixture_preference);
+                    Some(cx.new(|_| dashboard))
+                }
                 UiLabScenario::Team => Some(fixture_dashboard(SampleSection::Team)),
                 UiLabScenario::Settings => Some(fixture_dashboard(SampleSection::Settings)),
             };
@@ -309,6 +320,7 @@ mod tests {
             ("onboarding-dialog", UiLabScenario::OnboardingDialog),
             ("issues", UiLabScenario::Issues),
             ("updates", UiLabScenario::Updates),
+            ("updates-reading", UiLabScenario::UpdatesReading),
             ("team", UiLabScenario::Team),
             ("settings", UiLabScenario::Settings),
         ] {
@@ -324,6 +336,11 @@ mod tests {
             super::matrix::built_in_matrix()
                 .iter()
                 .all(|case| case.scenario != UiLabScenario::OnboardingDialog)
+        );
+        assert!(
+            super::matrix::built_in_matrix()
+                .iter()
+                .all(|case| case.scenario != UiLabScenario::UpdatesReading)
         );
     }
 

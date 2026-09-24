@@ -757,6 +757,8 @@ pub struct Dashboard {
     updates_row_measurements: virtual_rows::RowMeasureCache,
     update_filter: UpdateFilter,
     expanded_update_groups: HashSet<IssueId>,
+    selected_update_issue: Option<IssueId>,
+    mobile_update_detail_open: bool,
     selected_issue: Option<IssueId>,
     selected_issue_core: Option<Issue>,
     mobile_detail_open: bool,
@@ -988,6 +990,17 @@ impl Dashboard {
             }
         }
         dashboard
+    }
+
+    /// Seeds the first cached update group as the active mobile reading pane in the screenshot lab.
+    #[cfg(feature = "ui-lab")]
+    pub(crate) fn prepare_mobile_update_reading_for_ui_lab(&mut self) {
+        self.section = Section::Updates;
+        self.selected_update_issue = self
+            .update_groups
+            .first()
+            .map(|group| group.issue_id.clone());
+        self.mobile_update_detail_open = self.selected_update_issue.is_some();
     }
 
     /// Primes the inert automation fixture with the post-refresh copy and metadata control
@@ -1416,6 +1429,7 @@ impl Dashboard {
             timestamp_offset,
         );
         let selected_issue = issues.first().map(|issue| issue.id.clone());
+        let selected_update_issue = update_groups.first().map(|group| group.issue_id.clone());
 
         Self {
             diagnostics: diagnostics.clone(),
@@ -1432,6 +1446,8 @@ impl Dashboard {
             updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
             expanded_update_groups: HashSet::new(),
+            selected_update_issue,
+            mobile_update_detail_open: false,
             selected_issue,
             selected_issue_core: None,
             mobile_detail_open: false,
@@ -1549,6 +1565,8 @@ impl Dashboard {
             updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
             expanded_update_groups: HashSet::new(),
+            selected_update_issue: None,
+            mobile_update_detail_open: false,
             selected_issue: None,
             selected_issue_core: None,
             mobile_detail_open: false,
@@ -2505,6 +2523,28 @@ impl Dashboard {
         cx.notify();
     }
 
+    fn select_update_group(&mut self, issue_id: IssueId, mobile: bool, cx: &mut Context<Self>) {
+        self.selected_update_issue = Some(issue_id);
+        self.mobile_update_detail_open = mobile;
+        cx.notify();
+    }
+
+    fn close_mobile_update_detail(&mut self, cx: &mut Context<Self>) {
+        self.mobile_update_detail_open = false;
+        cx.notify();
+    }
+
+    fn clear_hidden_update_selection(&mut self) {
+        if self.selected_update_issue.as_ref().is_some_and(|selected| {
+            !filtered_update_group_indices(&self.update_groups, self.update_filter)
+                .iter()
+                .any(|index| self.update_groups[*index].issue_id == *selected)
+        }) {
+            self.selected_update_issue = None;
+            self.mobile_update_detail_open = false;
+        }
+    }
+
     fn reload_selected_detail(&mut self, cx: &mut Context<Self>) {
         let Some(issue_id) = self.selected_issue.clone() else {
             return;
@@ -3122,6 +3162,7 @@ impl Dashboard {
         );
         self.apply_live_issues(issues, true, cx);
         self.update_groups = update_groups;
+        self.clear_hidden_update_selection();
         if self.selected_issue.is_some() {
             self.reload_status_transitions(cx);
         }
@@ -3395,6 +3436,7 @@ impl Dashboard {
                     event.unread = false;
                 }
             }
+            self.clear_hidden_update_selection();
             cx.notify();
             return;
         };
@@ -3431,6 +3473,7 @@ impl Dashboard {
     fn set_update_filter(&mut self, filter: UpdateFilter, cx: &mut Context<Self>) {
         if self.update_filter != filter {
             self.update_filter = filter;
+            self.clear_hidden_update_selection();
             self.reset_update_list_scroll();
             cx.notify();
         }
@@ -3468,6 +3511,7 @@ impl Dashboard {
                     event.unread = false;
                 }
             }
+            self.clear_hidden_update_selection();
             cx.notify();
             return;
         };
