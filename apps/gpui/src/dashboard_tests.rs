@@ -2162,6 +2162,62 @@ fn native_settings_root_and_general_controls_are_bounded(cx: &mut gpui_kit::Test
 }
 
 #[gpui_kit::test]
+fn mobile_settings_direct_navigation_selects_bounded_category_content(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Settings;
+    let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let root = visual
+        .debug_bounds("settings-root")
+        .expect("mobile settings root should be laid out");
+    let navigation = visual
+        .debug_bounds("settings-category-navigation")
+        .expect("mobile settings should expose category navigation");
+    let team = visual
+        .debug_bounds("settings-category-team-tracker")
+        .expect("Team tracker category should be directly visible");
+    assert!(navigation.origin.x >= root.origin.x && navigation.origin.y >= root.origin.y);
+    assert!(navigation.origin.x + navigation.size.width <= root.origin.x + root.size.width);
+    assert!(team.origin.x >= navigation.origin.x && team.origin.y >= navigation.origin.y);
+    assert!(team.origin.x + team.size.width <= navigation.origin.x + navigation.size.width);
+
+    visual.simulate_click(
+        gpui_kit::point(
+            team.origin.x + team.size.width / 2.,
+            team.origin.y + team.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.settings_category),
+        SettingsCategory::TeamTracker
+    );
+    let content = visual
+        .debug_bounds("settings-content-team-tracker")
+        .expect("selected Team tracker content should have stable identity");
+    assert!(visual.debug_bounds("settings-content-appearance").is_none());
+    assert!(content.size.width > px(0.) && content.size.height > px(0.));
+    assert!(content.origin.x >= root.origin.x && content.origin.y >= root.origin.y);
+    assert!(content.origin.x + content.size.width <= root.origin.x + root.size.width + px(1.));
+    assert!(content.origin.y + content.size.height <= root.origin.y + root.size.height + px(1.));
+    assert!(
+        visual.debug_bounds("team-settings-feedback").is_none(),
+        "navigation must not manufacture settings feedback"
+    );
+}
+
+#[gpui_kit::test]
 fn team_table_sort_keeps_selected_detail_identity_after_reordering(
     cx: &mut gpui_kit::TestAppContext,
 ) {

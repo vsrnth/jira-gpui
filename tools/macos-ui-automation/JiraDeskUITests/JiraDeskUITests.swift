@@ -1226,6 +1226,41 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertTrue(waitForAbsence(app.descendants(matching: .any)["issue-search"]), "Settings should replace Issues content")
         _ = try require(app.descendants(matching: .any)["appearance-dark"], "appearance-dark")
 
+        let settingsRoot = try require(app.descendants(matching: .any)["settings-root"], "settings-root")
+        let categoryNavigation = try require(
+            app.descendants(matching: .any)["settings-category-navigation"],
+            "settings-category-navigation"
+        )
+        XCTAssertTrue(settingsRoot.frame.contains(categoryNavigation.frame), "category navigation should stay inside Settings")
+        assertFiniteBounded(categoryNavigation.frame, name: "settings category navigation")
+        let categories = [
+            ("settings-category-appearance", "settings-content-appearance"),
+            ("settings-category-issue-scope", "settings-content-issue-scope"),
+            ("settings-category-team-tracker", "settings-content-team-tracker"),
+            ("settings-category-desktop-notifications", "settings-content-desktop-notifications"),
+            ("settings-category-saved-jira-login", "settings-content-saved-jira-login"),
+        ]
+        for (identifier, contentIdentifier) in categories {
+            let category = try require(app.descendants(matching: .tab)[identifier], identifier)
+            XCTAssertTrue(categoryNavigation.frame.contains(category.frame), "\(identifier) should stay inside category navigation")
+            assertFiniteBounded(category.frame, name: identifier)
+            category.click()
+            let content = try require(app.descendants(matching: .any)[contentIdentifier], contentIdentifier)
+            let selectedCategory = try require(app.descendants(matching: .tab)[identifier], "selected \(identifier)")
+            let differentIdentifier = categories.first { $0.0 != identifier }!.0
+            let differentCategory = try require(app.descendants(matching: .tab)[differentIdentifier], "inactive \(differentIdentifier)")
+            XCTAssertTrue(
+                waitForAXValue(["true", "1"], in: selectedCategory),
+                "\(identifier) should expose accessibility value true/1 after activation"
+            )
+            XCTAssertTrue(
+                waitForAXValue(["false", "0"], in: differentCategory),
+                "\(differentIdentifier) should expose accessibility value false/0 when \(identifier) is active"
+            )
+            XCTAssertTrue(settingsRoot.frame.contains(content.frame), "\(contentIdentifier) should stay inside Settings")
+            assertFiniteBounded(content.frame, name: contentIdentifier)
+        }
+
         let profile = try require(app.buttons["sidebar-profile"], "sidebar-profile")
         let profileName = profile.label.isEmpty ? profile.title : profile.label
         XCTAssertFalse(profileName.isEmpty, "profile trigger should expose the account name")
@@ -1560,6 +1595,19 @@ final class JiraDeskUITests: XCTestCase {
                     return false
                 }
                 return self.semanticText(element).contains(expected)
+            },
+            object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: 8) == .completed
+    }
+
+    private func waitForAXValue(_ expected: Set<String>, in element: XCUIElement) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let element = object as? XCUIElement else {
+                    return false
+                }
+                return expected.contains(self.axValue(element).lowercased())
             },
             object: element
         )
