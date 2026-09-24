@@ -109,6 +109,24 @@ impl Dashboard {
             })
             .map(|issue| IssueViewModel::from_domain(issue, &self.users))
             .collect::<Vec<_>>();
+        let team_count_label = if configured {
+            format!(
+                "{displayed_team_count} in progress · {} configured {}",
+                self.team_members.len(),
+                if self.team_members.len() == 1 {
+                    "teammate"
+                } else {
+                    "teammates"
+                },
+            )
+        } else {
+            "No teammates configured".to_owned()
+        };
+        let team_accessible_summary = if configured {
+            team_summary(displayed_team_count, self.team_members.len())
+        } else {
+            "Team tracker is not configured; no Jira request will be made".to_owned()
+        };
         v_flex()
             .size_full()
             .min_w_0()
@@ -116,15 +134,57 @@ impl Dashboard {
             .gap_3()
             .child(
                 v_flex()
+                    .id("team-header")
+                    .accessibility_id("team-header")
+                    .debug_selector(|| "team-header".to_owned())
                     .min_w_0()
                     .gap_1()
-                    .child(div().text_base().font_semibold().child("In-progress team tickets"))
-                    .child(div().min_w_0().whitespace_normal().text_sm().text_color(cx.theme().muted_foreground).child(
-                        "All visible Jira issues whose status category is In Progress and whose assignee is one of the configured accounts. Jira permissions still apply.",
-                    ))
-                    .child(div().min_w_0().whitespace_normal().text_xs().text_color(cx.theme().muted_foreground).child(
-                        if configured { team_summary(displayed_team_count, self.team_members.len()) } else { "No team members configured · no Jira request will be made".to_owned() },
-                    ))
+                    .role(gpui_kit::accesskit::Role::Group)
+                    .aria_label(team_accessible_summary)
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_base()
+                                    .font_semibold()
+                                    .child("Team tracker"),
+                            )
+                            .child(
+                                Button::new("configure-team-header")
+                                    .accessibility_id("configure-team-header")
+                                    .debug_selector(|| "configure-team-header".to_owned())
+                                    .compact()
+                                    .when(mobile, |this| this.h_11())
+                                    .label("Configure team")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings_category = SettingsCategory::TeamTracker;
+                                        this.section = Section::Settings;
+                                        this.mobile_detail_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(team_count_label),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("In-progress Jira issues assigned to configured teammates; Jira permissions apply."),
+                    )
                     .when_some(team_feedback_message, |this, feedback| {
                         this.child(
                             v_flex()
@@ -223,6 +283,8 @@ impl Dashboard {
                                                     .primary()
                                                     .label("Configure team")
                                                     .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.settings_category =
+                                                            SettingsCategory::TeamTracker;
                                                         this.section = Section::Settings;
                                                         cx.notify();
                                                     })),
@@ -342,6 +404,8 @@ impl Dashboard {
                                                     .primary()
                                                     .label("Configure team")
                                                     .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.settings_category =
+                                                            SettingsCategory::TeamTracker;
                                                         this.section = Section::Settings;
                                                         cx.notify();
                                                     })),
@@ -509,5 +573,71 @@ impl Dashboard {
                         }
                     })
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_data::PersistedTeamMember;
+
+    #[gpui_kit::test]
+    fn mobile_team_header_and_ticket_list_remain_visible(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.section = Section::Team;
+        dashboard.team_members = vec![PersistedTeamMember {
+            identifier: "amina".to_owned(),
+            account_id: "amina".to_owned(),
+            display_name: "Amina Yusuf".to_owned(),
+        }];
+        dashboard.team_issues = sample_issues();
+        let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        for element in ["team-header", "team-table"] {
+            let bounds = visual
+                .debug_bounds(element)
+                .unwrap_or_else(|| panic!("mobile Team view should render {element}"));
+            assert!(
+                bounds.size.width > px(0.) && bounds.size.height > px(0.),
+                "mobile Team element {element} collapsed: {bounds:?}"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn unconfigured_team_action_opens_team_tracker_settings(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.section = Section::Team;
+        dashboard.team_members.clear();
+        dashboard.team_issues.clear();
+        let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+        let dashboard_entity = window.root(cx).expect("dashboard root");
+        let mut visual = gpui_kit::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let configure = visual
+            .debug_bounds("configure-team-header")
+            .expect("header should expose Configure team");
+        visual.simulate_click(
+            gpui_kit::point(
+                configure.origin.x + configure.size.width / 2.,
+                configure.origin.y + configure.size.height / 2.,
+            ),
+            Default::default(),
+        );
+        visual.run_until_parked();
+
+        assert!(dashboard_entity.read_with(&visual, |dashboard, _| {
+            dashboard.section == Section::Settings
+                && dashboard.settings_category == SettingsCategory::TeamTracker
+        }));
     }
 }

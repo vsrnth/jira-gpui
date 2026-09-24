@@ -1467,6 +1467,34 @@ final class JiraDeskUITests: XCTestCase {
                 XCTAssertFalse(rowCells[index - 1].frame.intersects(rowCells[index].frame), "compact cells must not overlap for \(expected.key)")
             }
         }
+
+        let teamHeader = try require(app.groups["team-header"], "team-header")
+        XCTAssertTrue(
+            semanticText(teamHeader).contains("2 in-progress tickets displayed · 2 configured team members"),
+            "Team header should expose the semantic displayed-ticket and configured-member counts"
+        )
+        assertFiniteBounded(teamHeader.frame, name: "team-header")
+        XCTAssertLessThan(teamHeader.frame.height, 120, "Team header should remain a compact band")
+        XCTAssertTrue(hostWindow.frame.contains(teamHeader.frame), "Team header should remain inside the host window")
+
+        let configureTeam = try require(app.buttons["configure-team-header"], "configure-team-header")
+        assertFiniteBounded(configureTeam.frame, name: "configure-team-header")
+        XCTAssertLessThan(configureTeam.frame.height, 80, "Configure Team action should retain a bounded height")
+        XCTAssertTrue(teamHeader.frame.contains(configureTeam.frame), "Configure Team action should remain inside the Team header")
+        configureTeam.click()
+
+        _ = try require(
+            app.descendants(matching: .any)["settings-content-team-tracker"],
+            "settings-content-team-tracker from Team header"
+        )
+        let teamTrackerCategory = try require(
+            app.descendants(matching: .tab)["settings-category-team-tracker"],
+            "settings-category-team-tracker from Team header"
+        )
+        XCTAssertTrue(
+            waitForAXValue(["true", "1"], in: teamTrackerCategory),
+            "Team header configuration should select the Team tracker Settings category"
+        )
     }
 
     private func launchFixture(scenario: String) throws {
