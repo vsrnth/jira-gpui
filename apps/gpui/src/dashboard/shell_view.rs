@@ -158,6 +158,10 @@ pub(super) fn should_render_sidebar_sync_message(message: &str) -> bool {
     message != "Preview data · Jira connection not configured"
 }
 
+fn should_render_mobile_sync_status(has_workspace: bool, message: &str) -> bool {
+    has_workspace || should_render_sidebar_sync_message(message)
+}
+
 impl Dashboard {
     fn render_sidebar(
         &self,
@@ -748,7 +752,7 @@ impl Dashboard {
             .flex_1()
             .min_w_0()
             .w(px(width))
-            .h_9()
+            .h_11()
             .px_1()
             .rounded(cx.theme().radius)
             .when(selected, |this| {
@@ -843,7 +847,10 @@ impl Render for Dashboard {
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(self.render_mobile_nav(viewport_width, cx))
-                .child(self.render_mobile_status(cx))
+                .when(
+                    should_render_mobile_sync_status(self.workspace.is_some(), &self.sync_message),
+                    |this| this.child(self.render_mobile_status(cx)),
+                )
                 .child(main)
         } else {
             h_flex()
@@ -854,5 +861,68 @@ impl Render for Dashboard {
                 .child(self.render_sidebar(layout, viewport_width, cx))
                 .child(main)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dashboard, should_render_mobile_sync_status};
+    use gpui_kit::{VisualTestContext, px};
+
+    #[gpui_kit::test]
+    fn mobile_fixture_has_large_navigation_targets_and_hides_default_preview_status(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let dashboard = Dashboard::from_sample_data();
+        let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let navigation = visual
+            .debug_bounds("mobile-navigation")
+            .expect("mobile navigation should be laid out");
+        for id in [
+            "mobile-issues",
+            "mobile-updates",
+            "mobile-team",
+            "mobile-settings",
+        ] {
+            let bounds = visual
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} should be laid out"));
+            assert!(
+                bounds.size.height >= px(44.),
+                "{id} has a touch target shorter than 44 logical pixels: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.y >= navigation.origin.y
+                    && bounds.origin.y + bounds.size.height
+                        <= navigation.origin.y + navigation.size.height,
+                "{id} escapes the mobile navigation bounds: item={bounds:?}, nav={navigation:?}"
+            );
+        }
+
+        assert!(
+            visual.debug_bounds("mobile-sync-status").is_none(),
+            "the default preview status strip should be absent"
+        );
+    }
+
+    #[test]
+    fn mobile_status_keeps_live_and_nondefault_feedback() {
+        assert!(!should_render_mobile_sync_status(
+            false,
+            "Preview data · Jira connection not configured"
+        ));
+        assert!(should_render_mobile_sync_status(
+            true,
+            "Preview data · Jira connection not configured"
+        ));
+        assert!(should_render_mobile_sync_status(
+            false,
+            "Opening local cache…"
+        ));
     }
 }
