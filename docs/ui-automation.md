@@ -19,10 +19,18 @@ cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
 cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
   --scenario onboarding-dialog --output target/ui-lab/onboarding-dialog-light.png \
   --size 960x700 --theme light
+
+cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
+  --scenario updates-reading --output target/ui-lab/updates-reading-mobile.png \
+  --size 390x800 --theme light
 ```
 
 Use `--help` for all options and `--list` for the UI capture scenarios:
-`onboarding`, `onboarding-dialog`, `issues`, `updates`, `team`, and `settings`.
+`onboarding`, `onboarding-dialog`, `issues`, `updates`, `updates-reading`,
+`team`, and `settings`. `updates-reading` opens the first fixture ticket's
+mobile reading pane and, like `onboarding-dialog`, is single-capture only; it
+does not add a case to the built-in matrix. The default `updates` scenario
+continues to capture the ticket list.
 The `rich-content` scenario is available to the local macOS XCUITest fixture
 host, not to the offscreen UI capture lab, so it is intentionally absent from
 the capture list and five-case visual matrix below.
