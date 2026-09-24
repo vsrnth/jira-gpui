@@ -1248,6 +1248,13 @@ final class JiraDeskUITests: XCTestCase {
         )
         let postNow = try require(app.buttons["post-comment-now"], "post-comment-now")
         let cancel = try require(app.buttons["cancel-comment"], "cancel-comment")
+        let detail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail")
+
+        for _ in 0..<8 where !postNow.isHittable || !cancel.isHittable {
+            detail.swipeUp()
+        }
+        XCTAssertTrue(postNow.isHittable, "Post now should become hittable after scrolling issue detail")
+        XCTAssertTrue(cancel.isHittable, "Cancel should become hittable after scrolling issue detail")
 
         XCTAssertGreaterThan(postNow.frame.width, 0, "Post now should have visible width")
         XCTAssertGreaterThan(cancel.frame.width, 0, "Cancel should have visible width")
