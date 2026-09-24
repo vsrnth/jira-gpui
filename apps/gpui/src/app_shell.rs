@@ -86,11 +86,18 @@ const JIRA_SITE_LABEL: &str = "Jira site";
 const SCOPED_TOKEN_LABEL: &str = "Scoped API token";
 const SCOPED_TOKEN_PLACEHOLDER: &str = "Paste your scoped Jira API token";
 const SCOPED_TOKEN_SCOPES: &str =
-    "Required scopes: read:jira-user, read:jira-work, write:jira-work.";
+    "Needs read:jira-user, read:jira-work, and write:jira-work scopes.";
 const KEYRING_STORAGE_COPY: &str = "Stored only in the system keyring—not app data.";
 const UNSAVED_CREDENTIALS_COPY: &str = "Not saved after this session.";
 const WRITE_SAFETY_COPY: &str = "Jira writes always require explicit confirmation.";
 const TOKEN_REENTRY_COPY: &str = "Re-enter your scoped API token and try again.";
+const ONBOARDING_INTRO_COPY: &str = concat!(
+    "See issues assigned to or watched by your Jira account. ",
+    "Have your Jira Cloud site, Atlassian email, and scoped API token ready.",
+);
+const ONBOARDING_SETTINGS_COPY: &str =
+    "You can revisit issue scope and saved-login settings later in Settings.";
+const JIRA_SITE_HELP_COPY: &str = "Enter your-team or your-team.atlassian.net (HTTPS).";
 
 const ONBOARDING_MAX_WIDTH_REMS: f32 = 31.5;
 const ONBOARDING_CARD_PADDING_REMS: f32 = 1.25;
@@ -594,7 +601,17 @@ impl AppShell {
                     .aria_label(label),
             )
             .when_some(help, |this, help| {
-                this.child(div().text_xs().text_color(muted_foreground).child(help))
+                let help_id = format!("{accessibility_id}-help");
+                this.child(
+                    div()
+                        .id(help_id.clone())
+                        .accessibility_id(help_id)
+                        .role(Role::Group)
+                        .aria_label(help)
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(help),
+                )
             })
     }
 
@@ -680,7 +697,7 @@ impl AppShell {
                     .child(DialogTitle::new().child("Connect Jira"))
                     .child(
                         DialogDescription::new()
-                            .child("Enter your Jira site, Atlassian email, and scoped API token."),
+                            .child("Enter your Jira Cloud site, Atlassian email, and API token."),
                     ),
             )
             .child(
@@ -713,7 +730,7 @@ impl AppShell {
                         JIRA_SITE_LABEL,
                         "onboarding-jira-site",
                         None,
-                        Some("Use your-team or a full HTTPS Atlassian Cloud URL."),
+                        Some(JIRA_SITE_HELP_COPY),
                         busy_policy.inputs_disabled,
                         base_url,
                         cx.theme().muted_foreground,
@@ -928,16 +945,29 @@ impl AppShell {
             )
             .child(
                 div()
-                    .max_w(rems(29.0))
+                    .id("onboarding-intro")
+                    .accessibility_id("onboarding-intro")
+                    .role(Role::Group)
+                    .aria_label(ONBOARDING_INTRO_COPY)
+                    .max_w(rems(28.0))
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .text_center()
-                    .child("Sync issues assigned to or watched by your Jira account."),
+                    .child(ONBOARDING_INTRO_COPY),
+            )
+            .child(
+                div()
+                    .max_w(rems(28.0))
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .text_center()
+                    .child(ONBOARDING_SETTINGS_COPY),
             )
             .child(
                 Button::new("connect-jira")
                     .label("Connect Jira")
                     .primary()
+                    .h_11()
                     .accessibility_id("onboarding-connect-trigger")
                     .debug_selector(|| "onboarding-connect-trigger".to_owned())
                     .disabled(busy_policy.trigger_disabled)
@@ -1025,9 +1055,10 @@ impl Render for AppShell {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, JIRA_SITE_LABEL,
-        KEYRING_STORAGE_COPY, REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL,
-        SCOPED_TOKEN_LABEL, SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
+        AppearancePreference, CHECKING_KEYRING_STATUS, ConnectionReadiness, JIRA_SITE_HELP_COPY,
+        JIRA_SITE_LABEL, KEYRING_STORAGE_COPY, ONBOARDING_INTRO_COPY, ONBOARDING_SETTINGS_COPY,
+        REMEMBER_CREDENTIALS_DEFAULT, REMEMBER_CREDENTIALS_LABEL, SCOPED_TOKEN_LABEL,
+        SCOPED_TOKEN_PLACEHOLDER, SCOPED_TOKEN_SCOPES, TOKEN_REENTRY_COPY,
         UNSAVED_CREDENTIALS_COPY, VERIFYING_CREDENTIALS_STATUS, WRITE_SAFETY_COPY,
         connection_failure_copy, connection_readiness, is_submit_event,
         notification_width_for_viewport, onboarding_busy_policy, onboarding_status,
@@ -1248,6 +1279,15 @@ mod tests {
         assert_eq!(JIRA_SITE_LABEL, "Jira site");
         assert_eq!(SCOPED_TOKEN_LABEL, "Scoped API token");
         assert_eq!(SCOPED_TOKEN_PLACEHOLDER, "Paste your scoped Jira API token");
+        assert_eq!(
+            JIRA_SITE_HELP_COPY,
+            "Enter your-team or your-team.atlassian.net (HTTPS)."
+        );
+        assert!(ONBOARDING_INTRO_COPY.contains("assigned to or watched"));
+        assert!(ONBOARDING_INTRO_COPY.contains("Jira Cloud site"));
+        assert!(ONBOARDING_INTRO_COPY.contains("Atlassian email"));
+        assert!(ONBOARDING_INTRO_COPY.contains("scoped API token"));
+        assert!(ONBOARDING_SETTINGS_COPY.contains("Settings"));
         assert!(SCOPED_TOKEN_SCOPES.contains("read:jira-user"));
         assert!(SCOPED_TOKEN_SCOPES.contains("read:jira-work"));
         assert!(SCOPED_TOKEN_SCOPES.contains("write:jira-work"));

@@ -27,25 +27,101 @@ final class JiraDeskUITests: XCTestCase {
 
     func testOnboarding() throws {
         try launchFixture(scenario: "onboarding")
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        let intro = try require(
+            app.descendants(matching: .any)["onboarding-intro"],
+            "onboarding-intro"
+        )
+        XCTAssertTrue(
+            semanticText(intro).contains(
+                "See issues assigned to or watched by your Jira account. Have your Jira Cloud site, Atlassian email, and scoped API token ready."
+            ),
+            "onboarding intro should expose the complete connection guidance"
+        )
+        assertFiniteBounded(intro.frame, name: "onboarding-intro")
+        XCTAssertTrue(hostWindow.frame.contains(intro.frame), "onboarding intro should remain inside the host window")
+
+        let trigger = try require(
+            app.descendants(matching: .any)["onboarding-connect-trigger"],
+            "onboarding-connect-trigger"
+        )
+        assertFiniteBounded(trigger.frame, name: "onboarding-connect-trigger")
+        XCTAssertGreaterThanOrEqual(trigger.frame.height, 44, "connection trigger should retain a 44 px target")
+        XCTAssertLessThanOrEqual(trigger.frame.height, 100, "connection trigger height should remain sensible")
+        XCTAssertLessThan(trigger.frame.width, 600, "connection trigger width should remain sensible")
+        XCTAssertTrue(hostWindow.frame.contains(trigger.frame), "connection trigger should remain inside the host window")
+
         try step("Open Jira connection dialog") {
-            let trigger = try require(app.descendants(matching: .any)["onboarding-connect-trigger"], "onboarding-connect-trigger")
             trigger.click()
         }
+
+        let body = try require(
+            app.descendants(matching: .any)["onboarding-connect-dialog-body"],
+            "onboarding-connect-dialog-body"
+        )
+        assertFiniteBounded(body.frame, name: "onboarding-connect-dialog-body")
+        XCTAssertTrue(hostWindow.frame.contains(body.frame), "connection dialog body should remain inside the host window")
+
+        let site = try require(app.descendants(matching: .any)["onboarding-jira-site"], "onboarding-jira-site")
+        let email = try require(
+            app.descendants(matching: .any)["onboarding-atlassian-email"],
+            "onboarding-atlassian-email"
+        )
+        let token = try require(app.descendants(matching: .any)["onboarding-api-token"], "onboarding-api-token")
+        let remember = try require(app.descendants(matching: .any)["remember-jira-login"], "remember-jira-login")
+        let cancel = try require(
+            app.descendants(matching: .any)["onboarding-connect-dialog-cancel"],
+            "onboarding-connect-dialog-cancel"
+        )
+        let submit = try require(
+            app.descendants(matching: .any)["onboarding-connect-dialog-submit"],
+            "onboarding-connect-dialog-submit"
+        )
+        for (control, identifier) in [
+            (site, "onboarding-jira-site"),
+            (email, "onboarding-atlassian-email"),
+            (token, "onboarding-api-token"),
+        ] {
+            assertFiniteBounded(control.frame, name: identifier)
+            XCTAssertGreaterThan(control.frame.width, 200, "onboarding field should have bounded width: \(identifier)")
+            XCTAssertGreaterThan(control.frame.height, 20, "onboarding field should have bounded height: \(identifier)")
+            XCTAssertTrue(body.frame.contains(control.frame), "control should remain inside the dialog body: \(identifier)")
+        }
+        assertFiniteBounded(remember.frame, name: "remember-jira-login")
+        XCTAssertGreaterThan(remember.frame.width, 180, "remember control should have bounded width")
+        XCTAssertGreaterThan(remember.frame.height, 12, "remember control should have bounded height")
+        XCTAssertTrue(body.frame.contains(remember.frame), "remember control should remain inside the dialog body")
+        for (control, identifier) in [
+            (cancel, "onboarding-connect-dialog-cancel"),
+            (submit, "onboarding-connect-dialog-submit"),
+        ] {
+            assertFiniteBounded(control.frame, name: identifier)
+            XCTAssertGreaterThan(control.frame.width, 80, "dialog action should have bounded width: \(identifier)")
+            XCTAssertGreaterThan(control.frame.height, 20, "dialog action should have bounded height: \(identifier)")
+            XCTAssertTrue(hostWindow.frame.contains(control.frame), "dialog action should remain inside the host window: \(identifier)")
+        }
+
+        let siteGuidanceCopy = "Enter your-team or your-team.atlassian.net (HTTPS)."
+        let siteGuidance = try require(
+            app.descendants(matching: .any)["onboarding-jira-site-help"],
+            "onboarding-jira-site-help"
+        )
+        XCTAssertTrue(semanticText(siteGuidance).contains(siteGuidanceCopy))
+        assertFiniteBounded(siteGuidance.frame, name: "Jira site guidance")
+        XCTAssertTrue(body.frame.contains(siteGuidance.frame), "Jira site guidance should remain inside the dialog body")
 
         try step("Enter non-secret fixture values") {
             try setValue("sample", identifier: "onboarding-jira-site")
             try setValue("ui-test@example.invalid", identifier: "onboarding-atlassian-email")
-            _ = try require(app.descendants(matching: .any)["onboarding-api-token"], "onboarding-api-token")
             assertVisibleValue("sample", identifier: "onboarding-jira-site")
             assertVisibleValue("ui-test@example.invalid", identifier: "onboarding-atlassian-email")
         }
 
         try step("Keep fixture connection submit untouched") {
-            _ = try require(app.descendants(matching: .any)["onboarding-connect-dialog-submit"], "onboarding-connect-dialog-submit")
+            XCTAssertTrue(submit.exists)
         }
 
         try step("Cancel connection dialog") {
-            let cancel = try require(app.descendants(matching: .any)["onboarding-connect-dialog-cancel"], "onboarding-connect-dialog-cancel")
             cancel.click()
             XCTAssertTrue(waitForAbsence(app.descendants(matching: .any)["onboarding-connect-dialog-submit"]))
         }
