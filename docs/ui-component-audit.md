@@ -61,7 +61,7 @@ bounded list/detail ownership model.
 
 ## Version and toolchain constraints
 
-The repository uses the published `gpui-kit` facade (`0.6.0` dependency
+The repository uses the published `gpui-kit` facade (`0.7.0` dependency
 constraint), which keeps GPUI, the base layer, components, and assets on one
 compatible release line. Keep that family aligned through the lockfile rather
 than adding a second GPUI source identity. Rust 1.95 remains sufficient for the

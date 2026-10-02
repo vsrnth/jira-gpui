@@ -110,11 +110,18 @@ impl SidebarItem for AccessibleSidebarMenuItem {
         window: &mut Window,
         cx: &mut gpui_kit::App,
     ) -> impl IntoElement {
-        let item = self.item.render(id, window, cx).into_any_element();
+        let activation = self.activation;
+        let item = self
+            .item
+            .on_click({
+                let activation = activation.clone();
+                move |event, window, cx| activation(event, window, cx)
+            })
+            .render(id, window, cx)
+            .into_any_element();
         let accessibility_id = self.accessibility_id;
         let accessible_label = self.accessible_label;
         let selected = self.selected;
-        let activation = self.activation;
         div()
             .id(accessibility_id)
             .debug_selector(move || accessibility_id.to_owned())
@@ -132,7 +139,6 @@ impl SidebarItem for AccessibleSidebarMenuItem {
                     }
                 }
             })
-            .on_click(move |event, window, cx| activation(event, window, cx))
             .child(item)
     }
 }
@@ -866,7 +872,7 @@ impl Render for Dashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dashboard, should_render_mobile_sync_status};
+    use super::{Dashboard, Section, should_render_mobile_sync_status};
     use gpui_kit::{VisualTestContext, px};
 
     #[gpui_kit::test]
@@ -908,6 +914,51 @@ mod tests {
             visual.debug_bounds("mobile-sync-status").is_none(),
             "the default preview status strip should be absent"
         );
+    }
+
+    #[gpui_kit::test]
+    fn desktop_sidebar_navigation_dispatches_inner_item_clicks(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+        let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| {
+            Dashboard::from_sample_data()
+        });
+        let dashboard = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        for (id, expected_section) in [
+            ("nav-updates", Section::Updates),
+            ("nav-issues", Section::Issues),
+        ] {
+            let bounds = visual
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} should be laid out"));
+            assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+            assert!(
+                bounds.origin.x >= px(0.)
+                    && bounds.origin.y >= px(0.)
+                    && bounds.origin.x + bounds.size.width <= px(960.) + px(1.)
+                    && bounds.origin.y + bounds.size.height <= px(700.) + px(1.),
+                "{id} should remain inside the window: {bounds:?}"
+            );
+
+            visual.simulate_click(
+                gpui_kit::point(
+                    bounds.origin.x + bounds.size.width / 2.,
+                    bounds.origin.y + bounds.size.height / 2.,
+                ),
+                Default::default(),
+            );
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+
+            assert_eq!(
+                dashboard.read_with(&visual, |dashboard, _| dashboard.section),
+                expected_section,
+                "clicking {id} should activate its section"
+            );
+        }
     }
 
     #[test]

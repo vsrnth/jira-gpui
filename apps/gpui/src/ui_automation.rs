@@ -151,7 +151,7 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
         app_shell::AppearancePreference,
         dashboard::{Dashboard, SampleSection},
     };
-    use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
+    use gpui_kit::component::{Theme, ThemeMode, TitleBar};
     use gpui_kit::{
         App, AppContext as _, Bounds, Pixels, Size, WindowBounds, WindowDecorations, WindowOptions,
         px, size,
@@ -195,73 +195,78 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
             };
 
             cx.spawn(async move |cx| {
-                cx.open_window(window_options, |window, cx| {
-                    window.activate_window();
-                    window.set_window_title(WINDOW_TITLE);
+                cx.update(|cx| {
+                    gpui_kit::open_window(window_options, cx, |window, cx| {
+                        window.activate_window();
+                        window.set_window_title(WINDOW_TITLE);
 
-                    let fixture_dashboard = |mut dashboard: Dashboard| {
-                        dashboard.initialize_appearance_preference(AppearancePreference::Light);
-                        cx.new(|cx| {
-                            if scenario == UiAutomationScenario::Assignee {
-                                dashboard.prepare_assignee_for_ui_automation(window, cx);
+                        let fixture_dashboard = |mut dashboard: Dashboard| {
+                            dashboard.initialize_appearance_preference(AppearancePreference::Light);
+                            cx.new(|cx| {
+                                if scenario == UiAutomationScenario::Assignee {
+                                    dashboard.prepare_assignee_for_ui_automation(window, cx);
+                                }
+                                dashboard
+                            })
+                        };
+                        let dashboard = match scenario {
+                            UiAutomationScenario::Onboarding
+                            | UiAutomationScenario::OnboardingBusy => None,
+                            UiAutomationScenario::Issues => {
+                                let mut dashboard =
+                                    Dashboard::from_sample_data_for_section(SampleSection::Issues);
+                                dashboard.prepare_for_ui_automation();
+                                Some(dashboard)
                             }
-                            dashboard
-                        })
-                    };
-                    let dashboard = match scenario {
-                        UiAutomationScenario::Onboarding | UiAutomationScenario::OnboardingBusy => {
-                            None
+                            UiAutomationScenario::RichContent => {
+                                Some(Dashboard::from_ui_automation_rich_content())
+                            }
+                            UiAutomationScenario::CommentConfirmation => {
+                                Some(Dashboard::from_ui_automation_comment_confirmation())
+                            }
+                            UiAutomationScenario::Updates => Some(
+                                Dashboard::from_sample_data_for_section(SampleSection::Updates),
+                            ),
+                            UiAutomationScenario::Team => {
+                                Some(Dashboard::from_sample_data_for_section(SampleSection::Team))
+                            }
+                            UiAutomationScenario::Settings => Some(
+                                Dashboard::from_sample_data_for_section(SampleSection::Settings),
+                            ),
+                            UiAutomationScenario::Virtualized => {
+                                Some(Dashboard::from_ui_automation_virtualized())
+                            }
+                            UiAutomationScenario::Alert => {
+                                Some(Dashboard::from_ui_automation_alert())
+                            }
+                            UiAutomationScenario::Assignee => Some(
+                                Dashboard::from_sample_data_for_section(SampleSection::Issues),
+                            ),
+                            UiAutomationScenario::Components => {
+                                Some(Dashboard::from_ui_automation_rich_content())
+                            }
                         }
-                        UiAutomationScenario::Issues => {
-                            let mut dashboard =
-                                Dashboard::from_sample_data_for_section(SampleSection::Issues);
-                            dashboard.prepare_for_ui_automation();
-                            Some(dashboard)
-                        }
-                        UiAutomationScenario::RichContent => {
-                            Some(Dashboard::from_ui_automation_rich_content())
-                        }
-                        UiAutomationScenario::CommentConfirmation => {
-                            Some(Dashboard::from_ui_automation_comment_confirmation())
-                        }
-                        UiAutomationScenario::Updates => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Updates),
-                        ),
-                        UiAutomationScenario::Team => {
-                            Some(Dashboard::from_sample_data_for_section(SampleSection::Team))
-                        }
-                        UiAutomationScenario::Settings => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Settings),
-                        ),
-                        UiAutomationScenario::Virtualized => {
-                            Some(Dashboard::from_ui_automation_virtualized())
-                        }
-                        UiAutomationScenario::Alert => Some(Dashboard::from_ui_automation_alert()),
-                        UiAutomationScenario::Assignee => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Issues),
-                        ),
-                        UiAutomationScenario::Components => {
-                            Some(Dashboard::from_ui_automation_rich_content())
-                        }
-                    }
-                    .map(fixture_dashboard);
-                    let shell = cx.new(|cx| {
-                        AppShell::new_for_ui_lab(dashboard, ThemeMode::Light, window, cx)
-                    });
-                    let root = cx.new(|cx| Root::new(shell.clone(), window, cx));
-                    if scenario == UiAutomationScenario::OnboardingBusy {
-                        // The dialog layer is owned by the production Root. Defer until this root
-                        // is installed, then invoke only the inert busy-state hook.
-                        window.defer(cx, move |window, cx| {
-                            shell.update(cx, |shell, cx| {
-                                shell.open_connection_dialog_for_ui_automation_busy(window, cx);
-                            });
+                        .map(fixture_dashboard);
+                        let shell = cx.new(|cx| {
+                            AppShell::new_for_ui_lab(dashboard, ThemeMode::Light, window, cx)
                         });
-                    }
-                    root
+                        if scenario == UiAutomationScenario::OnboardingBusy {
+                            // The dialog layer is owned by the production Root. Defer until this root
+                            // is installed, then invoke only the inert busy-state hook.
+                            let deferred_shell = shell.clone();
+                            window.defer(cx, move |window, cx| {
+                                deferred_shell.update(cx, |shell, cx| {
+                                    shell.open_connection_dialog_for_ui_automation_busy(window, cx);
+                                });
+                            });
+                        }
+                        shell
+                    })
+                    .map(|_| ())
+                    .map_err(|error| {
+                        anyhow::anyhow!("failed to open automation host window: {error}")
+                    })
                 })
-                .map(|_| ())
-                .map_err(|error| anyhow::anyhow!("failed to open automation host window: {error}"))
             })
             .detach();
         });

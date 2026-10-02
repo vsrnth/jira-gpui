@@ -44,7 +44,7 @@ fn initial_window_bounds(cx: &App) -> WindowBounds {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
-    use gpui_kit::component::{Root, TitleBar};
+    use gpui_kit::component::TitleBar;
     use gpui_kit::{WindowDecorations, WindowOptions};
     use jira_gpui::{AppAssets, AppShell, startup_from_environment};
 
@@ -68,12 +68,13 @@ fn main() {
             };
 
             cx.spawn(async move |cx| {
-                cx.open_window(window_options, |window, cx| {
-                    window.activate_window();
-                    window.set_window_title("Jira Desk");
+                cx.update(|cx| {
+                    gpui_kit::open_window(window_options, cx, |window, cx| {
+                        window.activate_window();
+                        window.set_window_title("Jira Desk");
 
-                    let shell = cx.new(|shell_cx| AppShell::new(startup, window, shell_cx));
-                    cx.new(|cx| Root::new(shell, window, cx))
+                        cx.new(|shell_cx| AppShell::new(startup, window, shell_cx))
+                    })
                 })
                 .expect("failed to open the Jira dashboard window");
             })

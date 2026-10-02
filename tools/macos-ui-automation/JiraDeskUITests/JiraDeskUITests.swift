@@ -55,10 +55,10 @@ final class JiraDeskUITests: XCTestCase {
             trigger.click()
         }
 
-        let body = try require(
-            app.descendants(matching: .any)["onboarding-connect-dialog-body"],
-            "onboarding-connect-dialog-body"
-        )
+        let dialogBodies = app.descendants(matching: .any)
+            .matching(identifier: "onboarding-connect-dialog-body")
+        let body = try require(dialogBodies.firstMatch, "onboarding-connect-dialog-body")
+        XCTAssertEqual(dialogBodies.count, 1, "the Base Root should host one connection dialog body")
         assertFiniteBounded(body.frame, name: "onboarding-connect-dialog-body")
         XCTAssertTrue(hostWindow.frame.contains(body.frame), "connection dialog body should remain inside the host window")
 
@@ -69,14 +69,14 @@ final class JiraDeskUITests: XCTestCase {
         )
         let token = try require(app.descendants(matching: .any)["onboarding-api-token"], "onboarding-api-token")
         let remember = try require(app.descendants(matching: .any)["remember-jira-login"], "remember-jira-login")
-        let cancel = try require(
-            app.descendants(matching: .any)["onboarding-connect-dialog-cancel"],
-            "onboarding-connect-dialog-cancel"
-        )
-        let submit = try require(
-            app.descendants(matching: .any)["onboarding-connect-dialog-submit"],
-            "onboarding-connect-dialog-submit"
-        )
+        let cancelControls = app.descendants(matching: .any)
+            .matching(identifier: "onboarding-connect-dialog-cancel")
+        let cancel = try require(cancelControls.firstMatch, "onboarding-connect-dialog-cancel")
+        XCTAssertEqual(cancelControls.count, 1, "the dialog should expose one Cancel control")
+        let submitControls = app.descendants(matching: .any)
+            .matching(identifier: "onboarding-connect-dialog-submit")
+        let submit = try require(submitControls.firstMatch, "onboarding-connect-dialog-submit")
+        XCTAssertEqual(submitControls.count, 1, "the dialog should expose one Connect control")
         for (control, identifier) in [
             (site, "onboarding-jira-site"),
             (email, "onboarding-atlassian-email"),
@@ -283,9 +283,45 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertFalse(reviewUpdates.frame.intersects(showActive.frame), "workspace actions must not overlap")
         reviewUpdates.click()
         _ = try require(app.descendants(matching: .any)["update-list"], "update-list from issue workspace")
-        let navIssues = try require(app.descendants(matching: .any)["nav-issues"], "nav-issues after reviewing updates")
+        let navIssuesMatches = app.descendants(matching: .any)
+            .matching(identifier: "nav-issues")
+        let navIssues = try require(navIssuesMatches.firstMatch, "nav-issues after reviewing updates")
+        XCTAssertEqual(navIssuesMatches.count, 1, "the sidebar should expose one Issues navigation item")
+        assertFiniteBounded(navIssues.frame, name: "nav-issues before returning")
+        XCTAssertTrue(hostWindow.frame.contains(navIssues.frame), "Issues navigation should remain inside the host window")
         navIssues.click()
-        _ = try require(app.descendants(matching: .any)["issues-workspace-summary"], "issue workspace after returning")
+        let returnedNavIssues = try require(navIssuesMatches.firstMatch, "nav-issues after returning")
+        assertFiniteBounded(returnedNavIssues.frame, name: "nav-issues after returning")
+        XCTAssertTrue(hostWindow.frame.contains(returnedNavIssues.frame), "selected Issues navigation should remain inside the host window")
+        let returnedWorkspace = try require(
+            app.descendants(matching: .any)["issues-workspace-summary"],
+            "issue workspace after returning"
+        )
+        XCTAssertTrue(
+            semanticText(returnedWorkspace).contains("3 tickets with unread updates · 3 issues in progress"),
+            "activating Issues should restore the issue workspace"
+        )
+        let issuesOutlineRows = app.outlineRows.matching(
+            NSPredicate(format: "label == %@", "Issues")
+        )
+        let issuesOutlineRow = try require(issuesOutlineRows.firstMatch, "Issues sidebar OutlineRow")
+        XCTAssertEqual(issuesOutlineRows.count, 1, "the sidebar should expose one Issues OutlineRow")
+        let selectedExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                (object as? XCUIElement)?.isSelected == true
+            },
+            object: issuesOutlineRow
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [selectedExpectation], timeout: 8),
+            .completed,
+            "the Issues OutlineRow should become selected after the workspace returns"
+        )
+        XCTAssertEqual(
+            app.outlineRows.allElementsBoundByIndex.filter({ $0.isSelected }).count,
+            1,
+            "the sidebar should have exactly one selected OutlineRow"
+        )
         let returnedShowActive = try require(app.buttons["issues-show-active"], "issues-show-active after returning")
         returnedShowActive.click()
         XCTAssertTrue(

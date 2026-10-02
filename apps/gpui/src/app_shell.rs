@@ -1,8 +1,8 @@
 //! Native application shell and first-run Jira connection form.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _, Theme, ThemeMode,
-    TitleBar, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    WindowExt as _,
     button::Button,
     button::ButtonVariants as _,
     checkbox::Checkbox,
@@ -1004,8 +1004,6 @@ impl Render for AppShell {
             window.rem_size(),
         );
         Theme::global_mut(cx).notification.width = notification_width;
-        let notification_layer = Root::render_notification_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
         let content = if let Some(dashboard) = &self.dashboard {
             v_flex()
                 .min_w_0()
@@ -1046,8 +1044,6 @@ impl Render for AppShell {
             .min_w_0()
             .child(TitleBar::new())
             .child(content)
-            .when_some(dialog_layer, |this, layer| this.child(layer))
-            .when_some(notification_layer, |this, layer| this.child(layer))
             .into_any_element()
     }
 }
