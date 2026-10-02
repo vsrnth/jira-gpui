@@ -247,45 +247,114 @@ final class JiraDeskUITests: XCTestCase {
         try launchFixture(scenario: "issues")
 
         let issueSearch = try require(app.descendants(matching: .any)["issue-search"], "issue-search")
-        let searchSubmit = try require(
-            app.buttons["issue-search-submit"],
-            "issue-search-submit"
-        )
-        XCTAssertEqual(searchSubmit.label.isEmpty ? searchSubmit.title : searchSubmit.label, "Find key")
         let hostWindow = try require(app.windows.firstMatch, "fixture host window")
         XCTAssertGreaterThan(issueSearch.frame.width, 220, "issue search should have enough room for a useful query")
         XCTAssertGreaterThan(issueSearch.frame.height, 20, "issue search should have a visible control height")
-        XCTAssertGreaterThan(searchSubmit.frame.width, 70, "search action should retain an accessible target")
-        XCTAssertGreaterThan(searchSubmit.frame.height, 20, "search action should retain a visible target")
         XCTAssertTrue(hostWindow.frame.contains(issueSearch.frame), "issue search should stay inside the host window")
-        XCTAssertTrue(hostWindow.frame.contains(searchSubmit.frame), "search action should stay inside the host window")
-        XCTAssertFalse(issueSearch.frame.intersects(searchSubmit.frame), "search input and action must not overlap")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-search-submit"].exists, "Find key should remain contextual while the search is empty")
 
-        let issueListSummary = try require(
-            app.descendants(matching: .any)["issue-list-summary"],
-            "issue-list-summary"
+        let issuesTable = try require(app.descendants(matching: .any)["issues-table"], "issues-table")
+        let issueListSummary = try require(app.descendants(matching: .any)["issue-list-summary"], "issue-list-summary")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-detail"].exists, "initial Issues should show the full overview without an open detail pane")
+        XCTAssertGreaterThan(issuesTable.frame.width, hostWindow.frame.width * 0.65, "initial overview table should use the available content width")
+        XCTAssertTrue(hostWindow.frame.contains(issuesTable.frame), "issues table should remain inside the host window")
+        let toolbar = try require(app.descendants(matching: .any)["issues-toolbar"], "issues-toolbar")
+        XCTAssertTrue(hostWindow.frame.contains(toolbar.frame), "issues toolbar should remain inside the host window")
+        let title = try require(app.descendants(matching: .any)["issues-title"], "issues-title")
+        XCTAssertTrue(semanticText(title).contains("Issues"), "overview should expose its Issues title")
+        XCTAssertTrue(toolbar.frame.contains(title.frame), "Issues title should be inside the single toolbar")
+        XCTAssertTrue(toolbar.frame.contains(issueSearch.frame), "search should be inside the single toolbar")
+        let statusFilter = try require(app.descendants(matching: .any)["issue-status-filter"], "issue-status-filter")
+        XCTAssertTrue(toolbar.frame.contains(statusFilter.frame), "status filter should be inside the single toolbar")
+        XCTAssertTrue(semanticText(statusFilter).contains("Filter"), "status selector should expose the Filter label")
+        XCTAssertTrue(semanticText(statusFilter).contains("All statuses"), "status selector should expose its current selection")
+        XCTAssertFalse(issueSearch.frame.intersects(statusFilter.frame), "search and status selector must not overlap")
+        let initialOverviewTableWidth = issuesTable.frame.width
+
+        for column in ["key", "summary", "status", "assignee", "updated"] {
+            let header = try require(
+                app.descendants(matching: .any)["issues-column-\(column)"],
+                "issues-column-\(column)"
+            )
+            assertFiniteBounded(header.frame, name: "issues-column-\(column)")
+            XCTAssertTrue(issuesTable.frame.contains(header.frame), "\(column) header should be inside the issues table")
+        }
+        let columnHeaders = ["key", "summary", "status", "assignee", "updated"].map {
+            app.descendants(matching: .any)["issues-column-\($0)"]
+        }
+        for index in 1..<columnHeaders.count {
+            XCTAssertGreaterThanOrEqual(
+                columnHeaders[index].frame.minX,
+                columnHeaders[index - 1].frame.minX,
+                "table columns should remain in their displayed left-to-right order"
+            )
+        }
+        for (key, summary) in [
+            ("DESK-184", "Surface Jira update notifications in the desktop feed"),
+            ("DESK-179", "Package the Wayland build as an AppImage"),
+            ("DESK-176", "Reconcile issues removed from a saved user set"),
+            ("DESK-171", "Read-only Jira desktop MVP"),
+            ("DESK-163", "Model pagination cursors from enhanced search"),
+        ] {
+            let row = try require(app.descendants(matching: .any)["issue-row-\(key)"], "issue-row-\(key)")
+            assertFiniteBounded(row.frame, name: "issue-row-\(key)")
+            XCTAssertGreaterThan(row.frame.height, 30, "table row should remain readable")
+            XCTAssertLessThan(row.frame.height, 70, "table row should stay compact")
+            XCTAssertTrue(issuesTable.frame.contains(row.frame), "\(key) row should be inside the issues table")
+            let keyCell = try require(app.descendants(matching: .any)["issue-cell-key-\(key)"], "issue-cell-key-\(key)")
+            let summaryCell = try require(app.descendants(matching: .any)["issue-cell-summary-\(key)"], "issue-cell-summary-\(key)")
+            let statusCell = try require(app.descendants(matching: .any)["issue-cell-status-\(key)"], "issue-cell-status-\(key)")
+            let assigneeCell = try require(app.descendants(matching: .any)["issue-cell-assignee-\(key)"], "issue-cell-assignee-\(key)")
+            let updatedCell = try require(app.descendants(matching: .any)["issue-cell-updated-\(key)"], "issue-cell-updated-\(key)")
+            let rowCells = [keyCell, summaryCell, statusCell, assigneeCell, updatedCell]
+            for (index, cell) in rowCells.enumerated() {
+                assertFiniteBounded(cell.frame, name: "issue cell \(index) for \(key)")
+                XCTAssertTrue(row.frame.contains(cell.frame), "cell \(index) for \(key) should remain inside its row")
+                XCTAssertLessThanOrEqual(abs(cell.frame.midY - row.frame.midY), 4, "cells for \(key) should align on one row")
+                XCTAssertLessThanOrEqual(
+                    abs(cell.frame.minX - columnHeaders[index].frame.minX),
+                    12,
+                    "cell \(index) for \(key) should align with its column header"
+                )
+                XCTAssertFalse(semanticText(cell).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "cell \(index) for \(key) should expose visible content semantically")
+            }
+            XCTAssertTrue(semanticText(keyCell).contains(key), "key cell should expose the issue key")
+            XCTAssertGreaterThan(summaryCell.frame.width, 160, "summary cell should keep a useful visible text budget")
+            XCTAssertLessThan(summaryCell.frame.width, 520, "summary cell should remain bounded so long summaries can truncate visually")
+            XCTAssertTrue(semanticText(summaryCell).contains(summary), "summary cell should preserve full text when visual content is truncated")
+        }
+
+        let selectedRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "selected issue row DESK-184")
+        let unselectedRow = try require(app.descendants(matching: .any)["issue-row-DESK-171"], "unselected issue row DESK-171")
+        XCTAssertTrue(selectedRow.isSelected, "the retained issue selection should have selected row semantics")
+        XCTAssertFalse(unselectedRow.isSelected, "neighboring rows should remain unselected")
+        let overviewScreenshot = hostWindow.screenshot()
+        let selectedInterior = try requireScreenshotColor(
+            overviewScreenshot,
+            at: CGPoint(x: selectedRow.frame.maxX - 14, y: selectedRow.frame.midY),
+            in: hostWindow,
+            name: "selected overview row interior"
         )
-        let workspaceSummary = try require(
-            app.descendants(matching: .any)["issues-workspace-summary"],
-            "issues-workspace-summary"
+        let unselectedInterior = try requireScreenshotColor(
+            overviewScreenshot,
+            at: CGPoint(x: unselectedRow.frame.maxX - 14, y: unselectedRow.frame.midY),
+            in: hostWindow,
+            name: "unselected overview row interior"
         )
-        XCTAssertTrue(
-            semanticText(workspaceSummary).contains("3 tickets with unread updates · 3 issues in progress"),
-            "issue workspace should summarize actual unread groups and unfiltered active issues"
+        XCTAssertGreaterThan(
+            rgbDistance(selectedInterior, unselectedInterior),
+            18,
+            "selected overview row should use the full blue row surface"
         )
-        XCTAssertGreaterThan(workspaceSummary.frame.width, 220, "workspace summary should remain scannable")
-        XCTAssertLessThan(workspaceSummary.frame.height, 90, "workspace summary should remain one compact band")
-        XCTAssertTrue(hostWindow.frame.contains(workspaceSummary.frame), "workspace summary should stay in the host window")
-        let reviewUpdates = try require(app.buttons["issues-review-updates"], "issues-review-updates")
-        let showActive = try require(app.buttons["issues-show-active"], "issues-show-active")
-        XCTAssertEqual(reviewUpdates.label.isEmpty ? reviewUpdates.title : reviewUpdates.label, "Review updates")
-        XCTAssertEqual(showActive.label.isEmpty ? showActive.title : showActive.label, "Show active work")
-        XCTAssertFalse(reviewUpdates.frame.intersects(showActive.frame), "workspace actions must not overlap")
-        reviewUpdates.click()
-        _ = try require(app.descendants(matching: .any)["update-list"], "update-list from issue workspace")
+
+        // Sidebar navigation replaces the removed workspace shortcut while keeping its destination coverage.
         let navIssuesMatches = app.descendants(matching: .any)
             .matching(identifier: "nav-issues")
-        let navIssues = try require(navIssuesMatches.firstMatch, "nav-issues after reviewing updates")
+        let navUpdates = try require(app.descendants(matching: .any)["nav-updates"], "nav-updates / Local updates")
+        XCTAssertTrue(semanticText(navUpdates).contains("Local updates"), "sidebar should label the updates destination Local updates")
+        navUpdates.click()
+        _ = try require(app.descendants(matching: .any)["update-list"], "update-list from sidebar navigation")
+        let navIssues = try require(navIssuesMatches.firstMatch, "nav-issues from Local updates")
         XCTAssertEqual(navIssuesMatches.count, 1, "the sidebar should expose one Issues navigation item")
         assertFiniteBounded(navIssues.frame, name: "nav-issues before returning")
         XCTAssertTrue(hostWindow.frame.contains(navIssues.frame), "Issues navigation should remain inside the host window")
@@ -293,14 +362,9 @@ final class JiraDeskUITests: XCTestCase {
         let returnedNavIssues = try require(navIssuesMatches.firstMatch, "nav-issues after returning")
         assertFiniteBounded(returnedNavIssues.frame, name: "nav-issues after returning")
         XCTAssertTrue(hostWindow.frame.contains(returnedNavIssues.frame), "selected Issues navigation should remain inside the host window")
-        let returnedWorkspace = try require(
-            app.descendants(matching: .any)["issues-workspace-summary"],
-            "issue workspace after returning"
-        )
-        XCTAssertTrue(
-            semanticText(returnedWorkspace).contains("3 tickets with unread updates · 3 issues in progress"),
-            "activating Issues should restore the issue workspace"
-        )
+        let returnedTable = try require(app.descendants(matching: .any)["issues-table"], "issues-table after returning from Local updates")
+        XCTAssertTrue(hostWindow.frame.contains(returnedTable.frame), "returning to Issues should restore the overview table")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-detail"].exists, "sidebar return should restore overview without an open detail pane")
         let issuesOutlineRows = app.outlineRows.matching(
             NSPredicate(format: "label == %@", "Issues")
         )
@@ -322,82 +386,17 @@ final class JiraDeskUITests: XCTestCase {
             1,
             "the sidebar should have exactly one selected OutlineRow"
         )
-        let returnedShowActive = try require(app.buttons["issues-show-active"], "issues-show-active after returning")
-        returnedShowActive.click()
-        XCTAssertTrue(
-            waitForSemanticText("3 of 5 Jira issues", in: issueListSummary),
-            "Show active work should apply the local in-progress filter"
-        )
-        let summaryClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after active-work shortcut")
-        summaryClear.click()
-        XCTAssertTrue(waitForSemanticText("5 Jira issues", in: issueListSummary), "clearing should restore all loaded issues")
-
-        // Selection is communicated by the narrow accent rail. The row surface itself should
-        // remain the same neutral list surface as its neighbors.
-        let selectedRow = try require(
-            app.descendants(matching: .any)["issue-row-DESK-184"],
-            "issue-row-DESK-184 for selection styling"
-        )
-        let neighboringRow = try require(
-            app.descendants(matching: .any)["issue-row-DESK-171"],
-            "issue-row-DESK-171 for selection styling"
-        )
-        XCTAssertGreaterThan(selectedRow.frame.height, 70, "issue rows should retain readable metadata")
-        XCTAssertLessThan(selectedRow.frame.height, 120, "issue rows should remain compact and scannable")
-        XCTAssertGreaterThan(neighboringRow.frame.height, 70, "neighboring issue row should retain readable metadata")
-        XCTAssertLessThan(neighboringRow.frame.height, 120, "neighboring issue row should remain compact")
-        XCTAssertTrue(
-            semanticText(selectedRow).contains("DESK-184 (Story)") && semanticText(selectedRow).contains("Priority:"),
-            "compact row should retain issue type, key, summary, and secondary metadata semantics"
-        )
-        selectedRow.click()
-        XCTAssertTrue(selectedRow.exists, "selected issue row should remain discoverable")
-        let selectedDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after selecting DESK-184")
-        XCTAssertTrue(semanticText(selectedDetail).contains("DESK-184"), "clicking the row should select DESK-184")
-        issueSearch.click()
-        let selectionScreenshot = hostWindow.screenshot()
-        let selectedInterior = try requireScreenshotColor(
-            selectionScreenshot,
-            at: CGPoint(x: selectedRow.frame.minX + 8, y: selectedRow.frame.midY),
-            in: hostWindow,
-            name: "selected row interior"
-        )
-        let neighboringInterior = try requireScreenshotColor(
-            selectionScreenshot,
-            at: CGPoint(x: neighboringRow.frame.minX + 8, y: neighboringRow.frame.midY),
-            in: hostWindow,
-            name: "neighboring row interior"
-        )
-        let accentRail = try requireScreenshotColor(
-            selectionScreenshot,
-            at: CGPoint(x: selectedRow.frame.minX + 1, y: selectedRow.frame.midY),
-            in: hostWindow,
-            name: "selected row accent rail"
-        )
-        XCTAssertLessThan(
-            rgbDistance(selectedInterior, neighboringInterior),
-            12,
-            "selected row interior should retain the neutral list surface"
-        )
-        XCTAssertGreaterThan(
-            rgbDistance(accentRail, selectedInterior),
-            18,
-            "selected row should retain a visually distinct accent rail"
-        )
-
         // A natural-language summary is a local filter. Pressing Enter must not turn it into a
         // Jira lookup or surface an unavailable-workspace error.
         try setValue("MVP", identifier: "issue-search")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-search-submit"].exists, "natural language search should not offer Find key")
         issueSearch.click()
         app.typeKey(XCUIKeyboardKey.return, modifierFlags: [])
         XCTAssertFalse(
             app.descendants(matching: .any)["remote-lookup-error"].exists,
             "pressing Enter for a local summary must not show a Jira lookup error"
         )
-        XCTAssertTrue(
-            waitForSemanticText("1 of 5 Jira issues", in: issueListSummary),
-            "summary filtering should expose the deterministic filtered count"
-        )
+        XCTAssertTrue(waitForSemanticText("1 of 5 Jira issues", in: issueListSummary), "summary filtering should expose the deterministic filtered count")
         let localSummaryRow = try require(
             app.descendants(matching: .any)["issue-row-DESK-171"],
             "issue-row-DESK-171 after local summary search"
@@ -416,10 +415,6 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertTrue(waitForSemanticText("5 Jira issues", in: issueListSummary), "Clear filters should restore all local issues")
 
         // The status trigger and its popover option expose stable semantic IDs.
-        let statusFilter = try require(
-            app.descendants(matching: .any)["issue-status-filter"],
-            "issue-status-filter"
-        )
         XCTAssertTrue(semanticText(statusFilter).contains("Filter status: All statuses"), "status filter should expose the initial All statuses label")
         XCTAssertGreaterThan(statusFilter.frame.width, 120, "status filter should have a readable trigger width")
         statusFilter.click()
@@ -443,6 +438,7 @@ final class JiraDeskUITests: XCTestCase {
 
         // Add a non-matching local query, then clear both controls with the explicit action.
         try setValue("no matching issue", identifier: "issue-search")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-search-submit"].exists, "non-key text should not offer Find key")
         XCTAssertTrue(waitForSemanticText("0 of 5 Jira issues", in: issueListSummary), "combined filters should expose zero results")
         let clearCombinedFilters = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after combined filter")
         clearCombinedFilters.click()
@@ -458,12 +454,22 @@ final class JiraDeskUITests: XCTestCase {
         // fixture must resolve it locally rather than manufacturing a remote error.
         issueSearch.click()
         try setValue("DESK-171", identifier: "issue-search")
+        let searchSubmit = try require(app.buttons["issue-search-submit"], "issue-search-submit for valid Jira key")
+        XCTAssertEqual(searchSubmit.label.isEmpty ? searchSubmit.title : searchSubmit.label, "Find key")
+        XCTAssertTrue(hostWindow.frame.contains(searchSubmit.frame), "contextual key action should stay inside the host window")
         searchSubmit.click()
         let keyLookupDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after local key lookup")
         let selectedDetailText = [keyLookupDetail.label, keyLookupDetail.title, keyLookupDetail.value as? String ?? ""].joined(separator: " ")
         XCTAssertTrue(selectedDetailText.contains("DESK-171"), "exact local key lookup should select DESK-171")
+        XCTAssertTrue(app.descendants(matching: .any)["issues-table"].exists, "opening a key should keep the compact issue list beside detail")
         let finalClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after key lookup")
         finalClear.click()
+        let detailBack = try require(app.buttons["issue-detail-back"], "issue-detail-back")
+        XCTAssertTrue(semanticText(detailBack).contains("Back to issues"), "detail should expose a semantic overview return action")
+        detailBack.click()
+        let restoredTable = try require(app.descendants(matching: .any)["issues-table"], "issues-table after closing details")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-detail"].exists, "Back to issues should close the detail pane")
+        XCTAssertGreaterThan(restoredTable.frame.width, initialOverviewTableWidth * 0.85, "closing details should restore the full-width overview")
 
         let sidebar = try require(
             app.descendants(matching: .any)["dashboard-sidebar"],
@@ -555,26 +561,20 @@ final class JiraDeskUITests: XCTestCase {
             "collapsed refresh should be vertically below the profile"
         )
 
-        for (key, expectedType) in [
-            ("DESK-184", "Story"),
-            ("DESK-179", "Task"),
-            ("DESK-176", "Bug"),
-            ("DESK-171", "Epic"),
-        ] {
+        for key in ["DESK-184", "DESK-179", "DESK-176", "DESK-171"] {
             let row = try require(
                 app.descendants(matching: .any)["issue-row-\(key)"],
                 "issue-row-\(key)"
             )
-            // AX merges the colored issue-type child into its clickable row, so the row is the
-            // stable semantic identity for both the issue and its type.
             let rowSemanticText = [row.label, row.title, row.value as? String ?? ""]
                 .joined(separator: " ")
             XCTAssertTrue(
-                rowSemanticText.contains("\(key) (\(expectedType))"),
-                "\(key) should expose its exact issue-type identity"
+                rowSemanticText.contains(key),
+                "\(key) table row should retain its issue identity"
             )
             XCTAssertGreaterThan(row.frame.width, 300, "\(key) row should have meaningful bounded width")
-            XCTAssertGreaterThan(row.frame.height, 50, "\(key) row should have meaningful bounded height")
+            XCTAssertGreaterThan(row.frame.height, 30, "\(key) row should remain readable")
+            XCTAssertLessThan(row.frame.height, 70, "\(key) row should remain compact")
             XCTAssertLessThan(row.frame.width, 2_000, "\(key) row width should remain finite and bounded")
             XCTAssertLessThan(row.frame.height, 500, "\(key) row height should remain finite and bounded")
             XCTAssertTrue(
@@ -585,27 +585,7 @@ final class JiraDeskUITests: XCTestCase {
                 "\(key) row position should remain finite"
             )
         }
-        let storyRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184")
-        XCTAssertTrue(storyRow.title.contains("(Story)"), "known Story row should retain its issue-type identity")
         let row = try require(app.descendants(matching: .any)["issue-row-DESK-179"], "issue-row-DESK-179")
-        XCTAssertTrue(row.title.contains("(Task)"), "known Task row should retain its issue-type identity")
-        for (key, expectedPriority) in [
-            ("DESK-179", "Highest"),
-            ("DESK-171", "High"),
-            ("DESK-163", "Medium"),
-            ("DESK-176", "Low"),
-            ("DESK-184", "Lowest"),
-        ] {
-            let issueRow = try require(
-                app.descendants(matching: .any)["issue-row-\(key)"],
-                "issue-row-\(key)"
-            )
-            XCTAssertTrue(
-                issueRow.title.contains("Priority: \(expectedPriority)")
-                    || issueRow.label.contains("Priority: \(expectedPriority)"),
-                "\(key) should expose its exact Jira priority semantically"
-            )
-        }
         let workspaceHeader = try require(
             app.descendants(matching: .any)["sidebar-workspace-header"],
             "sidebar-workspace-header"
@@ -617,6 +597,9 @@ final class JiraDeskUITests: XCTestCase {
         )
         row.click()
         let detail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail")
+        let compactTable = try require(app.descendants(matching: .any)["issues-table"], "compact issues table beside detail")
+        XCTAssertLessThan(compactTable.frame.width, initialOverviewTableWidth * 0.7, "opening detail should compact the issue list")
+        XCTAssertFalse(detail.frame.intersects(compactTable.frame), "compact list and detail should occupy separate regions")
         let detailExpectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { object, _ in
                 guard let detail = object as? XCUIElement else {
@@ -701,6 +684,7 @@ final class JiraDeskUITests: XCTestCase {
         ).firstMatch
         XCTAssertFalse(detailLoading.exists, "cached empty detail should not show a detail spinner")
 
+        let storyRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184")
         storyRow.click()
         row.click()
         let reselectedEmptyDescription = try require(
@@ -778,6 +762,8 @@ final class JiraDeskUITests: XCTestCase {
 
     func testRichContent() throws {
         try launchFixture(scenario: "rich-content")
+        let richFixtureRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "rich-content issue-row-DESK-184")
+        richFixtureRow.click()
         let markdownSurface = try require(
             app.descendants(matching: .any)["issue-description-markdown"],
             "issue-description-markdown"
@@ -1121,6 +1107,8 @@ final class JiraDeskUITests: XCTestCase {
 
     func testKitComponentSemanticsAndBoundedGeometry() throws {
         try launchFixture(scenario: "components")
+        let componentFixtureRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "components issue-row-DESK-184")
+        componentFixtureRow.click()
 
         let detail = try require(
             app.descendants(matching: .any)["issue-detail"],
@@ -1188,6 +1176,8 @@ final class JiraDeskUITests: XCTestCase {
 
     func testAlertComponentSemantics() throws {
         try launchFixture(scenario: "alert")
+        let alertFixtureRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "alert issue-row-DESK-184")
+        alertFixtureRow.click()
         let alert = app.descendants(matching: .any)["issue-detail-error"]
         let fallback = app.descendants(matching: .any)["issue-detail-error-surface"]
         let surface = alert.exists ? alert : fallback
@@ -1201,6 +1191,8 @@ final class JiraDeskUITests: XCTestCase {
 
     func testAssigneeListConfirmation() throws {
         try launchFixture(scenario: "assignee")
+        let assigneeFixtureRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "assignee issue-row-DESK-184")
+        assigneeFixtureRow.click()
         let list = try require(app.descendants(matching: .any)["assignee-list"], "assignee-list")
         let unassigned = try require(app.descendants(matching: .any)["assignee-0"], "assignee-0")
         let firstUser = try require(app.descendants(matching: .any)["assignee-1"], "assignee-1")
@@ -1221,7 +1213,7 @@ final class JiraDeskUITests: XCTestCase {
 
     func testVirtualizedIssueRowsRemainIdentifiableAfterScrollAndFilter() throws {
         try launchFixture(scenario: "virtualized")
-        let list = try require(app.descendants(matching: .any)["issue-list"], "issue-list")
+        let list = try require(app.descendants(matching: .any)["issues-table"], "issues-table")
         let summary = try require(app.descendants(matching: .any)["issue-list-summary"], "issue-list-summary")
         XCTAssertTrue(waitForSemanticText("45 Jira issues", in: summary), "virtualized fixture should expose its full count")
 

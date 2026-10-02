@@ -185,7 +185,7 @@ impl Dashboard {
                 cx,
             ))
             .child(self.sidebar_menu_item(
-                "Inbox",
+                "Local updates",
                 self.unread_count(),
                 self.section == Section::Updates,
                 Section::Updates,
@@ -407,6 +407,10 @@ impl Dashboard {
                 Sidebar::new("dashboard-sidebar-component")
                     .collapsible(SidebarCollapsible::Icon)
                     .collapsed(collapsed)
+                    .when(
+                        cx.theme().is_dark() && self.section == Section::Issues,
+                        |this| this.bg(gpui_kit::rgb(0x0d1316)),
+                    )
                     .w(gpui_kit::rems(15.))
                     .header(header)
                     .child(menu)
@@ -502,7 +506,7 @@ impl Dashboard {
         };
         let accessible_label = match section {
             Section::Issues => format!("Issues · {count} issues"),
-            Section::Updates => format!("Inbox · {count} unread"),
+            Section::Updates => format!("Local updates · {count} unread"),
             Section::Team => format!("Team tracker · {count} in-progress tickets"),
             Section::Settings => "Settings".to_owned(),
         };
@@ -510,8 +514,21 @@ impl Dashboard {
             SidebarMenuItem::new(label)
                 .icon(icon)
                 .active(selected)
-                .when(count > 0, |this| {
-                    this.suffix(move |_, _| div().text_xs().child(count.to_string()))
+                .when(section == Section::Updates && count > 0, |this| {
+                    this.suffix(move |_, cx| {
+                        div()
+                            .min_w_6()
+                            .h_6()
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(cx.theme().sidebar_accent)
+                            .text_color(cx.theme().sidebar_accent_foreground)
+                            .text_xs()
+                            .child(count.to_string())
+                    })
                 }),
             accessibility_id,
             accessible_label,
@@ -703,8 +720,8 @@ impl Dashboard {
             .child(self.mobile_nav_item(
                 MobileNavItem {
                     id: "mobile-updates",
-                    label: "Inbox",
-                    accessible_label: format!("Inbox · {} unread", self.unread_count()),
+                    label: "Updates",
+                    accessible_label: format!("Local updates · {} unread", self.unread_count()),
                     selected: updates_active,
                     section: Section::Updates,
                     width: nav_item_width,
@@ -961,8 +978,8 @@ mod tests {
             );
             if expected_section == Section::Issues {
                 assert!(
-                    visual.debug_bounds("issues-workspace-summary").is_some(),
-                    "activating {id} should render the Issues workspace"
+                    visual.debug_bounds("issues-toolbar").is_some(),
+                    "activating {id} should render the Issues toolbar"
                 );
                 assert!(
                     visual.debug_bounds("update-list").is_none(),

@@ -1030,6 +1030,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.prepare_for_ui_automation();
+        self.mobile_detail_open = true;
         self.ensure_assignee_input(window, cx);
         self.ensure_assignee_list(window, cx);
         let Some(issue) = self.selected_issue_view() else {
@@ -1111,6 +1112,7 @@ impl Dashboard {
     #[cfg(feature = "ui-automation")]
     pub(crate) fn from_ui_automation_alert() -> Self {
         let mut dashboard = Self::from_sample_data_for_section(SampleSection::Issues);
+        dashboard.mobile_detail_open = true;
         let issue_id = dashboard
             .domain_issues
             .first()
@@ -1137,6 +1139,7 @@ impl Dashboard {
         };
 
         let mut dashboard = Self::from_sample_data();
+        dashboard.mobile_detail_open = true;
         let image = RichImage {
             attachment_id: "fixture-image".to_owned(),
             filename: "cached-fixture.png".to_owned(),
@@ -2041,6 +2044,7 @@ impl Dashboard {
         expected_query: String,
         cx: &mut Context<Self>,
     ) {
+        self.mobile_detail_open = true;
         if let Some(issue_id) = issue_id_for_key_in_sources(
             &key,
             &self.domain_issues,
@@ -2049,6 +2053,7 @@ impl Dashboard {
         ) {
             self.clear_remote_lookup();
             self.select_issue(issue_id, cx, true);
+            cx.notify();
             return;
         }
 
@@ -2199,6 +2204,8 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        self.section = Section::Issues;
+        self.mobile_detail_open = true;
         if let Some(issue_id) = issue_id_for_key_in_sources(
             &key,
             &self.domain_issues,
@@ -2528,11 +2535,11 @@ impl Dashboard {
             })
     }
 
-    fn open_update_issue(&mut self, issue_id: IssueId, mobile: bool, cx: &mut Context<Self>) {
+    fn open_update_issue(&mut self, issue_id: IssueId, _mobile: bool, cx: &mut Context<Self>) {
         self.clear_remote_lookup();
         self.select_issue(issue_id, cx, false);
         self.section = Section::Issues;
-        self.mobile_detail_open = mobile;
+        self.mobile_detail_open = true;
         cx.notify();
     }
 
@@ -3747,7 +3754,7 @@ impl Dashboard {
             return;
         }
         let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search issue key or summary"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search issue key or summary…"));
         self.search_subscriptions
             .push(cx.subscribe_in(&input, window, {
                 let input = input.clone();

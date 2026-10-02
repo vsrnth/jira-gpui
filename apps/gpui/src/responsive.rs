@@ -52,8 +52,10 @@ pub(crate) fn issues_pane_mode(layout: LayoutMode, mobile_detail_open: bool) -> 
         } else {
             IssuesPaneMode::ListOnly
         }
-    } else {
+    } else if mobile_detail_open {
         IssuesPaneMode::ListAndDetail
+    } else {
+        IssuesPaneMode::ListOnly
     }
 }
 
@@ -189,12 +191,9 @@ mod tests {
     };
 
     #[test]
-    fn issue_panes_keep_desktop_detail_visible() {
+    fn desktop_issue_panes_open_details_only_after_selection() {
         for layout in [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide] {
-            assert_eq!(
-                issues_pane_mode(layout, false),
-                IssuesPaneMode::ListAndDetail
-            );
+            assert_eq!(issues_pane_mode(layout, false), IssuesPaneMode::ListOnly);
             assert_eq!(
                 issues_pane_mode(layout, true),
                 IssuesPaneMode::ListAndDetail

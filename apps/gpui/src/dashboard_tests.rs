@@ -260,6 +260,7 @@ fn search_input_enter_ignores_summary_and_selects_local_issue_key(
         dashboard_entity.update(cx, |dashboard, _| {
             // The Enter event is emitted only after Change has been drained, matching typing.
             assert_eq!(dashboard.selected_issue.as_ref(), Some(&issue_id));
+            assert!(dashboard.mobile_detail_open);
         });
     });
 }
@@ -526,6 +527,7 @@ fn native_status_popover_list_is_bounded_and_selection_only_confirms(
     );
 
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     let issue_id = dashboard.selected_issue.clone().expect("selected issue");
     dashboard.workspace = Some(workspace);
     dashboard.status_transition_items = transitions.clone();
@@ -1464,6 +1466,7 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
     let issue = sample_issues().into_iter().next().expect("issue");
     let issue_id = issue.id.clone();
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     // This test isolates cached detail rendering; the native status lookup is
     // covered by the dedicated status-popover fixture below.
     dashboard.status_transition_reads_suppressed = true;
@@ -1587,6 +1590,7 @@ fn empty_cached_detail_renders_without_spinner_and_survives_background_failure(
     let issue = sample_issues().into_iter().next().expect("issue");
     let issue_id = issue.id.clone();
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     dashboard.status_transition_reads_suppressed = true;
     dashboard.workspace = Some(Arc::new(workspace));
     let cached_issue = dashboard
@@ -1783,7 +1787,7 @@ fn unknown_related_lookup_preserves_search_filter_when_workspace_is_unavailable(
 }
 
 #[gpui_kit::test]
-fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui_kit::TestAppContext) {
+fn open_update_selects_issue_and_opens_desktop_detail(cx: &mut gpui_kit::TestAppContext) {
     let issue = sample_issues()
         .into_iter()
         .find(|issue| issue.key.as_str() == "DESK-176")
@@ -1791,7 +1795,7 @@ fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui_kit::TestAppC
     let dashboard = cx.new(|_| Dashboard::from_sample_data());
 
     cx.update_entity(&dashboard, |dashboard, cx| {
-        dashboard.open_update_issue(issue.id.clone(), true, cx);
+        dashboard.open_update_issue(issue.id.clone(), false, cx);
     });
     let (selected_issue, section, mobile_detail_open) =
         cx.read_entity(&dashboard, |dashboard, _| {
@@ -1847,7 +1851,136 @@ fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui_kit::TestAppC
     let selected_row = visual
         .debug_bounds("issue-row-10179")
         .expect("selected issue row should remain laid out");
-    assert_eq!(selected_row.size, row.size);
+    assert!(visual.debug_bounds("issue-detail").is_some());
+    assert!(selected_row.size.width < row.size.width);
+    assert!(selected_row.size.height > row.size.height);
+}
+
+#[gpui_kit::test]
+fn desktop_issue_overview_opens_and_closes_the_detail_panes(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+
+    let window = cx.open_window(gpui_kit::size(px(1200.), px(900.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issues-toolbar").is_some());
+    assert!(visual.debug_bounds("issues-table").is_some());
+    assert!(visual.debug_bounds("issue-detail").is_none());
+
+    let row = visual
+        .debug_bounds("issue-row-10179")
+        .expect("overview should render issue rows");
+    let table = visual
+        .debug_bounds("issues-table")
+        .expect("overview table should be laid out");
+    let row_left_inset = row.origin.x - table.origin.x;
+    let row_right_inset = table.origin.x + table.size.width - row.origin.x - row.size.width;
+    assert!(
+        row_left_inset >= px(8.),
+        "table row should have an 8px left inset: {row:?}"
+    );
+    assert!(
+        row_right_inset >= px(8.),
+        "table row should have an 8px right inset: row={row:?}, table={table:?}"
+    );
+    assert!(
+        table.size.width - row.size.width >= px(16.),
+        "table row should preserve at least 16px of combined horizontal inset: row={row:?}, table={table:?}"
+    );
+    assert!(
+        row.size.height >= px(30.) && row.size.height <= px(45.),
+        "overview row should stay compact: {row:?}"
+    );
+
+    let status_header = visual
+        .debug_bounds("issues-column-status")
+        .expect("status column header should be laid out");
+    let status_cell = visual
+        .debug_bounds("issue-cell-status-DESK-179")
+        .expect("status column cell should be laid out");
+    assert!(
+        (f32::from(status_header.origin.x) - f32::from(status_cell.origin.x)).abs() <= 1.0,
+        "status cell should align with its header: header={status_header:?}, cell={status_cell:?}"
+    );
+
+    visual.simulate_click(
+        gpui_kit::point(
+            row.origin.x + row.size.width / 2.,
+            row.origin.y + row.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issue-detail").is_some());
+    assert!(visual.debug_bounds("issue-detail-back").is_some());
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.mobile_detail_open));
+
+    let back = visual
+        .debug_bounds("issue-detail-back")
+        .expect("opened detail should offer a back action");
+    visual.simulate_click(
+        gpui_kit::point(
+            back.origin.x + back.size.width / 2.,
+            back.origin.y + back.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issues-toolbar").is_some());
+    assert!(visual.debug_bounds("issues-table").is_some());
+    assert!(visual.debug_bounds("issue-detail").is_none());
+    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.mobile_detail_open));
+}
+
+#[gpui_kit::test]
+fn desktop_issue_toolbar_fits_valid_key_and_clear_action_at_standard_width(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.ensure_search_input(window, cx);
+            let input = dashboard.search_input.clone().expect("issue search input");
+            input.update(cx, |input, cx| input.set_value("DESK-179", window, cx));
+            dashboard.set_search_query("DESK-179".to_owned(), cx);
+            dashboard.set_status_filter(IssueStatusFilter::Done, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let toolbar = visual
+        .debug_bounds("issues-toolbar")
+        .expect("issues toolbar should be laid out");
+    for selector in ["issue-search", "issue-search-submit", "issue-filters-clear"] {
+        let control = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be laid out"));
+        assert!(
+            control.origin.x >= toolbar.origin.x
+                && control.origin.y >= toolbar.origin.y
+                && control.origin.x + control.size.width
+                    <= toolbar.origin.x + toolbar.size.width + px(1.)
+                && control.origin.y + control.size.height
+                    <= toolbar.origin.y + toolbar.size.height + px(1.),
+            "toolbar control should remain within the toolbar: selector={selector}, control={control:?}, toolbar={toolbar:?}"
+        );
+    }
 }
 
 #[gpui_kit::test]
@@ -1856,9 +1989,9 @@ fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
 ) {
     cx.update(gpui_kit::component::init);
 
-    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| {
-        Dashboard::from_sample_data()
-    });
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
+    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2593,6 +2726,7 @@ fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui_ki
     cx.update(gpui_kit::component::init);
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
     let window = cx.open_window(gpui_kit::size(px(1_200.), px(1_200.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");

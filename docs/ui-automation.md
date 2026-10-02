@@ -270,25 +270,23 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   remain inert, the status and dialog must remain present, and no dashboard may
   open. The fixture supplies no credentials or token, and this scenario uses no
   keychain, network, Jira, persistence, or Jira writes.
-- `issues` selects the deterministic fixture row `issue-row-DESK-179` and
-  verifies Story/Task/Bug/Epic type identity and their rendered semantic color
-  surfaces, the normalized `sample` workspace label,
-  and bounded-waits for the `issue-detail` accessible title/label to become
-  exactly `Issue detail for DESK-179`. It also verifies the semantic
-  `issue-detail-details-trigger` control, confirms that the Details accordion
-  starts expanded, collapses and reopens it, and checks that its height changes
-  and returns within bounded geometry tolerances. The fixture also checks all
-  five stable priority identities and labels, and reselects an issue with a
-  genuinely empty cached description to ensure it remains ready without a
-  loading spinner while background refresh is deferred.
+- `issues` starts with the full-width overview table and no open detail pane.
+  It checks the single toolbar, stable key/summary/status/assignee/updated
+  column and cell identities, aligned bounded cells, compact row geometry, and
+  full-summary accessibility text when long visible summaries truncate. The
+  selected row must expose selected semantics and a full blue row surface.
+  Activating a row opens the compact list beside the existing detail pane;
+  `Back to issues` closes details and restores the full-width table. Detail
+  checks retain the normalized `sample` workspace identity, the stable
+  `issue-detail-details-trigger`, and bounded collapse/reopen geometry.
 - `issues` also verifies the local search contract: summary text remains a
-  local filter when activated with Enter (without a Jira lookup error), exact
-  issue keys still use the explicit `Find key` action and select locally known
-  fixture issues, and `Clear filters` restores the input, `All statuses`, and
-  the fixture's full five-issue result count after combined filters. The
-  search/status controls and count are checked for semantic labels, usable
-  toolbar geometry, and non-overlap inside the host window.
-- `issues` also verifies concise post-refresh status copy, the single
+  local filter when activated with Enter (without a Jira lookup error), and
+  only a syntactically valid issue key reveals the contextual `Find key`
+  action. Exact local keys open the matching fixture detail; `Clear filters`
+  restores the input, `All statuses`, and the fixture's full five-issue count.
+  The status dropdown retains its semantic selection and filters locally.
+- `issues` also navigates between Issues and Local updates through the sidebar,
+  then verifies concise post-refresh status copy, the single
   icon-only `Refresh Jira` Sidebar action beside the username/profile when
   expanded and stacked below the profile in the collapsed rail, and the detail
   type/status/priority row:
