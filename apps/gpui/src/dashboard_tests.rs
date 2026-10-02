@@ -2822,6 +2822,64 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
 }
 
 #[gpui_kit::test]
+fn team_linked_issue_summary_stays_readable_at_1280px(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+
+    let issue = sample_issues()
+        .into_iter()
+        .find(|issue| issue.key.as_str() == "DESK-184")
+        .expect("linked Team fixture issue");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Team;
+    dashboard.sidebar_collapsed = false;
+    dashboard.team_members = vec![PersistedTeamMember {
+        identifier: "amina".to_owned(),
+        account_id: "amina".to_owned(),
+        display_name: "Amina Yusuf".to_owned(),
+    }];
+    dashboard.team_issues = sample_issues();
+    dashboard.selected_issue = Some(issue.id.clone());
+    dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
+
+    let window = cx.open_window(gpui_kit::size(px(1280.), px(900.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let pane = visual
+        .debug_bounds("team-detail")
+        .expect("Team issue detail should be laid out");
+    let linked_row = visual
+        .debug_bounds("issue-detail-linked-row-1")
+        .expect("second linked issue should have a stable geometry selector");
+    let linked_summary = visual
+        .debug_bounds("issue-detail-linked-summary-1")
+        .expect("second linked issue summary should have a stable geometry selector");
+
+    assert!(
+        (400. ..=430.).contains(&f32::from(pane.size.width)),
+        "1280px Team viewport should retain the expected approximately 420px detail pane: {pane:?}"
+    );
+    assert!(
+        linked_row.origin.x >= pane.origin.x
+            && linked_row.origin.y >= pane.origin.y
+            && linked_row.origin.x + linked_row.size.width
+                <= pane.origin.x + pane.size.width + px(1.),
+        "linked issue row should stay inside the detail pane: pane={pane:?}, row={linked_row:?}"
+    );
+    assert!(
+        linked_row.size.height <= px(100.),
+        "linked summary should not collapse into a tall one-word stack: {linked_row:?}"
+    );
+    assert!(
+        linked_summary.size.width >= px(160.)
+            && linked_summary.size.height > px(0.)
+            && linked_summary.size.width <= linked_row.size.width,
+        "linked summary should retain at least 160px inside the row: row={linked_row:?}, summary={linked_summary:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::component::init);
     let issue = sample_issues().into_iter().next().expect("sample issue");

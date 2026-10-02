@@ -26,6 +26,7 @@ fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
         .debug_selector(move || selector.to_owned())
         .accessibility_id(selector)
         .role(gpui_kit::accesskit::Role::Label)
+        .aria_label(value.clone())
         .min_w_0()
         .text_sm()
         .child(value)
@@ -520,7 +521,7 @@ impl Dashboard {
                                                 .id(detail_key_accessibility_id.clone())
                                                 .debug_selector(|| "issue-detail-key".to_owned())
                                                 .accessibility_id(detail_key_accessibility_id)
-                                                .role(gpui_kit::accesskit::Role::TextRun)
+                                                .role(gpui_kit::accesskit::Role::Label)
                                                 .aria_label(detail_key_label)
                                                 .min_w_0()
                                                 .child(div().min_w_0().truncate().child(key)),
@@ -533,7 +534,11 @@ impl Dashboard {
                     )
                     .child(
                         div()
+                            .id("issue-detail-summary")
                             .debug_selector(|| "issue-detail-summary".to_owned())
+                            .accessibility_id("issue-detail-summary")
+                            .role(gpui_kit::accesskit::Role::Heading)
+                            .aria_label(summary.clone())
                             .min_w_0()
                             .line_clamp(if layout.is_mobile() { 3 } else { 4 })
                             .text_xl()
@@ -598,7 +603,7 @@ impl Dashboard {
                                     .id("issue-detail-updated-header")
                                     .debug_selector(|| "issue-detail-updated-header".to_owned())
                                     .accessibility_id("issue-detail-updated-header")
-                                    .role(gpui_kit::accesskit::Role::TextRun)
+                                    .role(gpui_kit::accesskit::Role::Label)
                                     .aria_label(format!("Updated {header_updated}"))
                                     .min_w_0()
                                     .text_color(cx.theme().muted_foreground)
@@ -715,6 +720,9 @@ impl Dashboard {
                                         )
                                         .child(
                                             div()
+                                                .debug_selector(move || {
+                                                    format!("issue-detail-linked-summary-{index}")
+                                                })
                                                 .min_w(px(160.))
                                                 .when(!layout.is_mobile(), |this| this.flex_1())
                                                 .whitespace_normal()
@@ -748,38 +756,38 @@ impl Dashboard {
                                 .bordered(true)
                                 .with_size(Size::Small)
                                 .item(|item| {
-                                    item.open(details_open)
-                                        .title(
-                                            div()
-                                                .id("issue-detail-details-trigger-label")
-                                                .debug_selector(|| {
-                                                    "issue-detail-details-trigger".to_owned()
-                                                })
-                                                .accessibility_id("issue-detail-details-trigger")
-                                                .role(gpui_kit::accesskit::Role::Button)
-                                                .aria_label("Details")
-                                                .aria_expanded(details_open)
-                                                // The Accordion component owns the pointer interaction;
-                                                // this non-tab-stop semantic child gives macOS AX clients
-                                                // a stable, pressable trigger without replacing it.
-                                                .tab_index(-1)
-                                                .on_a11y_action(
-                                                    gpui_kit::AccessibleAction::Click,
-                                                    move |_, _, cx| {
-                                                        if let Some(dashboard) =
-                                                            dashboard_for_details_a11y.upgrade()
-                                                        {
-                                                            dashboard.update(cx, |this, cx| {
-                                                                this.issue_details_open =
-                                                                    !this.issue_details_open;
-                                                                cx.notify();
-                                                            });
-                                                        }
-                                                    },
-                                                )
-                                                .child("Details"),
-                                        )
-                                        .child(
+                                    let item = item.open(details_open).title(
+                                        div()
+                                            .id("issue-detail-details-trigger-label")
+                                            .debug_selector(|| {
+                                                "issue-detail-details-trigger".to_owned()
+                                            })
+                                            .accessibility_id("issue-detail-details-trigger")
+                                            .role(gpui_kit::accesskit::Role::Button)
+                                            .aria_label("Details")
+                                            .aria_expanded(details_open)
+                                            // The Accordion component owns the pointer interaction;
+                                            // this non-tab-stop semantic child gives macOS AX clients
+                                            // a stable, pressable trigger without replacing it.
+                                            .tab_index(-1)
+                                            .on_a11y_action(
+                                                gpui_kit::AccessibleAction::Click,
+                                                move |_, _, cx| {
+                                                    if let Some(dashboard) =
+                                                        dashboard_for_details_a11y.upgrade()
+                                                    {
+                                                        dashboard.update(cx, |this, cx| {
+                                                            this.issue_details_open =
+                                                                !this.issue_details_open;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                },
+                                            )
+                                            .child("Details"),
+                                    );
+                                    if details_open {
+                                        item.child(
                                             DescriptionList::horizontal()
                                                 .with_size(Size::Small)
                                                 .columns(1)
@@ -862,6 +870,9 @@ impl Dashboard {
                                                     1,
                                                 ),
                                         )
+                                    } else {
+                                        item
+                                    }
                                 })
                                 .on_toggle_click(cx.listener(
                                     |this, open_indices: &[usize], _, cx| {
@@ -1187,6 +1198,7 @@ impl Dashboard {
                         .id("issue-watch-confirmation-title")
                         .accessibility_id("issue-watch-confirmation-title")
                         .role(gpui_kit::accesskit::Role::Label)
+                        .aria_label(heading.clone())
                         .text_sm()
                         .font_semibold()
                         .child(heading),
