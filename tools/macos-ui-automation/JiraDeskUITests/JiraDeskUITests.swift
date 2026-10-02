@@ -464,6 +464,19 @@ final class JiraDeskUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["issues-table"].exists, "opening a key should keep the compact issue list beside detail")
         let finalClear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear after key lookup")
         finalClear.click()
+        let anotherIssueRow = try require(app.descendants(matching: .any)["issue-row-DESK-184"], "issue-row-DESK-184 beside open detail")
+        anotherIssueRow.click()
+        let selectedAnotherDetail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after selecting another row")
+        let anotherDetailExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let detail = object as? XCUIElement else { return false }
+                let identity = [detail.label, detail.title, detail.value as? String ?? ""].joined(separator: " ")
+                return identity.contains("DESK-184")
+            },
+            object: selectedAnotherDetail
+        )
+        XCTAssertTrue(XCTWaiter.wait(for: [anotherDetailExpectation], timeout: 8) == .completed, "selecting another visible row should update the existing detail pane")
+        XCTAssertTrue(app.descendants(matching: .any)["issues-table"].exists, "the issue table should remain visible while the selected detail changes")
         let detailBack = try require(app.buttons["issue-detail-back"], "issue-detail-back")
         XCTAssertTrue(semanticText(detailBack).contains("Back to issues"), "detail should expose a semantic overview return action")
         detailBack.click()
@@ -598,8 +611,11 @@ final class JiraDeskUITests: XCTestCase {
         row.click()
         let detail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail")
         let compactTable = try require(app.descendants(matching: .any)["issues-table"], "compact issues table beside detail")
-        XCTAssertLessThan(compactTable.frame.width, initialOverviewTableWidth * 0.7, "opening detail should compact the issue list")
+        XCTAssertLessThan(compactTable.frame.width, initialOverviewTableWidth * 0.7, "opening detail should give the detail pane its own region")
+        XCTAssertGreaterThanOrEqual(compactTable.frame.width, 280, "table viewport should retain a usable width beside detail")
+        XCTAssertTrue(hostWindow.frame.contains(compactTable.frame), "table viewport should stay inside the host window")
         XCTAssertFalse(detail.frame.intersects(compactTable.frame), "compact list and detail should occupy separate regions")
+        XCTAssertLessThan(row.frame.height, 45, "selecting an issue should keep the table row compact")
         let detailExpectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { object, _ in
                 guard let detail = object as? XCUIElement else {
@@ -612,22 +628,31 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertTrue(XCTWaiter.wait(for: [detailExpectation], timeout: 8) == .completed)
 
-        let typeSurface = try require(
-            app.descendants(matching: .any)["issue-detail-type-surface"],
-            "issue-detail-type-surface"
+        let updatedHeader = try require(
+            app.descendants(matching: .any)["issues-column-updated"],
+            "Updated column header in the horizontally scrollable table"
         )
-        let typeSemanticText = [
-            typeSurface.label,
-            typeSurface.title,
-            typeSurface.value as? String ?? "",
-        ]
+        let updatedCell = try require(
+            app.descendants(matching: .any)["issue-cell-updated-DESK-179"],
+            "Updated cell in the horizontally scrollable table"
+        )
+        compactTable.scroll(byDeltaX: 600, deltaY: 0)
+        XCTAssertTrue(compactTable.frame.contains(updatedHeader.frame), "horizontal scroll should bring the Updated header into the table viewport")
+        XCTAssertTrue(compactTable.frame.contains(updatedCell.frame), "header and row content should scroll together into the table viewport")
+        XCTAssertLessThanOrEqual(abs(updatedHeader.frame.minX - updatedCell.frame.minX), 12, "Updated cell should remain aligned with its header after horizontal scrolling")
+        compactTable.scroll(byDeltaX: -600, deltaY: 0)
+
+        let statusPill = try require(
+            app.descendants(matching: .any)["issue-detail-status-pill"],
+            "issue-detail-status-pill"
+        )
         XCTAssertTrue(
-            typeSemanticText.contains("Issue type: Task"),
-            "detail metadata should expose the exact issue type semantically"
+            semanticText(statusPill).contains("Status: To Do"),
+            "the header should expose the current status as static text"
         )
-        let statusTrigger = try require(
-            app.descendants(matching: .any)["issue-status-trigger"],
-            "issue-status-trigger"
+        XCTAssertFalse(
+            app.descendants(matching: .any)["issue-detail-type"].exists,
+            "collapsed Details should hide issue type metadata"
         )
         let priorityBadge = try require(
             app.descendants(matching: .any)["priority-badge-detail-DESK-179"],
@@ -642,24 +667,44 @@ final class JiraDeskUITests: XCTestCase {
             prioritySemanticText.contains("Priority: Highest"),
             "detail metadata should expose the exact priority semantically"
         )
-        let assignee = try require(
-            app.descendants(matching: .any)["change-assignee"],
-            "change-assignee"
-        )
-        let metadataControls = [typeSurface, statusTrigger, priorityBadge, assignee]
+        let metadataControls = [statusPill, priorityBadge]
         for (index, control) in metadataControls.enumerated() {
             XCTAssertGreaterThan(control.frame.width, 0, "metadata control \(index) should have visible width")
             XCTAssertGreaterThan(control.frame.height, 0, "metadata control \(index) should have visible height")
             XCTAssertLessThan(control.frame.width, 500, "metadata control \(index) should remain bounded")
             XCTAssertLessThan(control.frame.height, 100, "metadata control \(index) should remain bounded")
             XCTAssertTrue(detail.frame.contains(control.frame), "metadata control \(index) should be in issue detail")
-            if index > 0 {
-                XCTAssertLessThanOrEqual(
-                    abs(control.frame.midY - metadataControls[0].frame.midY),
-                    8,
-                    "metadata controls should share one bounded row"
-                )
-            }
+        }
+        let overflowTrigger = try require(
+            app.buttons["issue-detail-overflow-trigger"],
+            "issue-detail-overflow-trigger"
+        )
+        overflowTrigger.click()
+        let assigneeAction = try require(
+            app.buttons["issue-detail-overflow-assignee"],
+            "assignee action in issue overflow menu"
+        )
+        XCTAssertEqual(assigneeAction.label.isEmpty ? assigneeAction.title : assigneeAction.label, "Change assignee")
+        assertFiniteBounded(assigneeAction.frame, name: "issue-detail-overflow-assignee")
+        overflowTrigger.click()
+        let actionBar = try require(
+            app.descendants(matching: .any)["issue-detail-action-bar"],
+            "issue-detail-action-bar"
+        )
+        let addComment = try require(
+            app.buttons["issue-detail-add-comment"],
+            "issue-detail-add-comment"
+        )
+        let statusTrigger = try require(
+            app.descendants(matching: .any)["issue-status-trigger"],
+            "issue-status-trigger in action toolbar"
+        )
+        for (identifier, control) in [
+            ("issue-detail-add-comment", addComment),
+            ("issue-status-trigger", statusTrigger),
+        ] {
+            assertFiniteBounded(control.frame, name: identifier)
+            XCTAssertTrue(actionBar.frame.contains(control.frame), "\(identifier) should stay inside the action bar")
         }
         let legacyActionsHeading = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@ OR title == %@", "Jira issue actions", "Jira issue actions")
@@ -1039,17 +1084,50 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertGreaterThan(breadcrumbs.frame.width, 0, "issue breadcrumbs should have visible width")
         XCTAssertGreaterThan(breadcrumbs.frame.height, 0, "issue breadcrumbs should have visible height")
-        let parent = try require(
-            app.buttons["issue-detail-parent-breadcrumb"],
-            "issue-detail-parent-breadcrumb"
+        let detailsTrigger = try require(
+            app.buttons["issue-detail-details-trigger"],
+            "issue-detail-details-trigger"
         )
-        XCTAssertEqual(parent.label.isEmpty ? parent.title : parent.label, "DESK-171", "DESK-184 should expose its parent breadcrumb")
-        XCTAssertGreaterThan(parent.frame.width, 60, "parent breadcrumb should remain readable")
-        parent.click()
-        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-171", in: initialDetail), "parent navigation should select DESK-171")
         XCTAssertFalse(
-            app.descendants(matching: .any)["issue-detail-parent-breadcrumb"].exists,
-            "the parent issue should expose the empty parent state"
+            app.descendants(matching: .any)["issue-detail-parent"].exists,
+            "collapsed Details should hide parent metadata"
+        )
+        detailsTrigger.click()
+        let parentMetadata = try require(
+            app.descendants(matching: .any)["issue-detail-parent"],
+            "DESK-184 parent metadata inside expanded Details"
+        )
+        XCTAssertTrue(semanticText(parentMetadata).contains("DESK-171"), "DESK-184 Details should expose its parent identity")
+        detailsTrigger.click()
+        let overflow = try require(
+            app.buttons["issue-detail-overflow-trigger"],
+            "issue-detail-overflow-trigger"
+        )
+        overflow.click()
+        let openParent = try require(
+            app.buttons["issue-detail-overflow-open-parent"],
+            "issue-detail-overflow-open-parent"
+        )
+        XCTAssertTrue(semanticText(openParent).contains("Open parent issue"))
+        openParent.click()
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-171", in: initialDetail), "parent navigation should select DESK-171")
+        let parentIssueDetails = try require(
+            app.descendants(matching: .any)["issue-detail-details"],
+            "parent issue Details"
+        )
+        XCTAssertTrue(semanticText(parentIssueDetails).contains("Details"))
+        let parentDetailsTrigger = try require(
+            app.buttons["issue-detail-details-trigger"],
+            "parent issue Details trigger"
+        )
+        parentDetailsTrigger.click()
+        let parentMetadataEmpty = try require(
+            app.descendants(matching: .any)["issue-detail-parent"],
+            "parent issue empty parent metadata"
+        )
+        XCTAssertTrue(
+            semanticText(parentMetadataEmpty).contains("None"),
+            "the parent fixture should expose its empty parent state"
         )
         XCTAssertFalse(
             app.descendants(matching: .any)["issue-detail-linked-issues"].exists,
@@ -1742,26 +1820,56 @@ final class JiraDeskUITests: XCTestCase {
         )
         XCTAssertTrue(firstCard.exists, "expanding a ticket should keep its grouped inbox header visible")
 
-        let readingDescription = try require(
-            app.descendants(matching: .any)["update-reading-description"],
-            "DESK-184 reading pane description"
+        let issueOverview = try require(
+            app.descendants(matching: .any)["issue-detail"],
+            "shared issue overview for DESK-184"
         )
-        assertFiniteBounded(readingDescription.frame, name: "DESK-184 reading pane Description section")
+        XCTAssertTrue(
+            issueOverview.label == "Issue detail for DESK-184"
+                || issueOverview.title == "Issue detail for DESK-184",
+            "the shared inbox overview should expose its exact issue identity"
+        )
+        let watchAction = try require(app.buttons["issue-watch-button"], "read-only Watch action")
+        XCTAssertTrue(semanticText(watchAction).contains("Watch"), "the read-only overview should expose its watch navigation action")
+        assertFiniteBounded(watchAction.frame, name: "read-only Watch action")
+        let readingDescription = try require(
+            app.descendants(matching: .any)["issue-detail-description"],
+            "DESK-184 shared issue description"
+        )
+        assertFiniteBounded(readingDescription.frame, name: "DESK-184 shared Description section")
         XCTAssertTrue(
             semanticText(readingDescription).contains("Poll Jira incrementally"),
-            "reading pane Description section should expose cached issue description text"
+            "shared issue Description section should expose cached issue description text"
         )
         let linkedIssues = try require(
-            app.descendants(matching: .any)["update-reading-linked-issues"],
-            "DESK-184 reading pane linked issues"
+            app.descendants(matching: .any)["issue-detail-linked-issues"],
+            "DESK-184 shared issue linked issues"
         )
-        assertFiniteBounded(linkedIssues.frame, name: "DESK-184 reading pane linked issues")
-        XCTAssertTrue(semanticText(linkedIssues).contains("Linked issues"), "reading pane should expose its linked issues section")
+        assertFiniteBounded(linkedIssues.frame, name: "DESK-184 shared issue linked issues")
+        XCTAssertTrue(semanticText(linkedIssues).contains("Linked issues"), "shared overview should expose its linked issues section")
         let linkedIssueKey = try require(
-            app.buttons["inbox-linked-key-0"],
+            app.buttons["issue-detail-linked-key-0"],
             "first DESK-184 linked issue key"
         )
         XCTAssertEqual(linkedIssueKey.label.isEmpty ? linkedIssueKey.title : linkedIssueKey.label, "DESK-179")
+        let activityTimeline = try require(
+            app.descendants(matching: .any)["update-reading-activity"],
+            "DESK-184 local activity timeline"
+        )
+        assertFiniteBounded(activityTimeline.frame, name: "DESK-184 local activity timeline")
+        _ = try require(
+            app.descendants(matching: .any)["update-reading-activity-event-0"],
+            "first DESK-184 local activity event"
+        )
+        let issueActions = try require(
+            app.descendants(matching: .any)["issue-detail-action-bar"],
+            "read-only issue action bar"
+        )
+        for identifier in ["issue-detail-add-comment", "issue-detail-change-status"] {
+            let action = try require(app.buttons[identifier], identifier)
+            assertFiniteBounded(action.frame, name: identifier)
+            XCTAssertTrue(issueActions.frame.contains(action.frame), "\(identifier) should remain inside the action bar")
+        }
 
         // Virtualized feeds must expose stable semantic identities for the rows currently in the
         // viewport and keep every realized row inside the scrolling surface. This assertion is
@@ -1835,6 +1943,53 @@ final class JiraDeskUITests: XCTestCase {
         assertFiniteBounded(detail.frame, name: "issue-detail for DESK-179")
         XCTAssertTrue(hostWindow.frame.contains(detail.frame), "DESK-179 issue detail should remain inside the workspace")
         XCTAssertTrue(waitForAbsence(app.descendants(matching: .any)["update-list"]), "full details should leave the Focus inbox")
+    }
+
+    func testIssueWatch() throws {
+        try launchFixture(scenario: "issue-watch")
+
+        let detail = try require(
+            app.descendants(matching: .any)["issue-detail"],
+            "issue detail in inert watch fixture"
+        )
+        XCTAssertTrue(
+            waitForSemanticText("Issue detail for DESK-184", in: detail),
+            "watch fixture should retain its selected issue identity"
+        )
+        let watch = try require(app.buttons["issue-watch-button"], "issue-watch-button")
+        XCTAssertTrue(watch.isEnabled, "known local watch state should allow opening confirmation")
+        assertFiniteBounded(watch.frame, name: "issue-watch-button")
+        watch.click()
+
+        let confirmation = try require(
+            app.descendants(matching: .any)["issue-watch-confirmation"],
+            "issue-watch-confirmation"
+        )
+        XCTAssertTrue(semanticText(confirmation).localizedCaseInsensitiveContains("watch"))
+        XCTAssertTrue(semanticText(confirmation).contains("DESK-184"), "confirmation should identify the exact issue")
+        assertFiniteBounded(confirmation.frame, name: "issue-watch-confirmation")
+        XCTAssertTrue(detail.frame.contains(confirmation.frame), "watch confirmation should stay inside issue detail")
+
+        let confirm = try require(app.buttons["issue-watch-confirm"], "issue-watch-confirm")
+        let cancel = try require(app.buttons["issue-watch-cancel"], "issue-watch-cancel")
+        assertFiniteBounded(confirm.frame, name: "issue-watch-confirm")
+        assertFiniteBounded(cancel.frame, name: "issue-watch-cancel")
+        XCTAssertFalse(confirm.isEnabled, "the local fixture has no Jira writer, so Confirm must remain disabled")
+        XCTAssertTrue(cancel.isEnabled, "Cancel should remain available in the confirmation state")
+        XCTAssertTrue(confirmation.frame.contains(confirm.frame), "Confirm should remain inside its confirmation surface")
+        XCTAssertTrue(confirmation.frame.contains(cancel.frame), "Cancel should remain inside its confirmation surface")
+
+        cancel.click()
+        XCTAssertTrue(
+            waitForAbsence(app.descendants(matching: .any)["issue-watch-confirmation"]),
+            "Cancel should dismiss confirmation without changing the watch state"
+        )
+        XCTAssertTrue(watch.exists, "cancelling should retain the issue Watch action")
+        XCTAssertEqual(watch.label.isEmpty ? watch.title : watch.label, "Watch")
+        XCTAssertFalse(
+            app.descendants(matching: .any)["issue-watch-feedback"].exists,
+            "cancelling should not show a write result"
+        )
     }
 
     func testTeam() throws {

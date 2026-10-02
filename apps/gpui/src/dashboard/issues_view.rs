@@ -206,7 +206,7 @@ impl Dashboard {
     }
 
     pub(super) fn render_issues(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
-        if !layout.is_mobile() && !self.mobile_detail_open {
+        if !layout.is_mobile() {
             return self.render_issues_desktop(layout, cx).into_any_element();
         }
         let mobile = layout.is_mobile();
@@ -876,7 +876,7 @@ impl Dashboard {
                 h_flex()
                     .id("issues-column-updated")
                     .accessibility_id("issues-column-updated")
-                    .role(gpui_kit::accesskit::Role::TextRun)
+                    .role(gpui_kit::accesskit::Role::Label)
                     .aria_label("Updated, descending")
                     .w(px(122.))
                     .flex_shrink_0()
@@ -886,7 +886,103 @@ impl Dashboard {
                     .child(Icon::new(IconName::ArrowDown).size_3()),
             );
 
-        let issue_list = v_flex()
+        let toolbar = h_flex()
+            .id("issues-toolbar")
+            .accessibility_id("issues-toolbar")
+            .debug_selector(|| "issues-toolbar".to_owned())
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label("Issues search and status filters")
+            .min_w_0()
+            .h(px(48.))
+            .flex_shrink_0()
+            .px_4()
+            .gap_3()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .id("issues-title")
+                    .accessibility_id("issues-title")
+                    .role(gpui_kit::accesskit::Role::Heading)
+                    .aria_label("Issues")
+                    .min_w(px(64.))
+                    .flex_1()
+                    .text_lg()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child("Issues"),
+            )
+            .when_some(self.search_input.clone(), |this, input| {
+                this.child(
+                    div()
+                        .debug_selector(|| "issue-search".to_owned())
+                        .w(px(if layout.is_rail() { 190. } else { 320. }))
+                        .min_w(px(120.))
+                        .flex_shrink_1()
+                        .child(
+                            Input::new(&input)
+                                .cleanable(true)
+                                .prefix(Icon::new(IconName::Search))
+                                .accessibility_id("issue-search")
+                                .aria_label("Search issue key or summary")
+                                .w_full()
+                                .min_w_0()
+                                .bg(control_surface),
+                        ),
+                )
+            })
+            .when(lookup_enabled || lookup_loading, |this| {
+                this.child(
+                    Button::new("search-jira")
+                        .compact()
+                        .debug_selector(|| "issue-search-submit".to_owned())
+                        .accessibility_id("issue-search-submit")
+                        .label(if lookup_loading {
+                            "Searching…"
+                        } else {
+                            "Find key"
+                        })
+                        .loading(lookup_loading)
+                        .disabled(lookup_loading || !lookup_enabled)
+                        .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
+                )
+            })
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Filter"),
+            )
+            .child(
+                h_flex()
+                    .w(px(184.))
+                    .flex_shrink_0()
+                    .child(self.status_filter_dropdown()),
+            )
+            .when(has_active_filters, |this| {
+                this.child(
+                    Button::new("clear-issue-filters")
+                        .compact()
+                        .ghost()
+                        .flex_shrink_0()
+                        .debug_selector(|| "issue-filters-clear".to_owned())
+                        .accessibility_id("issue-filters-clear")
+                        .label("Clear")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_issue_filters(window, cx);
+                        })),
+                )
+            });
+
+        let table_content = v_flex()
+            .w_full()
+            .min_w(px(760.))
+            .h_full()
+            .child(table_header)
+            .child(body);
+        let issue_table = v_flex()
             .id("issues-table")
             .accessibility_id("issues-table")
             .debug_selector(|| "issues-table".to_owned())
@@ -896,98 +992,64 @@ impl Dashboard {
             .min_w_0()
             .when(dark_surface, |this| this.bg(gpui_kit::rgb(0x0d1316)))
             .child(
-                h_flex()
-                    .id("issues-toolbar")
-                    .accessibility_id("issues-toolbar")
-                    .debug_selector(|| "issues-toolbar".to_owned())
-                    .role(gpui_kit::accesskit::Role::Group)
-                    .aria_label("Issues search and status filters")
+                v_flex()
+                    .size_full()
                     .min_w_0()
-                    .h(px(48.))
-                    .flex_shrink_0()
-                    .px_4()
-                    .gap_3()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .id("issues-title")
-                            .accessibility_id("issues-title")
-                            .min_w(px(64.))
-                            .flex_1()
-                            .text_lg()
-                            .font_semibold()
-                            .text_color(cx.theme().foreground)
-                            .child("Issues"),
-                    )
-                    .when_some(self.search_input.clone(), |this, input| {
-                        this.child(
-                            div()
-                                .debug_selector(|| "issue-search".to_owned())
-                                .w(px(if layout.is_rail() { 190. } else { 320. }))
-                                .min_w(px(120.))
-                                .flex_shrink_1()
-                                .child(
-                                    Input::new(&input)
-                                        .cleanable(true)
-                                        .prefix(Icon::new(IconName::Search))
-                                        .accessibility_id("issue-search")
-                                        .aria_label("Search issue key or summary")
-                                        .w_full()
-                                        .min_w_0()
-                                        .bg(control_surface),
-                                ),
-                        )
-                    })
-                    .when(lookup_enabled || lookup_loading, |this| {
-                        this.child(
-                            Button::new("search-jira")
-                                .compact()
-                                .debug_selector(|| "issue-search-submit".to_owned())
-                                .accessibility_id("issue-search-submit")
-                                .label(if lookup_loading {
-                                    "Searching…"
-                                } else {
-                                    "Find key"
-                                })
-                                .loading(lookup_loading)
-                                .disabled(lookup_loading || !lookup_enabled)
-                                .on_click(cx.listener(|this, _, _, cx| this.search_jira(cx))),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Filter"),
-                    )
-                    .child(
-                        h_flex()
-                            .w(px(184.))
-                            .flex_shrink_0()
-                            .child(self.status_filter_dropdown()),
-                    )
-                    .when(has_active_filters, |this| {
-                        this.child(
-                            Button::new("clear-issue-filters")
+                    .child(table_content)
+                    .overflow_x_scrollbar(),
+            );
+
+        let content = if self.mobile_detail_open {
+            let (list_min, list_max) = layout.issue_list_range();
+            let detail = v_flex()
+                .size_full()
+                .min_w_0()
+                .child(
+                    h_flex()
+                        .h(px(48.))
+                        .px_3()
+                        .flex_shrink_0()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Button::new("issue-detail-back")
                                 .compact()
                                 .ghost()
-                                .flex_shrink_0()
-                                .debug_selector(|| "issue-filters-clear".to_owned())
-                                .accessibility_id("issue-filters-clear")
-                                .label("Clear")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.clear_issue_filters(window, cx);
+                                .accessibility_id("issue-detail-back")
+                                .debug_selector(|| "issue-detail-back".to_owned())
+                                .label("Back to issues")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.mobile_detail_open = false;
+                                    cx.notify();
                                 })),
-                        )
-                    }),
-            )
-            .child(table_header)
-            .child(body);
+                        ),
+                )
+                .child(self.issue_detail(layout, cx));
+            h_resizable(layout.resizable_id())
+                .child(
+                    resizable_panel()
+                        .size(px(layout.issue_list_width()))
+                        .size_range(px(list_min)..px(list_max))
+                        .flex_none()
+                        .child(issue_table),
+                )
+                .child(
+                    resizable_panel()
+                        .size_range(px(layout.detail_min_width())..px(4_096.))
+                        .child(detail),
+                )
+                .into_any_element()
+        } else {
+            issue_table.into_any_element()
+        };
 
-        issue_list.into_any_element()
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .child(toolbar)
+            .child(v_flex().min_h_0().flex_1().child(content))
+            .into_any_element()
     }
 
     fn issue_table_header_cell(
@@ -1000,7 +1062,7 @@ impl Dashboard {
             .id(id)
             .accessibility_id(id)
             .debug_selector(move || id.to_owned())
-            .role(gpui_kit::accesskit::Role::TextRun)
+            .role(gpui_kit::accesskit::Role::Label)
             .aria_label(label)
             .w(px(width))
             .flex_shrink_0()
@@ -1013,7 +1075,7 @@ impl Dashboard {
             .id(id)
             .accessibility_id(id)
             .debug_selector(move || id.to_owned())
-            .role(gpui_kit::accesskit::Role::TextRun)
+            .role(gpui_kit::accesskit::Role::Label)
             .aria_label(label)
             .min_w_0()
             .flex_1()
@@ -1110,7 +1172,7 @@ impl Dashboard {
                 h_flex()
                     .id(cell_id("key"))
                     .accessibility_id(cell_id("key"))
-                    .role(gpui_kit::accesskit::Role::TextRun)
+                    .role(gpui_kit::accesskit::Role::Label)
                     .aria_label(format!("Key: {}", issue.key))
                     .w(px(108.))
                     .flex_shrink_0()
@@ -1136,7 +1198,7 @@ impl Dashboard {
                 div()
                     .id(cell_id("summary"))
                     .accessibility_id(cell_id("summary"))
-                    .role(gpui_kit::accesskit::Role::TextRun)
+                    .role(gpui_kit::accesskit::Role::Label)
                     .aria_label(format!("Summary: {}", issue.summary))
                     .min_w_0()
                     .flex_1()
@@ -1153,7 +1215,7 @@ impl Dashboard {
                         move || status_cell_id.clone()
                     })
                     .accessibility_id(status_cell_id)
-                    .role(gpui_kit::accesskit::Role::TextRun)
+                    .role(gpui_kit::accesskit::Role::Label)
                     .aria_label(format!("Status: {}", issue.status))
                     .w(px(96.))
                     .flex_shrink_0()
@@ -1175,7 +1237,7 @@ impl Dashboard {
                 div()
                     .id(cell_id("assignee"))
                     .accessibility_id(cell_id("assignee"))
-                    .role(gpui_kit::accesskit::Role::TextRun)
+                    .role(gpui_kit::accesskit::Role::Label)
                     .aria_label(format!("Assignee: {}", issue.assignee))
                     .w(px(124.))
                     .flex_shrink_0()
@@ -1189,7 +1251,7 @@ impl Dashboard {
                 div()
                     .id(cell_id("updated"))
                     .accessibility_id(cell_id("updated"))
-                    .role(gpui_kit::accesskit::Role::TextRun)
+                    .role(gpui_kit::accesskit::Role::Label)
                     .aria_label(format!("Updated: {updated}"))
                     .w(px(122.))
                     .flex_shrink_0()

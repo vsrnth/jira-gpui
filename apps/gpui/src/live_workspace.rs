@@ -12,8 +12,9 @@ use jira_application::{
     CancellationToken, Clock, CommentService, DEFAULT_JQL_SCOPE, DefaultDesktopNotificationPolicy,
     DefaultIssueDiffer, IssueCachePort, IssueCatalogService, IssueDetailConfig, IssueDetailRequest,
     IssueDetailService, IssueEditCachePort, IssueEditService, IssueListQuery, IssueLocator,
-    IssueMediaConfig, IssueMediaService, IssueTransitionsRequest, JiraCommentWritePort,
-    JiraIssueEditPort, JiraReadPort, NoopEventSink, SyncConfig, SyncMode, SyncOutcome, SyncService,
+    IssueMediaConfig, IssueMediaService, IssueTransitionsRequest, IssueWatchRequest,
+    IssueWatchService, JiraCommentWritePort, JiraIssueEditPort, JiraIssueWatchPort, JiraReadPort,
+    NoopEventSink, SetIssueWatchingRequest, SyncConfig, SyncMode, SyncOutcome, SyncService,
     TransitionIssueRequest, UpdateFeedQuery, UpdateFeedService, UserSearchRequest, UserSetDraft,
     UserSetPort, UserSetService, validate_jql_scope,
 };
@@ -69,6 +70,7 @@ pub struct LiveWorkspace {
     media: IssueMediaService,
     comments: CommentService,
     issue_editor: IssueEditService,
+    issue_watcher: Option<IssueWatchService>,
     cache: Arc<SqliteStore>,
     sync: SyncService,
     notification_port: Arc<FreedesktopNotificationPort>,
@@ -250,6 +252,7 @@ impl LiveWorkspace {
             media,
             comments,
             issue_editor,
+            issue_watcher: None,
             cache,
             sync,
             notification_port,
@@ -258,6 +261,14 @@ impl LiveWorkspace {
 
     pub fn site_id(&self) -> &JiraSiteId {
         &self.site_id
+    }
+
+    /// Attach the dedicated Jira watch capability without changing existing
+    /// workspace construction. Watch operations remain unavailable unless the
+    /// workspace was initialized with the authenticated account identity.
+    pub fn with_watch_writer(mut self, writer: Arc<dyn JiraIssueWatchPort>) -> Self {
+        self.issue_watcher = Some(IssueWatchService::new(writer));
+        self
     }
 
     #[cfg(test)]
@@ -553,6 +564,63 @@ impl LiveWorkspace {
                     site_id: self.site_id.clone(),
                     locator,
                     transition_id,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Read whether the authenticated account watches an issue.
+    pub async fn watch_state(
+        &self,
+        locator: IssueLocator,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, ApplicationError> {
+        if self.authenticated_account.is_none() {
+            return Err(ApplicationError::new(
+                jira_application::ErrorKind::Authentication,
+                "watch controls require an authenticated Jira account",
+            ));
+        }
+        let watcher = self
+            .issue_watcher
+            .as_ref()
+            .ok_or_else(watch_unavailable_error)?;
+        watcher
+            .watch_state(
+                IssueWatchRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                },
+                cancellation,
+            )
+            .await
+    }
+
+    /// Dispatch one already-confirmed watch/unwatch action for the
+    /// authenticated account exactly once.
+    pub async fn set_issue_watching(
+        &self,
+        locator: IssueLocator,
+        watching: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ApplicationError> {
+        if self.authenticated_account.is_none() {
+            return Err(ApplicationError::new(
+                jira_application::ErrorKind::Authentication,
+                "watch controls require an authenticated Jira account",
+            ));
+        }
+        let watcher = self
+            .issue_watcher
+            .as_ref()
+            .ok_or_else(watch_unavailable_error)?;
+        watcher
+            .set_watching(
+                SetIssueWatchingRequest {
+                    site_id: self.site_id.clone(),
+                    locator,
+                    watching,
                 },
                 cancellation,
             )
@@ -920,6 +988,13 @@ fn normalize_scope(scope: Option<&str>) -> Result<String, ApplicationError> {
     Ok(scope.unwrap_or(DEFAULT_JQL_SCOPE).trim().to_owned())
 }
 
+fn watch_unavailable_error() -> ApplicationError {
+    ApplicationError::new(
+        jira_application::ErrorKind::Internal,
+        "watch controls are unavailable for this workspace",
+    )
+}
+
 fn scope_fingerprint(scope: &str) -> String {
     // FNV-1a is small, deterministic across restarts, and sufficient for a bounded cache key.
     let mut hash = 0xcbf29ce484222325_u64;
@@ -951,10 +1026,10 @@ mod tests {
     use jira_application::{
         ApplicationError, CancellationToken, ErrorKind, IssueCommentsPage,
         IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssuePage,
-        IssueTransition, IssueTransitionsRequest, JiraAttachmentReadPort, JiraIssueActivityPort,
-        JiraIssueDetailReadPort, JiraIssueSearchPort, JiraReadPort, JiraSyncReadPort,
-        JiraUserReadPort, PortFuture, SyncCommit, SyncState, TransitionIssueRequest,
-        UserSearchRequest,
+        IssueTransition, IssueTransitionsRequest, IssueWatchRequest, JiraAttachmentReadPort,
+        JiraIssueActivityPort, JiraIssueDetailReadPort, JiraIssueSearchPort, JiraIssueWatchPort,
+        JiraReadPort, JiraSyncReadPort, JiraUserReadPort, PortFuture, SetIssueWatchingRequest,
+        SyncCommit, SyncState, TransitionIssueRequest, UserSearchRequest,
     };
     use jira_domain::{
         AttachmentMetadata, EventId, IssueComment, IssueCommentAuthor, IssueDetailCore, IssueId,
@@ -1212,6 +1287,47 @@ mod tests {
     impl JiraReadPort for FakeJira {}
 
     #[derive(Clone)]
+    struct FakeIssueWatcher {
+        read_count: Arc<Mutex<usize>>,
+        write_requests: Arc<Mutex<Vec<SetIssueWatchingRequest>>>,
+        watching: bool,
+    }
+
+    impl FakeIssueWatcher {
+        fn new(watching: bool) -> Self {
+            Self {
+                read_count: Arc::new(Mutex::new(0)),
+                write_requests: Arc::new(Mutex::new(Vec::new())),
+                watching,
+            }
+        }
+    }
+
+    impl JiraIssueWatchPort for FakeIssueWatcher {
+        fn fetch_issue_watch_state<'a>(
+            &'a self,
+            _request: &'a IssueWatchRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, bool> {
+            *self.read_count.lock().expect("watch read lock") += 1;
+            let watching = self.watching;
+            Box::pin(async move { Ok(watching) })
+        }
+
+        fn set_issue_watching<'a>(
+            &'a self,
+            request: &'a SetIssueWatchingRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> PortFuture<'a, ()> {
+            self.write_requests
+                .lock()
+                .expect("watch write lock")
+                .push(request.clone());
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Clone)]
     struct FakeIssueEditor {
         users: Vec<User>,
         transitions: Vec<IssueTransition>,
@@ -1396,6 +1512,72 @@ mod tests {
             cache,
         ))
         .expect("workspace initializes")
+    }
+
+    #[test]
+    fn authenticated_workspace_reads_and_dispatches_watch_changes_through_injected_port() {
+        let watcher = Arc::new(FakeIssueWatcher::new(true));
+        let workspace = make_workspace(
+            Arc::new(FakeJira::default()),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        )
+        .with_watch_writer(watcher.clone());
+        let locator = IssueLocator::Key(IssueKey::new("APP-1").expect("issue key"));
+        let cancellation = CancellationToken::new();
+
+        assert!(
+            block_on(workspace.watch_state(locator.clone(), &cancellation)).expect("watch state")
+        );
+        block_on(workspace.set_issue_watching(locator.clone(), false, &cancellation))
+            .expect("unwatch");
+        block_on(workspace.set_issue_watching(locator, true, &cancellation)).expect("watch");
+
+        assert_eq!(*watcher.read_count.lock().expect("watch read lock"), 1);
+        let writes = watcher.write_requests.lock().expect("watch write lock");
+        assert_eq!(writes.len(), 2);
+        assert!(!writes[0].watching);
+        assert!(writes[1].watching);
+        assert!(
+            writes
+                .iter()
+                .all(|request| request.site_id == *workspace.site_id())
+        );
+    }
+
+    #[test]
+    fn watch_controls_require_authenticated_account_even_when_writer_is_injected() {
+        let watcher = Arc::new(FakeIssueWatcher::new(false));
+        let workspace = block_on(LiveWorkspace::initialize(
+            JiraSiteId::new("site").expect("site"),
+            None,
+            Arc::new(FakeJira::default()),
+            Arc::new(SqliteStore::in_memory().expect("store")),
+        ))
+        .expect("workspace initializes")
+        .with_watch_writer(watcher.clone());
+        let locator = IssueLocator::Key(IssueKey::new("APP-1").expect("issue key"));
+        let cancellation = CancellationToken::new();
+
+        assert_eq!(
+            block_on(workspace.watch_state(locator.clone(), &cancellation))
+                .expect_err("anonymous watch read")
+                .kind(),
+            ErrorKind::Authentication
+        );
+        assert_eq!(
+            block_on(workspace.set_issue_watching(locator, true, &cancellation))
+                .expect_err("anonymous watch write")
+                .kind(),
+            ErrorKind::Authentication
+        );
+        assert_eq!(*watcher.read_count.lock().expect("watch read lock"), 0);
+        assert!(
+            watcher
+                .write_requests
+                .lock()
+                .expect("watch write lock")
+                .is_empty()
+        );
     }
 
     #[test]

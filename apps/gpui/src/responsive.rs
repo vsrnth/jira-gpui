@@ -94,19 +94,20 @@ impl LayoutMode {
 
     pub(crate) fn issue_list_width(self) -> f32 {
         match self {
-            // Keep the initial list allocation stable as the shell moves from
-            // rail to full sidebar. A larger list here would make the detail
-            // workspace shrink at the 960/1,200px mode boundaries.
-            Self::Wide | Self::Standard | Self::Compact => 350.0,
+            // The desktop table can scroll horizontally below this width, but
+            // a wider starting pane exposes more of its fixed columns.
+            Self::Compact => 320.0,
+            Self::Standard => 360.0,
+            Self::Wide => 480.0,
             Self::Mobile => 0.0,
         }
     }
 
     pub(crate) fn issue_list_range(self) -> (f32, f32) {
         match self {
-            Self::Compact => (280.0, 420.0),
-            Self::Standard => (320.0, 520.0),
-            Self::Wide => (320.0, 640.0),
+            Self::Compact => (280.0, 4_096.0),
+            Self::Standard => (320.0, 4_096.0),
+            Self::Wide => (360.0, 4_096.0),
             Self::Mobile => (0.0, 0.0),
         }
     }

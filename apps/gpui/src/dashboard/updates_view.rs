@@ -529,159 +529,23 @@ impl Dashboard {
             })
             .cloned();
         let has_cached_issue_detail = issue.as_ref().is_some_and(issue_has_cached_detail);
-        let issue_view = issue
+        let issue_view = issue.as_ref().and_then(|issue| {
+            issue_views_for_filter_with_offset(
+                std::slice::from_ref(issue),
+                &self.users,
+                IssueStatusFilter::All,
+                "",
+                self.timestamp_offset,
+            )
+            .into_iter()
+            .next()
+        });
+        let cached_detail = issue
             .as_ref()
-            .map(|issue| IssueViewModel::from_domain(issue, &self.users));
-        let palette = RichTextPalette {
-            foreground: cx.theme().foreground,
-            muted: cx.theme().muted_foreground,
-            border: cx.theme().border,
-            code_surface: cx.theme().muted.opacity(0.18),
-            link: cx.theme().link,
-            info: cx.theme().link,
-            warning: cx.theme().warning,
-            success: cx.theme().success,
-            danger: cx.theme().danger,
-        };
+            .filter(|issue| issue_has_cached_detail(issue))
+            .map(detail_view_from_issue);
         let mobile = layout.is_mobile();
         let issue_id = group.issue_id.clone();
-        let status_label = issue.as_ref().map(|issue| issue.status.name.clone());
-        let title = issue.as_ref().map_or_else(
-            || group.issue_summary.clone(),
-            |issue| issue.summary.clone(),
-        );
-        let assignee = issue_view
-            .as_ref()
-            .map_or_else(|| "Unassigned".to_owned(), |view| view.assignee.clone());
-        let priority = issue
-            .as_ref()
-            .and_then(|issue| issue.priority.name.clone())
-            .unwrap_or_else(|| "No priority".to_owned());
-        let description_content = issue
-            .as_ref()
-            .filter(|_| has_cached_issue_detail)
-            .map(|issue| {
-                issue
-                    .rich_description
-                    .as_ref()
-                    .map(|document| {
-                        let states = if self.selected_issue.as_ref() == Some(&group.issue_id) {
-                            self.selected_image_states.clone()
-                        } else {
-                            RichImageRenderStates::default()
-                        };
-                        render_rich_text(document, palette, &states, 1, ImageSource::ResolvedAdf)
-                    })
-                    .unwrap_or_else(|| {
-                        div()
-                            .text_sm()
-                            .child(
-                                issue
-                                    .description_text
-                                    .clone()
-                                    .unwrap_or_else(|| "No description supplied.".to_owned()),
-                            )
-                            .into_any_element()
-                    })
-            });
-        let description_accessible_text = issue
-            .as_ref()
-            .and_then(|issue| {
-                issue.description_text.clone().or_else(|| {
-                    issue
-                        .rich_description
-                        .as_ref()
-                        .map(jira_domain::RichTextDocument::plain_text)
-                })
-            })
-            .unwrap_or_else(|| "No description supplied.".to_owned());
-        let linked_issue_rows = issue
-            .as_ref()
-            .map(|issue| {
-                issue
-                    .linked_issues
-                    .iter()
-                    .enumerate()
-                    .map(|(index, linked)| {
-                        let key = linked.key.clone();
-                        h_flex()
-                            .id(("inbox-linked-issue", index))
-                            .accessibility_id(format!("inbox-linked-issue-{index}"))
-                            .role(gpui_kit::accesskit::Role::Group)
-                            .aria_label(format!(
-                                "{}: {}",
-                                linked.key,
-                                linked.summary.as_deref().unwrap_or("No summary supplied")
-                            ))
-                            .min_w_0()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(linked.relationship.clone()),
-                            )
-                            .child(
-                                Button::new(("inbox-linked-key", index))
-                                    .compact()
-                                    .accessibility_id(format!("inbox-linked-key-{index}"))
-                                    .debug_selector(move || format!("inbox-linked-key-{index}"))
-                                    .label(key.to_string())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !this.issue_edit_flow.is_submitting() {
-                                            this.section = Section::Issues;
-                                            this.mobile_detail_open = mobile;
-                                        }
-                                        this.open_related_issue_key(key.clone(), cx);
-                                    })),
-                            )
-                            .child(
-                                div().min_w_0().flex_1().truncate().text_sm().child(
-                                    linked
-                                        .summary
-                                        .clone()
-                                        .unwrap_or_else(|| "No summary supplied".to_owned()),
-                                ),
-                            )
-                            .when_some(linked.status.clone(), |this, status| {
-                                this.child(
-                                    div()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded(cx.theme().radius)
-                                        .bg(cx.theme().muted)
-                                        .text_xs()
-                                        .child(status),
-                                )
-                            })
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let linked_issues_view = (!linked_issue_rows.is_empty()).then(|| {
-            v_flex()
-                .id("update-reading-linked-issues")
-                .accessibility_id("update-reading-linked-issues")
-                .role(gpui_kit::accesskit::Role::Group)
-                .aria_label(format!(
-                    "Linked issues: {}",
-                    issue
-                        .as_ref()
-                        .map(|issue| issue
-                            .linked_issues
-                            .iter()
-                            .map(|linked| linked.key.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", "))
-                        .unwrap_or_default()
-                ))
-                .gap_2()
-                .child(div().text_sm().font_semibold().child("Linked issues"))
-                .children(linked_issue_rows)
-                .into_any_element()
-        });
         let body = v_flex()
             .id("update-reading-body")
             .debug_selector(|| "update-reading-body".to_owned())
@@ -691,108 +555,80 @@ impl Dashboard {
             .min_w_0()
             .overflow_x_hidden()
             .gap_3()
-            .p(gpui_kit::rems(layout.detail_padding() / 16.))
-            .child(
-                h_flex()
-                    .id("inbox-reading-key")
-                    .accessibility_id("inbox-reading-key")
-                    .min_w_0()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_base().font_semibold().child(group.issue_key.clone()))
-                    .when_some(status_label, |this, status| {
-                        this.child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().blue.opacity(0.16))
-                                .text_xs()
-                                .child(status),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .text_xl()
-                    .font_semibold()
-                    .child(title),
-            )
-            .child(
-                    h_flex()
-                        .id("inbox-reading-metadata")
-                        .accessibility_id("inbox-reading-metadata")
-                        .min_w_0()
-                        .flex_wrap()
-                        .gap_2()
+            .when_some(issue_view.as_ref(), |this, view| {
+                this.child(self.render_issue_overview(
+                    view,
+                    cached_detail.as_ref(),
+                    layout,
+                    true,
+                    cx,
+                ))
+            })
+            .when(issue_view.is_none(), |this| {
+                this.child(
+                    div()
+                        .id("update-reading-issue-unavailable")
+                        .accessibility_id("update-reading-issue-unavailable")
+                        .role(gpui_kit::accesskit::Role::Status)
+                        .aria_label(format!("Issue details unavailable for {}", group.issue_key))
+                        .px(gpui_kit::rems(layout.detail_padding() / 16.))
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(assignee)
-                        .child("·")
-                        .child(priority)
-                        .child("·")
-                        .child(group.latest_occurred_at.clone()),
-            )
-            .when_some(description_content, |this, description| {
-                    this.child(
-                        v_flex()
-                            .id("update-reading-description")
-                            .accessibility_id("update-reading-description")
-                            .role(gpui_kit::accesskit::Role::Group)
-                            .aria_label(format!("Description: {description_accessible_text}"))
-                            .min_w_0()
-                            .gap_2()
-                            .child(div().text_sm().font_semibold().child("Description"))
-                            .child(
-                                div()
-                                    .id("inbox-description")
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .min_w_0()
-                                    .whitespace_normal()
-                                    .text_sm()
-                                    .child(description),
-                            ),
-                    )
-                })
-            .when_some(linked_issues_view, |this, links| this.child(links))
+                        .child(format!("{} · {}", group.issue_key, group.issue_summary)),
+                )
+            })
             .when(!has_cached_issue_detail, |this| {
                 this.child(
                     div()
                         .id("update-issue-unavailable")
                         .accessibility_id("update-issue-unavailable")
+                        .debug_selector(|| "update-issue-unavailable".to_owned())
                         .role(gpui_kit::accesskit::Role::Status)
                         .aria_label("Cached issue details are unavailable")
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Full issue details are not available in the local cache. The activity below is what was synced."),
+                        .child("Cached issue details are unavailable. The activity below is what was synced."),
                 )
             })
             .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .child("Activity"),
-            )
-            .children(group.events.iter().map(|event| {
                 v_flex()
+                    .id("update-reading-activity")
+                    .accessibility_id("update-reading-activity")
+                    .debug_selector(|| "update-reading-activity".to_owned())
+                    .role(gpui_kit::accesskit::Role::Group)
+                    .aria_label(format!("Local activity for {}", group.issue_key))
                     .min_w_0()
-                    .gap_1()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(div().text_sm().child(event.change.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(event.occurred_at.clone()),
-                    )
-            }))
+                    .gap_2()
+                    .px(gpui_kit::rems(layout.detail_padding() / 16.))
+                    .child(div().text_sm().font_semibold().child("Activity"))
+                    .children(group.events.iter().enumerate().map(|(index, event)| {
+                        v_flex()
+                            .id(("update-reading-activity-event", index))
+                            .accessibility_id(format!("update-reading-activity-event-{index}"))
+                            .min_w_0()
+                            .gap_1()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .child(div().text_sm().child(event.change.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(event.occurred_at.clone()),
+                            )
+                    }))
+                    .when(group.events.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("update-reading-activity-empty")
+                                .role(gpui_kit::accesskit::Role::Status)
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No local activity recorded."),
+                        )
+                    }),
+            )
             .into_any_element();
         v_flex()
             .id("update-reading-pane")
@@ -1366,7 +1202,7 @@ mod tests {
         visual.update(|window, cx| window.draw(cx).clear(cx));
 
         let linked_key = visual
-            .debug_bounds("inbox-linked-key-0")
+            .debug_bounds("issue-detail-linked-key-0")
             .expect("cached DESK-184 reading pane should expose DESK-179 relationship");
         visual.simulate_click(
             gpui_kit::point(

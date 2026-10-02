@@ -7,6 +7,7 @@ use gpui_kit::component::{
     attachment::{
         Attachment, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentTitle,
     },
+    button::ButtonCustomVariant,
     description_list::DescriptionList,
     list::List,
     popover::Popover,
@@ -21,7 +22,10 @@ pub(super) mod assignee_list;
 
 fn detail_metadata_value(value: String, selector: &'static str) -> AnyElement {
     div()
+        .id(selector)
         .debug_selector(move || selector.to_owned())
+        .accessibility_id(selector)
+        .role(gpui_kit::accesskit::Role::Label)
         .min_w_0()
         .text_sm()
         .child(value)
@@ -179,8 +183,34 @@ impl Dashboard {
 
     fn selected_issue_detail_view(&self) -> Option<IssueViewModel> {
         self.selected_issue_with_cached_detail(self.selected_issue.as_ref())
-            .map(|issue| IssueViewModel::from_domain(issue, &self.users))
+            .and_then(|issue| {
+                crate::presentation::issue_views_for_filter_with_offset(
+                    std::slice::from_ref(issue),
+                    &self.users,
+                    IssueStatusFilter::All,
+                    "",
+                    self.timestamp_offset,
+                )
+                .into_iter()
+                .next()
+            })
             .or_else(|| self.selected_issue_view())
+    }
+
+    #[cfg(feature = "ui-lab")]
+    pub(crate) fn prepare_issue_detail_for_ui_lab(&mut self) {
+        self.mobile_detail_open = true;
+        self.issue_details_open = false;
+        self.issue_overflow_open = false;
+        self.comment_options_open = false;
+        self.issue_comments_open = true;
+        if let Some(issue) = self.selected_issue.as_ref().and_then(|selected| {
+            self.domain_issues
+                .iter()
+                .find(|issue| &issue.id == selected)
+        }) {
+            self.detail_state = DetailState::Loaded(detail_view_from_issue(issue));
+        }
     }
 
     fn issue_detail_status_surface(
@@ -304,14 +334,40 @@ impl Dashboard {
         let Some(issue) = issue else {
             return self.issue_detail_status_surface(&detail_state, layout, cx);
         };
-        let project = issue.project.clone();
+        self.render_issue_overview_content(issue, detail_state, layout, false, cx)
+    }
+
+    /// Render the shared issue overview used by issue details and read-only inbox previews.
+    /// Read-only previews expose navigation controls that lead to the full Issues view while
+    /// keeping Jira writes behind that view's explicit confirmation flows.
+    pub(super) fn render_issue_overview(
+        &self,
+        issue: &IssueViewModel,
+        detail: Option<&IssueDetailViewModel>,
+        layout: LayoutMode,
+        readonly: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let detail_state = detail
+            .cloned()
+            .map(DetailState::Loaded)
+            .unwrap_or(DetailState::Empty);
+        self.render_issue_overview_content(issue.clone(), detail_state, layout, readonly, cx)
+    }
+
+    fn render_issue_overview_content(
+        &self,
+        issue: IssueViewModel,
+        detail_state: DetailState,
+        layout: LayoutMode,
+        readonly: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let key = issue.key.clone();
         let priority_badge_accessibility_id = format!("priority-badge-detail-{key}");
         let detail_key_accessibility_id = issue_detail_key_accessibility_id(&key);
         let detail_key_label = format!("Selected Jira issue {key}");
         let summary = issue.summary.clone();
-        let issue_type = issue.issue_type.clone();
-        let type_semantics = issue_type_semantics(&issue_type);
         let header_status = issue.status.clone();
         let priority = issue.priority.clone();
         let description = match &detail_state {
@@ -344,22 +400,32 @@ impl Dashboard {
             }
             _ => None,
         };
-        let inline_attachment_action = detail_issue_id.map(|expected_issue_id| {
-            let dashboard = cx.entity().downgrade();
-            RichAttachmentCardAction::new(move |attachment_id, window, app| {
-                if let Some(dashboard) = dashboard.upgrade() {
-                    let expected_issue_id = expected_issue_id.clone();
-                    dashboard.update(app, |this, cx| {
-                        this.download_inline_attachment(
-                            &expected_issue_id,
-                            attachment_id,
-                            window,
-                            cx,
-                        );
-                    });
-                }
-            })
-        });
+        let empty_image_states = RichImageRenderStates::default();
+        let image_states = if detail_issue_id.as_ref() == Some(&issue.id) {
+            self.active_image_states()
+        } else {
+            &empty_image_states
+        };
+        let inline_attachment_action =
+            (!readonly)
+                .then_some(detail_issue_id)
+                .flatten()
+                .map(|expected_issue_id| {
+                    let dashboard = cx.entity().downgrade();
+                    RichAttachmentCardAction::new(move |attachment_id, window, app| {
+                        if let Some(dashboard) = dashboard.upgrade() {
+                            let expected_issue_id = expected_issue_id.clone();
+                            dashboard.update(app, |this, cx| {
+                                this.download_inline_attachment(
+                                    &expected_issue_id,
+                                    attachment_id,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    })
+                });
         let description_content = if let Some(markdown_source) = markdown_source {
             div()
                 .id("issue-description-markdown")
@@ -384,7 +450,7 @@ impl Dashboard {
                     render_rich_text_with_actions(
                         document,
                         self.rich_text_palette(cx),
-                        self.active_image_states(),
+                        image_states,
                         0,
                         ImageSource::ResolvedAdf,
                         inline_attachment_action.clone(),
@@ -406,7 +472,6 @@ impl Dashboard {
                 )
             })
             .unwrap_or_else(|| "None".to_owned());
-        let parent_breadcrumb = issue.parent.clone();
         let linked_issues = issue.linked_issues.clone();
         let updated = issue.updated.clone();
         let header_updated = updated.clone();
@@ -414,18 +479,21 @@ impl Dashboard {
         let due_date = issue.due_date.clone();
         let labels = issue.labels.clone();
         let details_open = self.issue_details_open;
+        let dark_surface = cx.theme().background.l < 0.5;
+        let issue_edit_controls_visible = !readonly
+            && self.selected_issue.as_ref() == Some(&issue.id)
+            && !matches!(self.issue_edit_flow.state(), IssueEditState::Idle)
+            && self.workspace.is_some();
         let dashboard_for_details_a11y = cx.entity().downgrade();
-        v_flex()
+        let content = v_flex()
             .id("issue-detail")
-            .flex_1()
-            .min_w_0()
             .debug_selector(|| "issue-detail".to_owned())
             .accessibility_id("issue-detail")
             .role(gpui_kit::accesskit::Role::Group)
             .aria_label(format!("Issue detail for {}", issue.key))
-            .overflow_y_scrollbar()
             .p(rems(layout.detail_padding() / 16.0))
             .gap(rems(if layout.is_mobile() { 1. } else { 1.25 }))
+            .when(dark_surface, |this| this.bg(gpui_kit::rgb(0x0d1316)))
             .child(
                 v_flex()
                     .debug_selector(|| "issue-detail-header".to_owned())
@@ -433,55 +501,42 @@ impl Dashboard {
                     .gap_2()
                     .child(
                         h_flex()
-                            .id("issue-detail-breadcrumbs")
-                            .debug_selector(|| "issue-detail-breadcrumbs".to_owned())
-                            .accessibility_id("issue-detail-breadcrumbs")
-                            .role(gpui_kit::accesskit::Role::List)
-                            .min_w_0()
+                            .items_center()
+                            .justify_between()
                             .gap_2()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(div().min_w_0().truncate().child(project))
-                            .child("/")
-                            .when_some(parent_breadcrumb, |this, parent| {
-                                let parent_key = parent.key.clone();
-                                let parent_label = parent.key.to_string();
-                                let parent_description =
-                                    parent.summary.clone().unwrap_or_else(|| {
-                                        "Open the immediate parent issue".to_owned()
-                                    });
-                                this.child(
-                                    Button::new("issue-detail-parent-breadcrumb")
-                                        .compact()
-                                        .accessibility_id("issue-detail-parent-breadcrumb")
-                                        .label(parent_label)
-                                        .tooltip(format!("{} · {}", parent_key, parent_description))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.open_related_issue_key(parent_key.clone(), cx);
-                                        })),
-                                )
-                                .child("/")
-                            })
                             .child(
-                                h_flex().min_w_0().child(
-                                    div()
-                                        .id(detail_key_accessibility_id.clone())
-                                        .debug_selector(|| "issue-detail-key".to_owned())
-                                        .accessibility_id(detail_key_accessibility_id)
-                                        .role(gpui_kit::accesskit::Role::TextRun)
-                                        .aria_label(detail_key_label)
-                                        .min_w_0()
-                                        .child(div().min_w_0().truncate().child(key)),
-                                ),
+                                h_flex()
+                                    .id("issue-detail-breadcrumbs")
+                                    .debug_selector(|| "issue-detail-breadcrumbs".to_owned())
+                                    .accessibility_id("issue-detail-breadcrumbs")
+                                    .role(gpui_kit::accesskit::Role::List)
+                                    .min_w_0()
+                                    .gap_2()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        h_flex().min_w_0().child(
+                                            div()
+                                                .id(detail_key_accessibility_id.clone())
+                                                .debug_selector(|| "issue-detail-key".to_owned())
+                                                .accessibility_id(detail_key_accessibility_id)
+                                                .role(gpui_kit::accesskit::Role::TextRun)
+                                                .aria_label(detail_key_label)
+                                                .min_w_0()
+                                                .child(div().min_w_0().truncate().child(key)),
+                                        ),
+                                    )
+                                    .child(div().text_xs().child("/"))
+                                    .child(self.issue_status_pill(&header_status, cx)),
                             )
-                            .child(self.status_control(Some(&issue), header_status, cx)),
+                            .child(self.render_issue_header_actions(&issue, readonly, cx)),
                     )
                     .child(
                         div()
                             .debug_selector(|| "issue-detail-summary".to_owned())
                             .min_w_0()
                             .line_clamp(if layout.is_mobile() { 3 } else { 4 })
-                            .text_2xl()
+                            .text_xl()
                             .font_semibold()
                             .child(summary),
                     )
@@ -494,45 +549,6 @@ impl Dashboard {
                             .gap_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(
-                                h_flex()
-                                    .debug_selector(|| "issue-detail-type-surface".to_owned())
-                                    .id("issue-detail-type-surface")
-                                    .accessibility_id("issue-detail-type-surface")
-                                    .h_6()
-                                    .min_w_0()
-                                    .items_center()
-                                    .gap_1()
-                                    .px_2()
-                                    .rounded_full()
-                                    .bg(cx.theme().secondary)
-                                    .text_sm()
-                                    .text_color(self.issue_type_color(type_semantics.tone, cx))
-                                    .role(gpui_kit::accesskit::Role::Group)
-                                    .aria_label(format!("Issue type: {issue_type}"))
-                                    .child(
-                                        Icon::new(type_semantics.icon)
-                                            .size_4()
-                                            .flex_shrink_0()
-                                            .text_color(
-                                                self.issue_type_color(type_semantics.tone, cx),
-                                            ),
-                                    )
-                                    .child(issue_type),
-                            )
-                            .child(
-                                h_flex()
-                                    .debug_selector(|| "issue-detail-priority-surface".to_owned())
-                                    .h_6()
-                                    .min_w_0()
-                                    .items_center()
-                                    .text_sm()
-                                    .child(self.priority_badge_group(
-                                        priority,
-                                        priority_badge_accessibility_id,
-                                        cx,
-                                    )),
-                            )
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -560,9 +576,23 @@ impl Dashboard {
                                                     .collect::<String>(),
                                             ),
                                     )
-                                    .child(div().min_w_0().truncate().child(header_assignee))
-                                    .child(self.render_idle_assignee_trigger(Some(&issue), cx)),
+                                    .child(div().min_w_0().truncate().child(header_assignee)),
                             )
+                            .child(div().text_xs().child("|"))
+                            .child(
+                                h_flex()
+                                    .debug_selector(|| "issue-detail-priority-surface".to_owned())
+                                    .h_6()
+                                    .min_w_0()
+                                    .items_center()
+                                    .text_sm()
+                                    .child(self.priority_badge_group(
+                                        priority,
+                                        priority_badge_accessibility_id,
+                                        cx,
+                                    )),
+                            )
+                            .child(div().text_xs().child("|"))
                             .child(
                                 div()
                                     .id("issue-detail-updated-header")
@@ -591,7 +621,9 @@ impl Dashboard {
                 self.render_selected_detail_feedback(&detail_state, cx),
                 |this, feedback| this.child(feedback),
             )
-            .child(self.render_issue_edit_controls(Some(&issue), layout, cx))
+            .when(issue_edit_controls_visible, |this| {
+                this.child(self.render_issue_edit_controls(Some(&issue), layout, cx))
+            })
             .child(
                 v_flex()
                     .id("issue-detail-description")
@@ -610,6 +642,7 @@ impl Dashboard {
                             .border_color(cx.theme().border)
                             .text_sm()
                             .text_color(cx.theme().foreground)
+                            .when(dark_surface, |this| this.bg(gpui_kit::rgb(0x181f25)))
                             .child(description_content),
                     ),
             )
@@ -643,6 +676,7 @@ impl Dashboard {
                             );
                             v_flex()
                                 .id(("issue-detail-linked-row", index))
+                                .debug_selector(move || format!("issue-detail-linked-row-{index}"))
                                 .accessibility_id(format!("issue-detail-linked-{index}"))
                                 .role(gpui_kit::accesskit::Role::Group)
                                 .aria_label(accessible_label.clone())
@@ -668,6 +702,9 @@ impl Dashboard {
                                         .child(
                                             Button::new(("issue-detail-linked", index))
                                                 .compact()
+                                                .debug_selector(move || {
+                                                    format!("issue-detail-linked-key-{index}")
+                                                })
                                                 .accessibility_id(format!(
                                                     "issue-detail-linked-key-{index}"
                                                 ))
@@ -678,7 +715,7 @@ impl Dashboard {
                                         )
                                         .child(
                                             div()
-                                                .min_w_0()
+                                                .min_w(px(160.))
                                                 .when(!layout.is_mobile(), |this| this.flex_1())
                                                 .whitespace_normal()
                                                 .text_sm()
@@ -692,145 +729,179 @@ impl Dashboard {
                         })),
                 )
             })
-            .child(
-                v_flex()
-                    .id("issue-detail-details")
-                    .accessibility_id("issue-detail-details")
-                    .debug_selector(|| "issue-detail-details".to_owned())
-                    .role(gpui_kit::accesskit::Role::Group)
-                    .aria_label("Issue details")
-                    .child(
-                        Accordion::new("issue-detail-details-accordion")
-                            .bordered(true)
-                            .with_size(Size::Small)
-                            .item(|item| {
-                                item.open(details_open)
-                                    .title(
-                                        div()
-                                            .id("issue-detail-details-trigger-label")
-                                            .debug_selector(|| {
-                                                "issue-detail-details-trigger".to_owned()
-                                            })
-                                            .accessibility_id("issue-detail-details-trigger")
-                                            .role(gpui_kit::accesskit::Role::Button)
-                                            .aria_label("Details")
-                                            .aria_expanded(details_open)
-                                            // The Accordion component owns the pointer interaction;
-                                            // this non-tab-stop semantic child gives macOS AX clients
-                                            // a stable, pressable trigger without replacing it.
-                                            .tab_index(-1)
-                                            .on_a11y_action(
-                                                gpui_kit::AccessibleAction::Click,
-                                                move |_, _, cx| {
-                                                    if let Some(dashboard) =
-                                                        dashboard_for_details_a11y.upgrade()
-                                                    {
-                                                        dashboard.update(cx, |this, cx| {
-                                                            this.issue_details_open =
-                                                                !this.issue_details_open;
-                                                            cx.notify();
-                                                        });
-                                                    }
-                                                },
-                                            )
-                                            .child("Details"),
-                                    )
-                                    .child(
-                                        DescriptionList::horizontal()
-                                            .with_size(Size::Small)
-                                            .columns(1)
-                                            .bordered(false)
-                                            .label_width(rems(if layout.is_rail() {
-                                                6.75
-                                            } else {
-                                                8.25
-                                            }))
-                                            .item(
-                                                "Assignee",
-                                                detail_metadata_value(
-                                                    assignee,
-                                                    "issue-detail-assignee",
-                                                ),
-                                                1,
-                                            )
-                                            .item(
-                                                "Reporter",
-                                                detail_metadata_value(
-                                                    reporter,
-                                                    "issue-detail-reporter",
-                                                ),
-                                                1,
-                                            )
-                                            .item(
-                                                "Status category",
-                                                detail_metadata_value(
-                                                    status_category,
-                                                    "issue-detail-status-category",
-                                                ),
-                                                1,
-                                            )
-                                            .item(
-                                                "Parent",
-                                                detail_metadata_value(
-                                                    parent,
-                                                    "issue-detail-parent",
-                                                ),
-                                                1,
-                                            )
-                                            .item(
-                                                "Created",
-                                                detail_metadata_value(
-                                                    created,
-                                                    "issue-detail-created",
-                                                ),
-                                                1,
-                                            )
-                                            .item(
-                                                "Updated",
-                                                detail_metadata_value(
-                                                    updated,
-                                                    "issue-detail-updated",
-                                                ),
-                                                1,
-                                            )
-                                            .item(
-                                                "Due date",
-                                                detail_metadata_value(
-                                                    due_date,
-                                                    "issue-detail-due-date",
-                                                ),
-                                                1,
-                                            ),
-                                    )
-                            })
-                            .on_toggle_click(cx.listener(|this, open_indices: &[usize], _, cx| {
-                                this.issue_details_open = open_indices.contains(&0);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .when(!labels.is_empty(), |this| {
+            .when(readonly, |this| {
+                this.child(self.render_issue_action_bar(&issue, layout, true, cx))
+            })
+            .when(!readonly, |this| {
+                this.child(self.render_issue_action_bar(&issue, layout, false, cx))
+            })
+            .when(!readonly, |this| {
                 this.child(
                     v_flex()
-                        .gap_2()
-                        .child(div().text_sm().font_semibold().child("Labels"))
-                        .child(h_flex().flex_wrap().min_w_0().gap_2().children(
-                            labels.iter().cloned().map(|label| {
-                                let id = format!("issue-detail-label-{label}");
-                                let selector = id.clone();
-                                div()
-                                    .id(id.clone())
-                                    .debug_selector(move || selector.clone())
-                                    .accessibility_id(id)
-                                    .role(gpui_kit::accesskit::Role::ListItem)
-                                    .aria_label(format!("Label {label}"))
-                                    .child(self.tag(label))
-                            }),
-                        )),
+                        .id("issue-detail-details")
+                        .accessibility_id("issue-detail-details")
+                        .debug_selector(|| "issue-detail-details".to_owned())
+                        .role(gpui_kit::accesskit::Role::Group)
+                        .aria_label("Issue details")
+                        .child(
+                            Accordion::new("issue-detail-details-accordion")
+                                .bordered(true)
+                                .with_size(Size::Small)
+                                .item(|item| {
+                                    item.open(details_open)
+                                        .title(
+                                            div()
+                                                .id("issue-detail-details-trigger-label")
+                                                .debug_selector(|| {
+                                                    "issue-detail-details-trigger".to_owned()
+                                                })
+                                                .accessibility_id("issue-detail-details-trigger")
+                                                .role(gpui_kit::accesskit::Role::Button)
+                                                .aria_label("Details")
+                                                .aria_expanded(details_open)
+                                                // The Accordion component owns the pointer interaction;
+                                                // this non-tab-stop semantic child gives macOS AX clients
+                                                // a stable, pressable trigger without replacing it.
+                                                .tab_index(-1)
+                                                .on_a11y_action(
+                                                    gpui_kit::AccessibleAction::Click,
+                                                    move |_, _, cx| {
+                                                        if let Some(dashboard) =
+                                                            dashboard_for_details_a11y.upgrade()
+                                                        {
+                                                            dashboard.update(cx, |this, cx| {
+                                                                this.issue_details_open =
+                                                                    !this.issue_details_open;
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    },
+                                                )
+                                                .child("Details"),
+                                        )
+                                        .child(
+                                            DescriptionList::horizontal()
+                                                .with_size(Size::Small)
+                                                .columns(1)
+                                                .bordered(false)
+                                                .label_width(rems(if layout.is_rail() {
+                                                    6.75
+                                                } else {
+                                                    8.25
+                                                }))
+                                                .item(
+                                                    "Project",
+                                                    detail_metadata_value(
+                                                        issue.project.clone(),
+                                                        "issue-detail-project",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Issue type",
+                                                    detail_metadata_value(
+                                                        issue.issue_type.clone(),
+                                                        "issue-detail-type",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Assignee",
+                                                    detail_metadata_value(
+                                                        assignee,
+                                                        "issue-detail-assignee",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Reporter",
+                                                    detail_metadata_value(
+                                                        reporter,
+                                                        "issue-detail-reporter",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Status category",
+                                                    detail_metadata_value(
+                                                        status_category,
+                                                        "issue-detail-status-category",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Parent",
+                                                    detail_metadata_value(
+                                                        parent,
+                                                        "issue-detail-parent",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Created",
+                                                    detail_metadata_value(
+                                                        created,
+                                                        "issue-detail-created",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Updated",
+                                                    detail_metadata_value(
+                                                        updated,
+                                                        "issue-detail-updated",
+                                                    ),
+                                                    1,
+                                                )
+                                                .item(
+                                                    "Due date",
+                                                    detail_metadata_value(
+                                                        due_date,
+                                                        "issue-detail-due-date",
+                                                    ),
+                                                    1,
+                                                ),
+                                        )
+                                })
+                                .on_toggle_click(cx.listener(
+                                    |this, open_indices: &[usize], _, cx| {
+                                        this.issue_details_open = open_indices.contains(&0);
+                                        cx.notify();
+                                    },
+                                )),
+                        ),
                 )
-            })
-            .child(self.render_detail_state_for(&detail_state, layout, cx))
-            .into_any_element()
+                .when(!labels.is_empty(), |this| {
+                    this.child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().text_sm().font_semibold().child("Labels"))
+                            .child(h_flex().flex_wrap().min_w_0().gap_2().children(
+                                labels.iter().cloned().map(|label| {
+                                    let id = format!("issue-detail-label-{label}");
+                                    let selector = id.clone();
+                                    div()
+                                        .id(id.clone())
+                                        .debug_selector(move || selector.clone())
+                                        .accessibility_id(id)
+                                        .role(gpui_kit::accesskit::Role::ListItem)
+                                        .aria_label(format!("Label {label}"))
+                                        .child(self.tag(label))
+                                }),
+                            )),
+                    )
+                })
+                .child(self.render_detail_state_for(&detail_state, layout, cx))
+            });
+        if readonly {
+            content.min_w_0().into_any_element()
+        } else {
+            content
+                .flex_1()
+                .min_w_0()
+                .overflow_y_scrollbar()
+                .into_any_element()
+        }
     }
 
     fn render_selected_detail_feedback(
@@ -876,6 +947,558 @@ impl Dashboard {
             | DetailState::Loaded(_)
             | DetailState::Refreshing { .. } => None,
         }
+    }
+
+    fn issue_status_pill(&self, status: &str, cx: &mut Context<Self>) -> AnyElement {
+        let active = status.trim().eq_ignore_ascii_case("in progress");
+        let dark_surface = cx.theme().background.l < 0.5;
+        let (background, foreground): (gpui_kit::Hsla, gpui_kit::Hsla) = if active {
+            if dark_surface {
+                (
+                    gpui_kit::rgb(0x142f53).into(),
+                    gpui_kit::rgb(0x9cc5ff).into(),
+                )
+            } else {
+                (cx.theme().blue.opacity(0.16), cx.theme().blue)
+            }
+        } else {
+            (cx.theme().secondary, cx.theme().foreground)
+        };
+        div()
+            .id("issue-detail-status-pill")
+            .debug_selector(|| "issue-detail-status-pill".to_owned())
+            .accessibility_id("issue-detail-status-pill")
+            .role(gpui_kit::accesskit::Role::Label)
+            .aria_label(format!("Status: {status}"))
+            .px_2()
+            .py_1()
+            .rounded_full()
+            .bg(background)
+            .text_xs()
+            .text_color(foreground)
+            .child(status.to_owned())
+            .into_any_element()
+    }
+
+    fn render_issue_header_actions(
+        &self,
+        issue: &IssueViewModel,
+        readonly: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let issue_id_for_watch = issue.id.clone();
+        let selected_watch_state = match self.watch_flow.state() {
+            WatchState::Ready {
+                issue_id,
+                issue_key,
+                watching,
+            } if issue_id == &issue.id => Some((Some(issue_key.as_str()), Some(*watching), false)),
+            WatchState::Confirming {
+                issue_id,
+                issue_key,
+                target_watching,
+            } if issue_id == &issue.id => {
+                Some((Some(issue_key.as_str()), Some(!*target_watching), true))
+            }
+            WatchState::Submitting {
+                identity,
+                target_watching,
+            } if identity.issue_id() == &issue.id => {
+                Some((Some(identity.issue_key()), Some(!*target_watching), true))
+            }
+            WatchState::Loading { issue_id, .. } if issue_id == &issue.id => {
+                Some((None, None, false))
+            }
+            WatchState::Error { issue_id, .. } if issue_id == &issue.id => Some((None, None, true)),
+            _ => None,
+        };
+        let watch_label = match selected_watch_state {
+            Some((_, Some(true), _)) => "Unwatch",
+            Some((_, _, _)) => "Watch",
+            None => "Watch",
+        };
+        let watch_checking = matches!(
+            self.watch_flow.state(),
+            WatchState::Loading { issue_id, .. } if issue_id == &issue.id
+        );
+        let watch_submitting = matches!(
+            self.watch_flow.state(),
+            WatchState::Submitting { identity, .. } if identity.issue_id() == &issue.id
+        );
+        let watch_pending = watch_checking || watch_submitting;
+        let watch_identity_matches = match self.watch_flow.state() {
+            WatchState::Idle => true,
+            WatchState::Loading { issue_id, .. }
+            | WatchState::Ready { issue_id, .. }
+            | WatchState::Confirming { issue_id, .. }
+            | WatchState::Error { issue_id, .. } => issue_id == &issue.id,
+            WatchState::Submitting { identity, .. } => identity.issue_id() == &issue.id,
+        };
+        let watch_is_available = self.selected_issue.as_ref() == Some(&issue.id)
+            && watch_identity_matches
+            && !matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. })
+            && !self.operation_in_progress
+            && (self.workspace.is_some() || self.issue_watch_fixture_ready());
+        let watch_confirmation_open = selected_watch_state
+            .is_some_and(|(_, _, confirming)| confirming)
+            && matches!(
+                self.watch_flow.state(),
+                WatchState::Confirming { issue_id, .. } | WatchState::Error { issue_id, .. }
+                    if issue_id == &issue.id
+            );
+        let watch_feedback = match self.watch_flow.state() {
+            WatchState::Error {
+                issue_id,
+                message,
+                unknown,
+            } if issue_id == &issue.id => Some((message.as_str(), *unknown)),
+            _ => None,
+        };
+        let watch_issue_key = selected_watch_state
+            .and_then(|(key, _, _)| key)
+            .unwrap_or(issue.key.as_str())
+            .to_owned();
+        h_flex()
+            .id("issue-detail-header-actions")
+            .debug_selector(|| "issue-detail-header-actions".to_owned())
+            .accessibility_id("issue-detail-header-actions")
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label("Issue actions")
+            .flex_shrink_0()
+            .relative()
+            .items_center()
+            .gap_2()
+            .child(if readonly {
+                Button::new("issue-watch-button")
+                    .debug_selector(|| "issue-watch-button".to_owned())
+                    .accessibility_id("issue-watch-button")
+                    .secondary()
+                    .outline()
+                    .small()
+                    .icon(Icon::new(IconName::Eye))
+                    .label("Watch")
+                    .tooltip("Open the issue in Issues to manage watching")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_issue_in_issues(issue_id_for_watch.clone(), cx);
+                    }))
+                    .into_any_element()
+            } else {
+                let label = if watch_checking {
+                    "Checking…"
+                } else if watch_submitting {
+                    "Saving…"
+                } else {
+                    watch_label
+                };
+                Popover::new("issue-watch-confirmation")
+                    .anchor(Anchor::TopRight)
+                    .open(watch_confirmation_open)
+                    .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                        if !*open {
+                            this.cancel_issue_watch_confirmation(cx);
+                        }
+                    }))
+                    .trigger(
+                        Button::new("issue-watch-button")
+                            .debug_selector(|| "issue-watch-button".to_owned())
+                            .accessibility_id("issue-watch-button")
+                            .secondary()
+                            .outline()
+                            .small()
+                            .icon(Icon::new(IconName::Eye))
+                            .label(label)
+                            .disabled(!watch_is_available || watch_pending)
+                            .tooltip(if watch_checking {
+                                "Checking the current Watch setting".to_owned()
+                            } else if watch_submitting {
+                                "Saving the confirmed Watch change".to_owned()
+                            } else if !watch_is_available {
+                                "Select this issue in Issues and connect Jira to manage watching"
+                                    .to_owned()
+                            } else {
+                                "Review the Watch change before applying it".to_owned()
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.begin_issue_watch_state(cx);
+                            })),
+                    )
+                    .child(self.render_issue_watch_confirmation(
+                        &watch_issue_key,
+                        watch_feedback,
+                        cx,
+                    ))
+                    .into_any_element()
+            })
+            .child(
+                Popover::new("issue-detail-overflow")
+                    .anchor(Anchor::TopRight)
+                    .open(self.issue_overflow_open)
+                    .on_open_change(cx.listener(|this, open, _, cx| {
+                        this.issue_overflow_open = *open;
+                        cx.notify();
+                    }))
+                    .trigger(
+                        Button::new("issue-detail-overflow-trigger")
+                            .debug_selector(|| "issue-detail-overflow-trigger".to_owned())
+                            .accessibility_id("issue-detail-overflow-trigger")
+                            .secondary()
+                            .outline()
+                            .small()
+                            .label("•••")
+                            .accessibility_label("More issue actions"),
+                    )
+                    .child(self.render_issue_overflow_menu(issue, readonly, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_issue_watch_confirmation(
+        &self,
+        issue_key: &str,
+        feedback: Option<(&str, bool)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let confirmation = match self.watch_flow.state() {
+            WatchState::Confirming {
+                issue_key: state_key,
+                target_watching,
+                ..
+            } if state_key == issue_key => Some(*target_watching),
+            _ => None,
+        };
+        let heading = confirmation.map(|target| {
+            if target {
+                format!("Watch {issue_key}?")
+            } else {
+                format!("Stop watching {issue_key}?")
+            }
+        });
+        v_flex()
+            .id("issue-watch-confirmation")
+            .debug_selector(|| "issue-watch-confirmation".to_owned())
+            .accessibility_id("issue-watch-confirmation")
+            .role(gpui_kit::accesskit::Role::AlertDialog)
+            .aria_label(format!("Confirm issue Watch change for {issue_key}"))
+            .gap_2()
+            .p_3()
+            .when_some(heading, |this, heading| {
+                this.child(
+                    div()
+                        .id("issue-watch-confirmation-title")
+                        .accessibility_id("issue-watch-confirmation-title")
+                        .role(gpui_kit::accesskit::Role::Label)
+                        .text_sm()
+                        .font_semibold()
+                        .child(heading),
+                )
+            })
+            .when_some(feedback, |this, (message, unknown)| {
+                this.child(
+                    div()
+                        .id("issue-watch-feedback")
+                        .debug_selector(|| "issue-watch-feedback".to_owned())
+                        .accessibility_id("issue-watch-feedback")
+                        .text_sm()
+                        .child(if unknown {
+                            format!(
+                                "The result is unknown. Check Jira before trying again. {message}"
+                            )
+                        } else {
+                            message.to_owned()
+                        }),
+                )
+            })
+            .when(confirmation.is_some(), |this| {
+                this.child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("issue-watch-cancel")
+                                .debug_selector(|| "issue-watch-cancel".to_owned())
+                                .accessibility_id("issue-watch-cancel")
+                                .secondary()
+                                .outline()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_issue_watch_confirmation(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("issue-watch-confirm")
+                                .debug_selector(|| "issue-watch-confirm".to_owned())
+                                .accessibility_id("issue-watch-confirm")
+                                .primary()
+                                .label("Confirm")
+                                .disabled(self.workspace.is_none() || self.operation_in_progress)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_issue_watch(window, cx);
+                                })),
+                        ),
+                )
+            })
+            .when(feedback.is_some(), |this| {
+                this.child(
+                    Button::new("issue-watch-refresh")
+                        .debug_selector(|| "issue-watch-refresh".to_owned())
+                        .accessibility_id("issue-watch-refresh")
+                        .secondary()
+                        .outline()
+                        .label("Refresh Watch status")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.refresh_issue_watch_state(cx);
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_issue_overflow_menu(
+        &self,
+        issue: &IssueViewModel,
+        readonly: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let issue_id_for_details = issue.id.clone();
+        let issue_id_for_assignee = issue.id.clone();
+        let parent = issue.parent.as_ref().map(|parent| parent.key.clone());
+        let parent_for_click = parent.clone();
+        v_flex()
+            .id("issue-detail-overflow-menu")
+            .debug_selector(|| "issue-detail-overflow-menu".to_owned())
+            .accessibility_id("issue-detail-overflow-menu")
+            .role(gpui_kit::accesskit::Role::Menu)
+            .aria_label("More issue actions")
+            .min_w_48()
+            .p_1()
+            .gap_1()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                Button::new("issue-detail-overflow-toggle-details")
+                    .compact()
+                    .accessibility_id("issue-detail-overflow-toggle-details")
+                    .label(if self.issue_details_open {
+                        "Hide details"
+                    } else {
+                        "Show details"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if readonly {
+                            this.open_issue_in_issues(issue_id_for_details.clone(), cx);
+                        } else {
+                            this.issue_details_open = !this.issue_details_open;
+                            this.issue_overflow_open = false;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .when_some(parent, |this, _| {
+                this.child(
+                    Button::new("issue-detail-overflow-open-parent")
+                        .compact()
+                        .accessibility_id("issue-detail-overflow-open-parent")
+                        .label("Open parent issue")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(parent) = parent_for_click.clone() {
+                                this.issue_overflow_open = false;
+                                this.open_related_issue_key(parent, cx);
+                            }
+                        })),
+                )
+            })
+            .when(readonly, |this| {
+                this.child(
+                    Button::new("issue-detail-overflow-assignee")
+                        .compact()
+                        .accessibility_id("issue-detail-overflow-assignee")
+                        .label("Open assignee details")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.issue_overflow_open = false;
+                            this.open_issue_in_issues(issue_id_for_assignee.clone(), cx);
+                        })),
+                )
+            })
+            .when(!readonly, |this| {
+                this.child(self.render_idle_assignee_trigger(Some(issue), cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_issue_action_bar(
+        &self,
+        issue: &IssueViewModel,
+        _layout: LayoutMode,
+        readonly: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let comment_button_variant = ButtonCustomVariant::new(cx)
+            .color(gpui_kit::rgb(0x2563eb).into())
+            .foreground(gpui_kit::rgb(0xffffff).into())
+            .hover(gpui_kit::rgb(0x1d4ed8).into())
+            .active(gpui_kit::rgb(0x1e40af).into());
+        let issue_id_for_status = issue.id.clone();
+        let issue_id_for_comment = issue.id.clone();
+        let issue_id_for_menu_navigation = issue.id.clone();
+        let comment_composer_available = self.selected_issue.as_ref() == Some(&issue.id)
+            && matches!(
+                &self.detail_state,
+                DetailState::Loaded(_) | DetailState::Refreshing { .. }
+            );
+        let status_control = if readonly {
+            Button::new("issue-detail-change-status")
+                .debug_selector(|| "issue-detail-change-status".to_owned())
+                .accessibility_id("issue-detail-change-status")
+                .secondary()
+                .outline()
+                .dropdown_caret(true)
+                .label("Change status")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_issue_in_issues(issue_id_for_status.clone(), cx);
+                }))
+                .into_any_element()
+        } else {
+            self.status_control(Some(issue), cx)
+        };
+        let comment_options = Popover::new("issue-comment-options-popover")
+            .anchor(Anchor::TopLeft)
+            .open(self.comment_options_open)
+            .on_open_change(cx.listener(|this, open, _, cx| {
+                this.comment_options_open = *open;
+                cx.notify();
+            }))
+            .trigger(
+                Button::new("issue-detail-add-comment-menu")
+                    .debug_selector(|| "issue-detail-add-comment-menu".to_owned())
+                    .accessibility_id("issue-detail-add-comment-menu")
+                    .custom(comment_button_variant)
+                    .bg(gpui_kit::rgb(0x2563eb))
+                    .with_size(Size::Medium)
+                    .dropdown_caret(true)
+                    .label("")
+                    .disabled(!readonly && !comment_composer_available)
+                    .accessibility_label("Comment options"),
+            )
+            .child(if readonly {
+                v_flex()
+                    .id("issue-comment-options-menu")
+                    .role(gpui_kit::accesskit::Role::Menu)
+                    .aria_label("Comment options")
+                    .child(
+                        Button::new("issue-comment-options-open-issue")
+                            .compact()
+                            .label("Open issue in Issues")
+                            .accessibility_id("issue-comment-options-open-issue")
+                            .debug_selector(|| "issue-comment-options-open-issue".to_owned())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.comment_options_open = false;
+                                this.open_issue_in_issues(issue_id_for_menu_navigation.clone(), cx);
+                            })),
+                    )
+                    .into_any_element()
+            } else {
+                let toggle_label = if self.issue_comments_open {
+                    "Hide comments and attachments"
+                } else {
+                    "View comments"
+                };
+                v_flex()
+                    .id("issue-comment-options-menu")
+                    .role(gpui_kit::accesskit::Role::Menu)
+                    .aria_label("Comment options")
+                    .child(
+                        Button::new("issue-comment-options-write")
+                            .compact()
+                            .label("Write comment")
+                            .accessibility_id("issue-comment-options-write")
+                            .debug_selector(|| "issue-comment-options-write".to_owned())
+                            .disabled(!comment_composer_available)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.comment_options_open = false;
+                                this.issue_comments_open = true;
+                                if let Some(input) = this.comment_input.clone() {
+                                    input.update(cx, |input, cx| input.focus(window, cx));
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("issue-comment-options-toggle-comments")
+                            .compact()
+                            .label(toggle_label)
+                            .accessibility_id("issue-comment-options-toggle-comments")
+                            .debug_selector(|| "issue-comment-options-toggle-comments".to_owned())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.comment_options_open = false;
+                                this.issue_comments_open = !this.issue_comments_open;
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            });
+        h_flex()
+            .id("issue-detail-action-bar")
+            .debug_selector(|| "issue-detail-action-bar".to_owned())
+            .accessibility_id("issue-detail-action-bar")
+            .role(gpui_kit::accesskit::Role::Toolbar)
+            .aria_label("Issue actions")
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                h_flex()
+                    .id("issue-detail-comment-button-group")
+                    .debug_selector(|| "issue-detail-comment-button-group".to_owned())
+                    .accessibility_id("issue-detail-comment-button-group")
+                    .items_center()
+                    .gap_0()
+                    .child(
+                        Button::new("issue-detail-add-comment")
+                            .debug_selector(|| "issue-detail-add-comment".to_owned())
+                            .accessibility_id("issue-detail-add-comment")
+                            .custom(comment_button_variant)
+                            .bg(gpui_kit::rgb(0x2563eb))
+                            .with_size(Size::Medium)
+                            .label("Add comment")
+                            .disabled(!readonly && !comment_composer_available)
+                            .tooltip(if readonly {
+                                "Open the full issue in Issues".to_owned()
+                            } else if comment_composer_available {
+                                "Focus the comment composer".to_owned()
+                            } else {
+                                "Load issue details before adding a comment".to_owned()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if readonly {
+                                    this.open_issue_in_issues(issue_id_for_comment.clone(), cx);
+                                } else {
+                                    this.issue_comments_open = true;
+                                    if let Some(input) = this.comment_input.clone() {
+                                        input.update(cx, |input, cx| input.focus(window, cx));
+                                    }
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(comment_options),
+            )
+            .child(status_control)
+            .child(
+                Button::new("issue-detail-action-overflow")
+                    .debug_selector(|| "issue-detail-action-overflow".to_owned())
+                    .accessibility_id("issue-detail-action-overflow")
+                    .secondary()
+                    .outline()
+                    .label("•••")
+                    .accessibility_label("More issue actions")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.issue_overflow_open = !this.issue_overflow_open;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     fn render_detail_state_for(
@@ -1132,21 +1755,26 @@ impl Dashboard {
                                     ),
                             ),
                     )
-                    .child(comments)
-                    .child(div().text_sm().font_semibold().child("Attachments"))
-                    .child(attachments)
-                    .child(self.render_comment_composer(layout, cx))
+                    .when(self.issue_comments_open, |this| {
+                        this.child(comments)
+                            .child(div().text_sm().font_semibold().child("Attachments"))
+                            .child(attachments)
+                            .child(self.render_comment_composer(layout, cx))
+                    })
+                    .when(!self.issue_comments_open, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Comments and attachments are hidden."),
+                        )
+                    })
                     .into_any_element()
             }
         }
     }
 
-    fn status_control(
-        &self,
-        issue: Option<&IssueViewModel>,
-        status: String,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn status_control(&self, issue: Option<&IssueViewModel>, cx: &mut Context<Self>) -> AnyElement {
         let is_selected_issue = issue
             .map(|issue| self.selected_issue.as_ref() == Some(&issue.id))
             .unwrap_or(false);
@@ -1218,7 +1846,7 @@ impl Dashboard {
             .secondary()
             .with_size(Size::Small)
             .dropdown_caret(true)
-            .label(status)
+            .label("Change status")
             .disabled(trigger_disabled)
             .tooltip(status_aria_label.clone());
         let status_control = Popover::new("issue-status-popover")

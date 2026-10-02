@@ -34,6 +34,8 @@ pub enum UiLabScenario {
     OnboardingDialog,
     /// The issues list and selected issue detail surface.
     Issues,
+    /// The selected issue detail as a single-surface design capture.
+    IssueDetail,
     /// The local update ledger surface.
     Updates,
     /// The local update ledger with the first ticket's mobile reading pane open.
@@ -51,6 +53,7 @@ impl UiLabScenario {
             Self::Onboarding => "onboarding",
             Self::OnboardingDialog => "onboarding-dialog",
             Self::Issues => "issues",
+            Self::IssueDetail => "issue-detail",
             Self::Updates => "updates",
             Self::UpdatesReading => "updates-reading",
             Self::Team => "team",
@@ -64,12 +67,13 @@ impl UiLabScenario {
             "onboarding" => Ok(Self::Onboarding),
             "onboarding-dialog" => Ok(Self::OnboardingDialog),
             "issues" => Ok(Self::Issues),
+            "issue-detail" => Ok(Self::IssueDetail),
             "updates" => Ok(Self::Updates),
             "updates-reading" => Ok(Self::UpdatesReading),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, onboarding-dialog, issues, updates, updates-reading, team, settings"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-dialog, issues, issue-detail, updates, updates-reading, team, settings"
             ),
         }
     }
@@ -226,6 +230,13 @@ pub fn capture(request: &UiLabCapture) -> Result<UiLabCaptureReport> {
             let dashboard = match request.scenario {
                 UiLabScenario::Onboarding | UiLabScenario::OnboardingDialog => None,
                 UiLabScenario::Issues => Some(fixture_dashboard(SampleSection::Issues)),
+                UiLabScenario::IssueDetail => {
+                    let mut dashboard =
+                        Dashboard::from_sample_data_for_section(SampleSection::Issues);
+                    dashboard.prepare_issue_detail_for_ui_lab();
+                    dashboard.initialize_appearance_preference(fixture_preference);
+                    Some(cx.new(|_| dashboard))
+                }
                 UiLabScenario::Updates => Some(fixture_dashboard(SampleSection::Updates)),
                 UiLabScenario::UpdatesReading => {
                     let mut dashboard =
@@ -319,6 +330,7 @@ mod tests {
             ("onboarding", UiLabScenario::Onboarding),
             ("onboarding-dialog", UiLabScenario::OnboardingDialog),
             ("issues", UiLabScenario::Issues),
+            ("issue-detail", UiLabScenario::IssueDetail),
             ("updates", UiLabScenario::Updates),
             ("updates-reading", UiLabScenario::UpdatesReading),
             ("team", UiLabScenario::Team),
@@ -341,6 +353,11 @@ mod tests {
             super::matrix::built_in_matrix()
                 .iter()
                 .all(|case| case.scenario != UiLabScenario::UpdatesReading)
+        );
+        assert!(
+            super::matrix::built_in_matrix()
+                .iter()
+                .all(|case| case.scenario != UiLabScenario::IssueDetail)
         );
     }
 

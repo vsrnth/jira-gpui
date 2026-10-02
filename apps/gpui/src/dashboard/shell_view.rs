@@ -540,13 +540,18 @@ impl Dashboard {
     }
 
     fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) -> bool {
+        if self.watch_flow.is_submitting() && section != self.section {
+            self.sync_message = "Finish the confirmed Jira change before changing views".to_owned();
+            cx.notify();
+            return false;
+        }
         if section == Section::Team
             && self
                 .selected_issue
                 .as_ref()
                 .is_some_and(|selected| !self.team_issues.iter().any(|issue| &issue.id == selected))
         {
-            if self.issue_edit_flow.is_submitting() {
+            if self.issue_edit_flow.is_submitting() || self.watch_flow.is_submitting() {
                 self.sync_message =
                     "Finish the confirmed Jira change before changing views".to_owned();
                 cx.notify();
