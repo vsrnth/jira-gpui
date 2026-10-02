@@ -7,7 +7,7 @@ use crate::{AddCommentRequest, ApplicationError, CancellationToken, JiraCommentW
 pub const MAX_COMMENT_CHARS: usize = 10_000;
 pub const MAX_COMMENT_BYTES: usize = 64 * 1024;
 
-/// Application orchestration for the sole permitted Jira write.
+/// Application orchestration for explicitly confirmed Jira comment creation.
 #[derive(Clone)]
 pub struct CommentService {
     writer: Arc<dyn JiraCommentWritePort>,

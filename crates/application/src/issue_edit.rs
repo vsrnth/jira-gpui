@@ -273,7 +273,7 @@ fn validate_user_search_request(
     Ok(())
 }
 
-fn validate_locator_request(
+pub(crate) fn validate_locator_request(
     site_id: &jira_domain::JiraSiteId,
     locator: &crate::IssueLocator,
 ) -> Result<(), ApplicationError> {

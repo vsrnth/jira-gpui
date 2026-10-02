@@ -19,6 +19,7 @@ mod issue_fetch_scope;
 mod issue_media;
 mod issue_pagination;
 mod issue_pull;
+mod issue_watch;
 mod issues;
 mod model;
 mod notifications;
@@ -50,6 +51,7 @@ pub use issue_media::{
     MAX_CACHED_ATTACHMENT_IMAGE_TOTAL_BYTES, validate_cached_image,
 };
 pub use issue_pull::{IssuePullConfig, IssuePullOutcome, IssuePullRequest, IssuePullService};
+pub use issue_watch::IssueWatchService;
 pub use issues::IssueCatalogService;
 pub use model::*;
 pub use notifications::DefaultDesktopNotificationPolicy;

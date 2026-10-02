@@ -503,6 +503,140 @@ fn issue_edit_request_builders_use_expected_methods_headers_and_json_shapes() {
 }
 
 #[test]
+fn issue_watch_request_builders_target_the_authenticated_account_only() {
+    let credentials = ApiTokenCredentials::new("person@example.com", "secret-token").unwrap();
+    let url = Url::parse("https://example.atlassian.net/rest/api/3/issue/ENG-42/watchers").unwrap();
+    let watch =
+        JiraHttpClient::watch_issue_request_builder(&Client::new(), url.clone(), &credentials)
+            .build()
+            .unwrap();
+    assert_eq!(watch.method(), reqwest::Method::POST);
+    assert_eq!(watch.url().path(), "/rest/api/3/issue/ENG-42/watchers");
+    assert_eq!(watch.url().query(), None);
+    assert!(watch.body().is_none());
+    assert!(watch.headers().contains_key(header::AUTHORIZATION));
+    assert!(!watch.headers().contains_key(header::CONTENT_TYPE));
+
+    let unwatch_url = unwatch_issue_url(url, "557058:abc-123").unwrap();
+    let unwatch =
+        JiraHttpClient::unwatch_issue_request_builder(&Client::new(), unwatch_url, &credentials)
+            .build()
+            .unwrap();
+    assert_eq!(unwatch.method(), reqwest::Method::DELETE);
+    assert_eq!(unwatch.url().path(), "/rest/api/3/issue/ENG-42/watchers");
+    assert_eq!(
+        unwatch
+            .url()
+            .query_pairs()
+            .find(|(key, _)| key == "accountId")
+            .map(|(_, value)| value.into_owned())
+            .as_deref(),
+        Some("557058:abc-123")
+    );
+    assert!(unwatch.body().is_none());
+    assert!(unwatch.headers().contains_key(header::AUTHORIZATION));
+}
+
+#[test]
+fn watch_write_dispatches_once_and_keeps_unknown_outcome_for_both_actions() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for (watching, expected_method) in [
+            (true, "POST"),
+            (false, "DELETE"),
+        ] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let responder = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut first_request_line = String::new();
+                {
+                    let mut reader = tokio::io::BufReader::new(&mut stream);
+                    tokio::io::AsyncBufReadExt::read_line(
+                        &mut reader,
+                        &mut first_request_line,
+                    )
+                    .await
+                    .unwrap();
+                }
+                if watching {
+                    tokio::io::AsyncWriteExt::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                    let no_retry = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        listener.accept(),
+                    )
+                    .await
+                    .is_err();
+                    return (first_request_line, None, no_retry);
+                }
+
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 71\r\nConnection: close\r\n\r\n{\"accountId\":\"557058:caller-account\",\"displayName\":\"Ada\",\"active\":true}",
+                )
+                .await
+                .unwrap();
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut delete_request_line = String::new();
+                {
+                    let mut reader = tokio::io::BufReader::new(&mut stream);
+                    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut delete_request_line)
+                        .await
+                        .unwrap();
+                }
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+                let no_retry = tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err();
+                (first_request_line, Some(delete_request_line), no_retry)
+            });
+            let error = JiraHttpClient::set_issue_watching_request(
+                Client::new(),
+                Url::parse(&format!("http://{address}/rest/api/3/issue/ENG-42/watchers"))
+                    .unwrap(),
+                Url::parse(&format!("http://{address}/rest/api/3/myself")).unwrap(),
+                ApiTokenCredentials::new("person@example.com", "token").unwrap(),
+                JiraSiteId::new("site").unwrap(),
+                8 * 1024,
+                watching,
+            )
+            .await
+            .unwrap_err();
+            let (first_request_line, delete_request_line, no_retry) = responder.await.unwrap();
+            if watching {
+                assert!(first_request_line.starts_with(expected_method), "{first_request_line}");
+                assert!(first_request_line.contains("/issue/ENG-42/watchers"));
+                assert!(delete_request_line.is_none());
+            } else {
+                assert!(first_request_line.starts_with("GET /rest/api/3/myself"));
+                let delete_request_line = delete_request_line.expect("DELETE after /myself");
+                assert!(delete_request_line.starts_with(expected_method), "{delete_request_line}");
+                assert!(delete_request_line.contains(
+                    "/issue/ENG-42/watchers?accountId=557058%3Acaller-account"
+                ));
+            }
+            assert!(no_retry, "write was retried");
+            assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
+        }
+    });
+}
+
+#[test]
 fn transition_response_codec_errors_are_classified_at_the_http_boundary() {
     let malformed = map_transition_response(br#"{"transitions": [}"#).unwrap_err();
     assert_eq!(malformed.kind(), ErrorKind::Upstream);
@@ -647,6 +781,43 @@ fn cancelled_issue_edits_are_rejected_before_dispatch() {
             .kind(),
         ErrorKind::Cancelled
     );
+}
+
+#[test]
+fn issue_watch_port_rejects_cancellation_and_site_mismatch_before_dispatch() {
+    let configured_site = JiraSiteId::new("configured-site").unwrap();
+    let client = JiraHttpClient::new(
+        configured_site,
+        JiraCloudId::parse("cloud-id").unwrap(),
+        ApiTokenCredentials::new("person@example.com", "secret-token").unwrap(),
+    )
+    .unwrap();
+    let locator = IssueLocator::Key(jira_domain::IssueKey::new("ENG-42").unwrap());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let wrong_site = IssueWatchRequest {
+        site_id: JiraSiteId::new("other-site").unwrap(),
+        locator: locator.clone(),
+    };
+    let error = runtime
+        .block_on(client.fetch_issue_watch_state(&wrong_site, &CancellationToken::new()))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+    let cancelled_request = SetIssueWatchingRequest {
+        site_id: JiraSiteId::new("configured-site").unwrap(),
+        locator,
+        watching: true,
+    };
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = runtime
+        .block_on(client.set_issue_watching(&cancelled_request, &cancellation))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Cancelled);
 }
 
 #[test]

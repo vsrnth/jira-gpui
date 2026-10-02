@@ -11,9 +11,9 @@ use crate::{
     AttachmentImageRequest, CachedAssignableUsers, CachedIssueTransitions, CancellationToken,
     ChangeSet, CommitOutcome, IssueChangelog, IssueChangelogRequest, IssueCommentsPage,
     IssueCommentsPageRequest, IssueDetailRequest, IssueFetchRequest, IssueListQuery, IssuePage,
-    IssueTransition, IssueTransitionsRequest, NotificationRequest, RecentIssueCommentsRequest,
-    SyncCommit, SyncState, TransitionIssueRequest, UpdateFeedQuery, UserSearchRequest,
-    UserSetDraft,
+    IssueTransition, IssueTransitionsRequest, IssueWatchRequest, NotificationRequest,
+    RecentIssueCommentsRequest, SetIssueWatchingRequest, SyncCommit, SyncState,
+    TransitionIssueRequest, UpdateFeedQuery, UserSearchRequest, UserSetDraft,
 };
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApplicationError>> + Send + 'a>>;
@@ -189,6 +189,24 @@ pub trait JiraIssueEditPort: Send + Sync {
     fn transition_issue<'a>(
         &'a self,
         request: &'a TransitionIssueRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()>;
+}
+
+/// Read and explicitly confirmed watch controls for the authenticated Jira account.
+pub trait JiraIssueWatchPort: Send + Sync {
+    fn fetch_issue_watch_state<'a>(
+        &'a self,
+        request: &'a IssueWatchRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, bool>;
+
+    /// Dispatch one already-confirmed watch/unwatch action exactly once. Return
+    /// `UnknownOutcome` unchanged when Jira may have accepted the write but its
+    /// response was not observed; implementations must not retry.
+    fn set_issue_watching<'a>(
+        &'a self,
+        request: &'a SetIssueWatchingRequest,
         cancellation: &'a CancellationToken,
     ) -> PortFuture<'a, ()>;
 }
