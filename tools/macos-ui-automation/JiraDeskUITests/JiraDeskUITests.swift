@@ -681,11 +681,11 @@ final class JiraDeskUITests: XCTestCase {
         )
         overflowTrigger.click()
         let assigneeAction = try require(
-            app.buttons["issue-detail-overflow-assignee"],
-            "assignee action in issue overflow menu"
+            app.buttons["change-assignee"],
+            "change-assignee trigger in issue overflow menu"
         )
         XCTAssertEqual(assigneeAction.label.isEmpty ? assigneeAction.title : assigneeAction.label, "Change assignee")
-        assertFiniteBounded(assigneeAction.frame, name: "issue-detail-overflow-assignee")
+        assertFiniteBounded(assigneeAction.frame, name: "change-assignee")
         overflowTrigger.click()
         let actionBar = try require(
             app.descendants(matching: .any)["issue-detail-action-bar"],
@@ -1974,10 +1974,19 @@ final class JiraDeskUITests: XCTestCase {
         let cancel = try require(app.buttons["issue-watch-cancel"], "issue-watch-cancel")
         assertFiniteBounded(confirm.frame, name: "issue-watch-confirm")
         assertFiniteBounded(cancel.frame, name: "issue-watch-cancel")
-        XCTAssertFalse(confirm.isEnabled, "the local fixture has no Jira writer, so Confirm must remain disabled")
         XCTAssertTrue(cancel.isEnabled, "Cancel should remain available in the confirmation state")
         XCTAssertTrue(confirmation.frame.contains(confirm.frame), "Confirm should remain inside its confirmation surface")
         XCTAssertTrue(confirmation.frame.contains(cancel.frame), "Cancel should remain inside its confirmation surface")
+
+        // GPUI's current AccessKit bridge does not expose `aria-disabled`, so XCTest reports the
+        // disabled button as enabled. Verify pointer activation stays inert and preserves state.
+        confirm.click()
+        XCTAssertTrue(confirmation.exists, "Confirm without a writer must not dismiss the prompt")
+        XCTAssertFalse(
+            app.descendants(matching: .any)["issue-watch-feedback"].exists,
+            "Confirm without a writer must not report a write result"
+        )
+        XCTAssertEqual(watch.label.isEmpty ? watch.title : watch.label, "Watch")
 
         cancel.click()
         XCTAssertTrue(
