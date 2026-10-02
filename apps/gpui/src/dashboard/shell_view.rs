@@ -115,7 +115,10 @@ impl SidebarItem for AccessibleSidebarMenuItem {
             .item
             .on_click({
                 let activation = activation.clone();
-                move |event, window, cx| activation(event, window, cx)
+                move |event, window, cx| {
+                    cx.stop_propagation();
+                    activation(event, window, cx);
+                }
             })
             .render(id, window, cx)
             .into_any_element();
@@ -130,6 +133,10 @@ impl SidebarItem for AccessibleSidebarMenuItem {
             .aria_label(accessible_label)
             .aria_selected(selected)
             .tab_index(0)
+            .on_click({
+                let activation = activation.clone();
+                move |event, window, cx| activation(event, window, cx)
+            })
             .on_key_down({
                 let activation = activation.clone();
                 move |event, window, cx| {
