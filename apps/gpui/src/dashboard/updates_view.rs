@@ -547,6 +547,8 @@ impl Dashboard {
                 .min_w_0()
                 .gap_3()
                 .p_2()
+                .border_1()
+                .border_color(cx.theme().transparent)
                 .hover(|style| style.bg(cx.theme().list_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_update_group(clicked_issue_id.clone(), mobile, cx);
@@ -557,7 +559,7 @@ impl Dashboard {
                         this.select_update_group(keyboard_issue_id.clone(), mobile, cx);
                     }
                 }))
-                .focus(|style| style.border_1().border_color(cx.theme().primary))
+                .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
                 .child(
                     div()
                         .id(format!("update-unread-dot-{index}"))
@@ -660,15 +662,12 @@ impl Dashboard {
             .min_w_0()
             .gap_1()
             .py_1()
+            .relative()
             .border_b_1()
             .border_color(cx.theme().border)
             .when(
                 self.selected_update_issue.as_ref() == Some(&group.issue_id),
-                |this| {
-                    this.border_l_2()
-                        .border_color(cx.theme().primary)
-                        .bg(cx.theme().primary.opacity(0.08))
-                },
+                |this| this.bg(cx.theme().primary.opacity(0.08)),
             )
             .child(open_area)
             .child(
@@ -718,6 +717,20 @@ impl Dashboard {
                                 })),
                         )
                     }),
+            )
+            .when(
+                self.selected_update_issue.as_ref() == Some(&group.issue_id),
+                |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(2.))
+                            .bg(cx.theme().primary),
+                    )
+                },
             )
             .into_any_element()
     }

@@ -1519,11 +1519,100 @@ final class JiraDeskUITests: XCTestCase {
 
         let firstCard = try require(app.descendants(matching: .any)["update-card-0"], "update-card-0")
         let openFirst = try require(app.buttons["update-open-0"], "update-open-0")
+        let firstCardFrameBeforeClick = firstCard.frame
         XCTAssertTrue(updateList.frame.contains(firstCard.frame), "first update card should stay inside the update list")
         XCTAssertTrue(firstCard.frame.contains(openFirst.frame), "first update action should stay inside its card")
         assertFiniteBounded(firstCard.frame, name: "update-card-0")
         assertFiniteBounded(openFirst.frame, name: "update-open-0")
+        let secondCard = try require(app.descendants(matching: .any)["update-card-1"], "update-card-1")
+        let openSecond = try require(app.buttons["update-open-1"], "update-open-1")
+        let secondCardFrameBeforeClick = secondCard.frame
+        XCTAssertTrue(updateList.frame.contains(secondCard.frame), "second update card should stay inside the update list")
         openFirst.click()
+
+        let selectedFirstCard = try require(
+            app.descendants(matching: .any)["update-card-0"],
+            "initially selected update-card-0"
+        )
+        let unselectedSecondCard = try require(
+            app.descendants(matching: .any)["update-card-1"],
+            "unselected update-card-1"
+        )
+        let selectedCardScreenshot = hostWindow.screenshot()
+        let railY = selectedFirstCard.frame.midY
+        let railInner = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: selectedFirstCard.frame.minX + 0.5, y: railY),
+            in: hostWindow,
+            name: "selected update rail"
+        )
+        let railOuter = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: selectedFirstCard.frame.minX + 1.5, y: railY),
+            in: hostWindow,
+            name: "selected update rail inner edge"
+        )
+        let afterRail = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: selectedFirstCard.frame.minX + 2.5, y: railY),
+            in: hostWindow,
+            name: "selected update surface beside rail"
+        )
+        XCTAssertLessThan(rgbDistance(railInner, railOuter), 24,
+                          "the selected rail should have consistent color across its 2 px width")
+        XCTAssertGreaterThan(rgbDistance(railOuter, afterRail), 36,
+                             "the selected rail should end after roughly 2 px")
+        let selectedDivider = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: selectedFirstCard.frame.maxX - 8, y: selectedFirstCard.frame.maxY - 0.5),
+            in: hostWindow,
+            name: "selected update bottom divider"
+        )
+        let unselectedDivider = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: unselectedSecondCard.frame.maxX - 8, y: unselectedSecondCard.frame.maxY - 0.5),
+            in: hostWindow,
+            name: "unselected update bottom divider"
+        )
+        XCTAssertLessThan(rgbDistance(selectedDivider, unselectedDivider), 36,
+                          "selected cards should keep the theme divider color at the bottom edge")
+        XCTAssertGreaterThan(rgbDistance(selectedDivider, railInner), 36,
+                             "the selected bottom divider should remain distinct from the primary rail")
+        let mouseOpenAreaEdge = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: openFirst.frame.minX + 12, y: openFirst.frame.minY + 0.5),
+            in: hostWindow,
+            name: "selected update open area top edge after mouse input"
+        )
+        let mouseOpenAreaInterior = try requireScreenshotColor(
+            selectedCardScreenshot,
+            at: CGPoint(x: openFirst.frame.minX + 12, y: openFirst.frame.minY + 2.5),
+            in: hostWindow,
+            name: "selected update open area interior after mouse input"
+        )
+        XCTAssertLessThan(rgbDistance(mouseOpenAreaEdge, mouseOpenAreaInterior), 24,
+                          "mouse selection should not paint a focus outline on the open area")
+        app.typeKey(XCUIKeyboardKey.space.rawValue, modifierFlags: [])
+        let keyboardCardScreenshot = hostWindow.screenshot()
+        let keyboardOpenAreaEdge = try requireScreenshotColor(
+            keyboardCardScreenshot,
+            at: CGPoint(x: openFirst.frame.minX + 12, y: openFirst.frame.minY + 0.5),
+            in: hostWindow,
+            name: "selected update open area top edge after keyboard activation"
+        )
+        let keyboardOpenAreaInterior = try requireScreenshotColor(
+            keyboardCardScreenshot,
+            at: CGPoint(x: openFirst.frame.minX + 12, y: openFirst.frame.minY + 2.5),
+            in: hostWindow,
+            name: "selected update open area interior after keyboard activation"
+        )
+        XCTAssertGreaterThan(rgbDistance(keyboardOpenAreaEdge, keyboardOpenAreaInterior), 36,
+                             "keyboard focus should paint a visible outline on the open area")
+        openFirst.click()
+        XCTAssertEqual(unselectedSecondCard.frame.width, secondCardFrameBeforeClick.width, accuracy: 1.0,
+                       "the unselected card should retain its width before selection")
+        XCTAssertEqual(unselectedSecondCard.frame.height, secondCardFrameBeforeClick.height, accuracy: 1.0,
+                       "the unselected card should retain its height before selection")
 
         XCTAssertTrue(
             waitForSemanticText("DESK-184 local updates", in: firstReadingPane),
@@ -1567,8 +1656,19 @@ final class JiraDeskUITests: XCTestCase {
             priorMaxY = row.frame.maxY
         }
 
-        let openSecond = try require(app.buttons["update-open-1"], "update-open-1")
         openSecond.click()
+        let selectedSecondCard = try require(
+            app.descendants(matching: .any)["update-card-1"],
+            "selected update-card-1"
+        )
+        XCTAssertEqual(selectedSecondCard.frame.width, secondCardFrameBeforeClick.width, accuracy: 1.0,
+                       "selecting an update should not change the card width")
+        XCTAssertEqual(selectedSecondCard.frame.height, secondCardFrameBeforeClick.height, accuracy: 1.0,
+                       "selecting an update should not change the card height")
+        XCTAssertEqual(firstCard.frame.width, firstCardFrameBeforeClick.width, accuracy: 1.0,
+                       "changing selection should not change the first card width")
+        XCTAssertEqual(firstCard.frame.height, firstCardFrameBeforeClick.height, accuracy: 1.0,
+                       "changing selection should not change the first card height")
         let secondReadingPane = try require(
             app.groups["update-reading-pane"],
             "update-reading-pane for DESK-179"
