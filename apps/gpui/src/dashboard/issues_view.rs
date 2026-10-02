@@ -923,16 +923,21 @@ impl Dashboard {
                     )
                     .when_some(self.search_input.clone(), |this, input| {
                         this.child(
-                            Input::new(&input)
-                                .cleanable(true)
-                                .prefix(Icon::new(IconName::Search))
+                            div()
                                 .debug_selector(|| "issue-search".to_owned())
-                                .accessibility_id("issue-search")
-                                .aria_label("Search issue key or summary")
                                 .w(px(if layout.is_rail() { 190. } else { 320. }))
                                 .min_w(px(120.))
                                 .flex_shrink_1()
-                                .bg(control_surface),
+                                .child(
+                                    Input::new(&input)
+                                        .cleanable(true)
+                                        .prefix(Icon::new(IconName::Search))
+                                        .accessibility_id("issue-search")
+                                        .aria_label("Search issue key or summary")
+                                        .w_full()
+                                        .min_w_0()
+                                        .bg(control_surface),
+                                ),
                         )
                     })
                     .when(lookup_enabled || lookup_loading, |this| {
