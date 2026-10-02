@@ -357,6 +357,7 @@ impl Dashboard {
                             .child(
                                 Input::new(&input)
                                     .cleanable(true)
+                                    .prefix(Icon::new(IconName::Search))
                                     .accessibility_id("issue-search")
                                     .aria_label("Issue key or summary")
                                     .min_w_0()
@@ -389,6 +390,7 @@ impl Dashboard {
                             .child(
                                 Input::new(&input)
                                     .cleanable(true)
+                                    .prefix(Icon::new(IconName::Search))
                                     .accessibility_id("issue-search")
                                     .aria_label("Issue key or summary")
                                     .min_w_0()

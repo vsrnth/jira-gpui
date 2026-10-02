@@ -1505,6 +1505,42 @@ final class JiraDeskUITests: XCTestCase {
         )
         assertFiniteBounded(updateList.frame, name: "update-list")
         assertFiniteBounded(firstReadingPane.frame, name: "initial DESK-184 update-reading-pane")
+        let activityHeading = try require(
+            app.descendants(matching: .any)["inbox-heading"],
+            "Activity heading"
+        )
+        XCTAssertTrue(semanticText(activityHeading).contains("Activity"), "inbox should use the Activity heading")
+        let inboxSearch = try require(
+            app.descendants(matching: .any)["inbox-search"],
+            "inbox-search"
+        )
+        let inboxStatus = try require(
+            app.descendants(matching: .any)["inbox-status-trigger"],
+            "inbox-status-trigger"
+        )
+        assertFiniteBounded(inboxSearch.frame, name: "inbox-search")
+        assertFiniteBounded(inboxStatus.frame, name: "inbox-status-trigger")
+        XCTAssertGreaterThan(inboxSearch.frame.width, 220, "inbox search should fit a useful local query")
+        XCTAssertGreaterThan(inboxSearch.frame.height, 20, "inbox search should have a visible control height")
+        XCTAssertGreaterThan(inboxStatus.frame.width, 120, "inbox status filter should have readable width")
+        XCTAssertTrue(hostWindow.frame.contains(inboxSearch.frame), "inbox search should stay inside the host window")
+        XCTAssertTrue(hostWindow.frame.contains(inboxStatus.frame), "inbox status filter should stay inside the host window")
+        XCTAssertFalse(inboxSearch.frame.intersects(inboxStatus.frame), "inbox search and status filter must not overlap")
+        XCTAssertTrue(
+            semanticText(inboxStatus).contains("All statuses"),
+            "inbox should start with all statuses visible"
+        )
+        let allTickets = try require(
+            app.descendants(matching: .any)["updates-filter-all"],
+            "updates-filter-all"
+        )
+        let unreadTickets = try require(
+            app.descendants(matching: .any)["updates-filter-unread"],
+            "updates-filter-unread"
+        )
+        assertFiniteBounded(allTickets.frame, name: "all activity filter")
+        assertFiniteBounded(unreadTickets.frame, name: "unread activity filter")
+        XCTAssertFalse(allTickets.frame.intersects(unreadTickets.frame), "activity scope filters must not overlap")
         XCTAssertTrue(
             semanticText(firstReadingPane).contains("DESK-184 local updates"),
             "the initial reading pane should expose its DESK-184 local update identity"
@@ -1516,6 +1552,59 @@ final class JiraDeskUITests: XCTestCase {
             firstReadingPane.frame.minX + 2,
             "Focus inbox list and initial reading pane should not overlap"
         )
+
+        // Inbox search is local: matching the DESK-184 summary keeps that ticket and hides
+        // other groups without issuing a Jira lookup.
+        try setValue("Surface Jira", identifier: "inbox-search")
+        let matchingGroup = try require(
+            app.descendants(matching: .any)["update-card-0"],
+            "DESK-184 group after local inbox search"
+        )
+        XCTAssertTrue(semanticText(matchingGroup).contains("DESK-184"), "local inbox search should retain the matching group")
+        XCTAssertTrue(
+            waitForAbsence(app.descendants(matching: .any)["update-card-1"]),
+            "local inbox search should hide nonmatching groups"
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["remote-lookup-error"].exists,
+            "local inbox search should not trigger a Jira lookup"
+        )
+        inboxSearch.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
+        XCTAssertEqual(axValue(inboxSearch), "", "clearing the inbox query should restore the full group list")
+        _ = try require(app.descendants(matching: .any)["update-card-1"], "DESK-179 group after clearing inbox search")
+
+        // Status selection also filters the local groups. DESK-184 is In Progress while
+        // DESK-179 is To Do in the deterministic updates fixture.
+        inboxStatus.click()
+        _ = try require(app.menuItems["All statuses"], "inbox All statuses option")
+        _ = try require(app.menuItems["To do"], "inbox To do option")
+        let inProgressOption = try require(app.menuItems["In progress"], "inbox In Progress option")
+        // Hover may preselect a row when the popup opens. Follow semantic aria-selected state
+        // until the intended option is highlighted, then commit it from the keyboard.
+        for _ in 0..<5 where !inProgressOption.isSelected {
+            app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        }
+        XCTAssertTrue(inProgressOption.isSelected, "keyboard traversal should select In progress")
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+        XCTAssertTrue(
+            semanticText(inboxStatus).contains("In progress"),
+            "inbox status filter should expose its selected status"
+        )
+        _ = try require(app.descendants(matching: .any)["update-card-0"], "DESK-184 group under In Progress filter")
+        XCTAssertTrue(
+            waitForAbsence(app.descendants(matching: .any)["update-card-1"]),
+            "In Progress should hide the To Do DESK-179 group"
+        )
+        inboxStatus.click()
+        let allStatusesOption = try require(app.menuItems["All statuses"], "inbox All statuses option")
+        for _ in 0..<5 where !allStatusesOption.isSelected {
+            app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        }
+        XCTAssertTrue(allStatusesOption.isSelected, "keyboard traversal should select All statuses")
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+        XCTAssertTrue(semanticText(inboxStatus).contains("All statuses"), "deselecting In Progress should restore all statuses")
 
         let firstCard = try require(app.descendants(matching: .any)["update-card-0"], "update-card-0")
         let openFirst = try require(app.buttons["update-open-0"], "update-open-0")
@@ -1631,11 +1720,56 @@ final class JiraDeskUITests: XCTestCase {
             firstReadingPane.frame.minX + 2,
             "Focus inbox list and reading pane should not overlap"
         )
-        let dot = try require(app.descendants(matching: .any)["update-unread-dot-0"], "update-unread-dot-0")
         let metadata = try require(app.descendants(matching: .any)["update-metadata-0"], "update-metadata-0")
-        let dotCenter = CGPoint(x: dot.frame.midX, y: dot.frame.midY)
-        let metadataCenter = CGPoint(x: metadata.frame.midX, y: metadata.frame.midY)
-        XCTAssertLessThanOrEqual(abs(dotCenter.y - metadataCenter.y), 3.0, "unread dot should align with first metadata line")
+        assertFiniteBounded(metadata.frame, name: "first compact activity row")
+        let groupCount = try require(
+            app.descendants(matching: .any)["update-group-count-0"],
+            "update-group-count-0"
+        )
+        XCTAssertTrue(semanticText(groupCount).contains("1"), "DESK-184 should expose its grouped activity event count")
+        let expandGroup = try require(
+            app.buttons["update-group-expand-0"],
+            "update-group-expand-0"
+        )
+        XCTAssertTrue(firstCard.frame.contains(groupCount.frame), "group count should stay inside the compact ticket header")
+        XCTAssertTrue(firstCard.frame.contains(expandGroup.frame), "group expansion control should stay inside the compact ticket header")
+        let collapsedHeight = firstCard.frame.height
+        expandGroup.click()
+        let firstEvent = try require(
+            app.descendants(matching: .any)["update-row-0-0"],
+            "first DESK-184 activity row after expansion"
+        )
+        XCTAssertTrue(semanticText(firstEvent).contains("Status:"), "expanded row should expose the fixture status change")
+        let expandedCard = try require(app.descendants(matching: .any)["update-card-0"], "expanded DESK-184 group")
+        XCTAssertGreaterThan(expandedCard.frame.height, collapsedHeight + 8, "expansion should reveal a visibly taller activity group")
+        let collapseGroup = try require(app.buttons["update-group-expand-0"], "collapse DESK-184 activity group")
+        collapseGroup.click()
+        XCTAssertTrue(
+            waitForAbsence(app.descendants(matching: .any)["update-row-0-0"]),
+            "collapsing a ticket should hide its event detail row"
+        )
+        XCTAssertTrue(firstCard.exists, "expanding a ticket should keep its grouped inbox header visible")
+
+        let readingDescription = try require(
+            app.descendants(matching: .any)["update-reading-description"],
+            "DESK-184 reading pane description"
+        )
+        assertFiniteBounded(readingDescription.frame, name: "DESK-184 reading pane Description section")
+        XCTAssertTrue(
+            semanticText(readingDescription).contains("Poll Jira incrementally"),
+            "reading pane Description section should expose cached issue description text"
+        )
+        let linkedIssues = try require(
+            app.descendants(matching: .any)["update-reading-linked-issues"],
+            "DESK-184 reading pane linked issues"
+        )
+        assertFiniteBounded(linkedIssues.frame, name: "DESK-184 reading pane linked issues")
+        XCTAssertTrue(semanticText(linkedIssues).contains("Linked issues"), "reading pane should expose its linked issues section")
+        let linkedIssueKey = try require(
+            app.buttons["inbox-linked-key-0"],
+            "first DESK-184 linked issue key"
+        )
+        XCTAssertEqual(linkedIssueKey.label.isEmpty ? linkedIssueKey.title : linkedIssueKey.label, "DESK-179")
 
         // Virtualized feeds must expose stable semantic identities for the rows currently in the
         // viewport and keep every realized row inside the scrolling surface. This assertion is

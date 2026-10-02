@@ -53,11 +53,10 @@ use crate::{
     presentation::{
         CompactedUpdateRow, FeedbackSeverity, IssueDetailViewModel, IssueStatusFilter,
         IssueStatusSelection, IssueViewModel, OutcomeCopy, ReadSurface, RecoveryDirective,
-        SavedLoginOutcomeKind, UPDATE_PREVIEW_LIMIT, UpdateFilter, UpdateGroupViewModel,
-        comment_outcome_copy, compact_update_rows, filtered_update_group_indices,
-        generic_summary_label, hidden_update_row_count, issue_views_for_filter_with_offset,
-        lookup_workspace_unavailable_copy, read_error_copy, saved_login_outcome_copy,
-        scope_outcome_copy, team_outcome_copy, update_group_event_ids,
+        SavedLoginOutcomeKind, UpdateFilter, UpdateGroupViewModel, comment_outcome_copy,
+        compact_update_rows, filtered_update_group_indices, generic_summary_label,
+        issue_views_for_filter_with_offset, lookup_workspace_unavailable_copy, read_error_copy,
+        saved_login_outcome_copy, scope_outcome_copy, team_outcome_copy, update_group_event_ids,
         update_groups_for_events_with_offset, visible_update_row_count,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
@@ -83,6 +82,8 @@ mod team_view;
 mod updates_view;
 mod virtual_rows;
 
+#[cfg(test)]
+use crate::presentation::hidden_update_row_count;
 #[cfg(test)]
 use crate::presentation::issue_views_for_filter;
 #[cfg(test)]
@@ -756,6 +757,10 @@ pub struct Dashboard {
     updates_scroll_handle: VirtualListScrollHandle,
     updates_row_measurements: virtual_rows::RowMeasureCache,
     update_filter: UpdateFilter,
+    inbox_query: String,
+    inbox_search_input: Option<Entity<InputState>>,
+    inbox_search_subscriptions: Vec<Subscription>,
+    inbox_status_filter: IssueStatusFilter,
     expanded_update_groups: HashSet<IssueId>,
     selected_update_issue: Option<IssueId>,
     mobile_update_detail_open: bool,
@@ -1445,6 +1450,10 @@ impl Dashboard {
             updates_scroll_handle: VirtualListScrollHandle::new(),
             updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
+            inbox_query: String::new(),
+            inbox_search_input: None,
+            inbox_search_subscriptions: Vec::new(),
+            inbox_status_filter: IssueStatusFilter::All,
             expanded_update_groups: HashSet::new(),
             selected_update_issue,
             mobile_update_detail_open: false,
@@ -1564,6 +1573,10 @@ impl Dashboard {
             updates_scroll_handle: VirtualListScrollHandle::new(),
             updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
+            inbox_query: String::new(),
+            inbox_search_input: None,
+            inbox_search_subscriptions: Vec::new(),
+            inbox_status_filter: IssueStatusFilter::All,
             expanded_update_groups: HashSet::new(),
             selected_update_issue: None,
             mobile_update_detail_open: false,
@@ -2536,7 +2549,7 @@ impl Dashboard {
 
     fn clear_hidden_update_selection(&mut self) {
         if self.selected_update_issue.as_ref().is_some_and(|selected| {
-            !filtered_update_group_indices(&self.update_groups, self.update_filter)
+            !updates_view::visible_inbox_groups(self)
                 .iter()
                 .any(|index| self.update_groups[*index].issue_id == *selected)
         }) {
@@ -3756,6 +3769,27 @@ impl Dashboard {
                 }
             }));
         self.search_input = Some(input);
+    }
+
+    fn ensure_inbox_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inbox_search_input.is_some() {
+            return;
+        }
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search issues, keys, or text…"));
+        self.inbox_search_subscriptions
+            .push(cx.subscribe_in(&input, window, {
+                let input = input.clone();
+                move |this, _, event: &InputEvent, _window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.inbox_query = input.read(cx).value().to_string();
+                        this.clear_hidden_update_selection();
+                        this.reset_update_list_scroll();
+                        cx.notify();
+                    }
+                }
+            }));
+        self.inbox_search_input = Some(input);
     }
 
     fn ensure_comment_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {

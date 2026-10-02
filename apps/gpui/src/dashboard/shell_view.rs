@@ -185,7 +185,7 @@ impl Dashboard {
                 cx,
             ))
             .child(self.sidebar_menu_item(
-                "Local updates",
+                "Inbox",
                 self.unread_count(),
                 self.section == Section::Updates,
                 Section::Updates,
@@ -502,7 +502,7 @@ impl Dashboard {
         };
         let accessible_label = match section {
             Section::Issues => format!("Issues · {count} issues"),
-            Section::Updates => format!("Local updates · {count} unread"),
+            Section::Updates => format!("Inbox · {count} unread"),
             Section::Team => format!("Team tracker · {count} in-progress tickets"),
             Section::Settings => "Settings".to_owned(),
         };
@@ -703,8 +703,8 @@ impl Dashboard {
             .child(self.mobile_nav_item(
                 MobileNavItem {
                     id: "mobile-updates",
-                    label: "Updates",
-                    accessible_label: format!("Updates · {} unread", self.unread_count()),
+                    label: "Inbox",
+                    accessible_label: format!("Inbox · {} unread", self.unread_count()),
                     selected: updates_active,
                     section: Section::Updates,
                     width: nav_item_width,
@@ -801,6 +801,7 @@ impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_status_combobox(window, cx);
         self.ensure_search_input(window, cx);
+        self.ensure_inbox_search_input(window, cx);
         self.ensure_comment_input(window, cx);
         if matches!(
             self.issue_edit_flow.state(),
@@ -958,6 +959,16 @@ mod tests {
                 expected_section,
                 "clicking {id} should activate its section"
             );
+            if expected_section == Section::Issues {
+                assert!(
+                    visual.debug_bounds("issues-workspace-summary").is_some(),
+                    "activating {id} should render the Issues workspace"
+                );
+                assert!(
+                    visual.debug_bounds("update-list").is_none(),
+                    "activating {id} should leave the Inbox list"
+                );
+            }
         }
     }
 

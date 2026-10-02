@@ -34,10 +34,12 @@ pub(crate) use outcomes::FeedbackCertainty;
 pub(crate) use updates::UpdateViewModel;
 
 pub(crate) use updates::{
-    CompactedUpdateRow, UPDATE_PREVIEW_LIMIT, UpdateFilter, compact_update_rows,
-    filtered_update_group_indices, generic_summary_label, hidden_update_row_count,
-    update_group_event_ids, visible_update_row_count,
+    CompactedUpdateRow, UpdateFilter, compact_update_rows, filtered_update_group_indices,
+    generic_summary_label, update_group_event_ids, visible_update_row_count,
 };
+
+#[cfg(test)]
+pub(crate) use updates::hidden_update_row_count;
 
 #[allow(unused_imports)]
 pub(crate) use format::{format_timestamp, format_timestamp_for};

@@ -2503,14 +2503,22 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
     let priority_surface = visual
         .debug_bounds("issue-detail-priority-surface")
         .expect("priority metadata surface should be laid out");
+    let breadcrumb = visual
+        .debug_bounds("issue-detail-breadcrumbs")
+        .expect("key and status breadcrumb should be laid out");
+    let key = visual
+        .debug_bounds("issue-detail-key")
+        .expect("selected issue key should be laid out");
+    let summary = visual
+        .debug_bounds("issue-detail-summary")
+        .expect("issue summary should be laid out");
+    let updated = visual
+        .debug_bounds("issue-detail-updated-header")
+        .expect("updated timestamp metadata should be laid out");
     let metadata_row = visual
         .debug_bounds("issue-detail-metadata-row")
         .expect("metadata row should be laid out");
-    for (name, bounds) in [
-        ("type", type_surface),
-        ("status", status_trigger),
-        ("priority", priority_surface),
-    ] {
+    for (name, bounds) in [("type", type_surface), ("priority", priority_surface)] {
         assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
         assert!(
             bounds.origin.y >= metadata_row.origin.y
@@ -2520,10 +2528,31 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
         );
     }
     assert!(
-        (f32::from(type_surface.size.height) - f32::from(status_trigger.size.height)).abs() <= 1.
+        status_trigger.origin.x >= breadcrumb.origin.x
+            && status_trigger.origin.y >= breadcrumb.origin.y
+            && status_trigger.origin.x + status_trigger.size.width
+                <= breadcrumb.origin.x + breadcrumb.size.width + px(1.)
+            && status_trigger.origin.y + status_trigger.size.height
+                <= breadcrumb.origin.y + breadcrumb.size.height + px(1.),
+        "status control escapes key/status breadcrumb: breadcrumb={breadcrumb:?}, status={status_trigger:?}"
     );
     assert!(
         (f32::from(type_surface.size.height) - f32::from(priority_surface.size.height)).abs() <= 1.
+    );
+    assert!(
+        key.origin.y >= breadcrumb.origin.y
+            && key.origin.y + key.size.height
+                <= breadcrumb.origin.y + breadcrumb.size.height + px(1.)
+    );
+    assert!(
+        summary.size.height > type_surface.size.height,
+        "summary should dominate compact metadata: summary={summary:?}, metadata={type_surface:?}"
+    );
+    assert!(
+        updated.origin.y >= metadata_row.origin.y
+            && updated.origin.y + updated.size.height
+                <= metadata_row.origin.y + metadata_row.size.height + px(1.),
+        "updated timestamp escapes metadata row: row={metadata_row:?}, updated={updated:?}"
     );
 
     assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
@@ -2936,7 +2965,6 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui_kit::T
         "updates-description",
         "update-list",
         "update-card-0",
-        "update-row-0-0",
         "update-actions-0",
     ] {
         let bounds = visual
@@ -2961,12 +2989,68 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui_kit::T
     let description = visual
         .debug_bounds("updates-description")
         .expect("updates description should be laid out");
+    let card = visual
+        .debug_bounds("update-card-0")
+        .expect("collapsed update card should be laid out");
+    let actions = visual
+        .debug_bounds("update-actions-0")
+        .expect("collapsed update actions should be laid out");
+    let expand = visual
+        .debug_bounds("update-group-expand-0")
+        .expect("collapsed activity group should expose its expand control");
+    assert!(
+        visual.debug_bounds("update-row-0-0").is_none(),
+        "event rows should be collapsed until the group is expanded"
+    );
     assert!(filters.origin.y > header.origin.y);
     assert!(description.origin.y > filters.origin.y);
     assert!(
         description.origin.y + description.size.height
             <= header.origin.y + header.size.height + px(1.),
         "updates description collides with or escapes its header: header={header:?}, description={description:?}"
+    );
+
+    assert!(
+        expand.origin.x >= actions.origin.x
+            && expand.origin.y >= actions.origin.y
+            && expand.origin.x + expand.size.width
+                <= actions.origin.x + actions.size.width + px(1.)
+            && expand.origin.y + expand.size.height
+                <= actions.origin.y + actions.size.height + px(1.),
+        "expand control escapes its action row: actions={actions:?}, expand={expand:?}"
+    );
+    // Expand through the visible control so the event geometry below covers
+    // the actual mobile interaction path after actions move beneath the summary.
+    visual.simulate_click(
+        gpui_kit::point(
+            expand.origin.x + expand.size.width / 2.,
+            expand.origin.y + expand.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let event = visual
+        .debug_bounds("update-row-0-0")
+        .expect("expanded activity event should be laid out");
+    let expanded_card = visual
+        .debug_bounds("update-card-0")
+        .expect("expanded update card should be laid out");
+    assert!(
+        event.size.width > px(0.)
+            && event.size.height > px(0.)
+            && event.origin.x >= expanded_card.origin.x
+            && event.origin.y >= expanded_card.origin.y
+            && event.origin.x + event.size.width
+                <= expanded_card.origin.x + expanded_card.size.width + px(1.)
+            && event.origin.y + event.size.height
+                <= expanded_card.origin.y + expanded_card.size.height + px(1.),
+        "expanded mobile activity event escapes its card: card={expanded_card:?}, event={event:?}"
+    );
+    assert!(
+        actions.origin.x >= card.origin.x,
+        "group actions should remain within the collapsed card: card={card:?}, actions={actions:?}"
     );
 }
 
@@ -2976,7 +3060,7 @@ fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui_kit::Tes
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Updates;
-    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1370.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2990,18 +3074,43 @@ fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui_kit::Tes
     let filters = visual
         .debug_bounds("updates-filters")
         .expect("updates filters should be laid out");
-    let description = visual
-        .debug_bounds("updates-description")
-        .expect("updates description should be laid out");
+    assert!(
+        visual.debug_bounds("updates-description").is_none(),
+        "the ticket and unread summary is reserved for the mobile header"
+    );
 
-    assert!(heading.origin.y >= header.origin.y);
-    assert!(filters.origin.y > heading.origin.y);
-    assert!(description.origin.y > filters.origin.y);
-    for (name, bounds) in [
-        ("heading", heading),
-        ("filters", filters),
-        ("description", description),
+    let heading_center = heading.origin.y + heading.size.height / 2.;
+    let filters_center = filters.origin.y + filters.size.height / 2.;
+    assert!(
+        (f32::from(heading_center) - f32::from(filters_center)).abs() <= 1.,
+        "desktop heading and toolbar should align vertically: heading={heading:?}, filters={filters:?}"
+    );
+    for selector in [
+        "inbox-search",
+        "inbox-status-filter",
+        "inbox-refresh",
+        "mark-all-read",
     ] {
+        let bounds = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("desktop toolbar control should be laid out: {selector}"));
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(
+            bounds.origin.x >= filters.origin.x
+                && bounds.origin.x + bounds.size.width
+                    <= filters.origin.x + filters.size.width + px(1.)
+                && bounds.origin.y >= filters.origin.y
+                && bounds.origin.y + bounds.size.height
+                    <= filters.origin.y + filters.size.height + px(1.),
+            "toolbar control escapes filters row: row={filters:?}, selector={selector}, bounds={bounds:?}"
+        );
+        let control_center = bounds.origin.y + bounds.size.height / 2.;
+        assert!(
+            (f32::from(control_center) - f32::from(filters_center)).abs() <= 2.,
+            "desktop toolbar control should remain on the single row: row={filters:?}, selector={selector}, bounds={bounds:?}"
+        );
+    }
+    for (name, bounds) in [("heading", heading), ("filters", filters)] {
         assert!(
             bounds.origin.x >= header.origin.x
                 && bounds.origin.x + bounds.size.width

@@ -312,7 +312,7 @@ impl Dashboard {
         let summary = issue.summary.clone();
         let issue_type = issue.issue_type.clone();
         let type_semantics = issue_type_semantics(&issue_type);
-        let status = issue.status.clone();
+        let header_status = issue.status.clone();
         let priority = issue.priority.clone();
         let description = match &detail_state {
             DetailState::Loaded(detail) | DetailState::Refreshing { detail, .. } => {
@@ -393,6 +393,7 @@ impl Dashboard {
                 .unwrap_or_else(|| div().text_sm().child(description).into_any_element())
         };
         let assignee = issue.assignee.clone();
+        let header_assignee = assignee.clone();
         let reporter = issue.reporter.clone();
         let status_category = issue.status_category.clone();
         let parent = issue
@@ -407,8 +408,9 @@ impl Dashboard {
             .unwrap_or_else(|| "None".to_owned());
         let parent_breadcrumb = issue.parent.clone();
         let linked_issues = issue.linked_issues.clone();
-        let created = issue.created.clone();
         let updated = issue.updated.clone();
+        let header_updated = updated.clone();
+        let created = issue.created.clone();
         let due_date = issue.due_date.clone();
         let labels = issue.labels.clone();
         let details_open = self.issue_details_open;
@@ -432,6 +434,7 @@ impl Dashboard {
                     .child(
                         h_flex()
                             .id("issue-detail-breadcrumbs")
+                            .debug_selector(|| "issue-detail-breadcrumbs".to_owned())
                             .accessibility_id("issue-detail-breadcrumbs")
                             .role(gpui_kit::accesskit::Role::List)
                             .min_w_0()
@@ -463,16 +466,19 @@ impl Dashboard {
                                 h_flex().min_w_0().child(
                                     div()
                                         .id(detail_key_accessibility_id.clone())
+                                        .debug_selector(|| "issue-detail-key".to_owned())
                                         .accessibility_id(detail_key_accessibility_id)
                                         .role(gpui_kit::accesskit::Role::TextRun)
                                         .aria_label(detail_key_label)
                                         .min_w_0()
                                         .child(div().min_w_0().truncate().child(key)),
                                 ),
-                            ),
+                            )
+                            .child(self.status_control(Some(&issue), header_status, cx)),
                     )
                     .child(
                         div()
+                            .debug_selector(|| "issue-detail-summary".to_owned())
                             .min_w_0()
                             .line_clamp(if layout.is_mobile() { 3 } else { 4 })
                             .text_2xl()
@@ -484,7 +490,10 @@ impl Dashboard {
                             .debug_selector(|| "issue-detail-metadata-row".to_owned())
                             .flex_wrap()
                             .min_w_0()
+                            .items_center()
                             .gap_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
                             .child(
                                 h_flex()
                                     .debug_selector(|| "issue-detail-type-surface".to_owned())
@@ -511,7 +520,6 @@ impl Dashboard {
                                     )
                                     .child(issue_type),
                             )
-                            .child(self.status_control(Some(&issue), status, cx))
                             .child(
                                 h_flex()
                                     .debug_selector(|| "issue-detail-priority-surface".to_owned())
@@ -525,7 +533,47 @@ impl Dashboard {
                                         cx,
                                     )),
                             )
-                            .child(self.render_idle_assignee_trigger(Some(&issue), cx)),
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id("issue-detail-assignee-avatar")
+                                            .accessibility_id("issue-detail-assignee-avatar")
+                                            .size_5()
+                                            .rounded_full()
+                                            .bg(cx.theme().secondary)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_xs()
+                                            .font_semibold()
+                                            .role(gpui_kit::accesskit::Role::Image)
+                                            .aria_label(format!("Assignee: {header_assignee}"))
+                                            .child(
+                                                header_assignee
+                                                    .split_whitespace()
+                                                    .filter_map(|part| part.chars().next())
+                                                    .take(2)
+                                                    .collect::<String>(),
+                                            ),
+                                    )
+                                    .child(div().min_w_0().truncate().child(header_assignee))
+                                    .child(self.render_idle_assignee_trigger(Some(&issue), cx)),
+                            )
+                            .child(
+                                div()
+                                    .id("issue-detail-updated-header")
+                                    .debug_selector(|| "issue-detail-updated-header".to_owned())
+                                    .accessibility_id("issue-detail-updated-header")
+                                    .role(gpui_kit::accesskit::Role::TextRun)
+                                    .aria_label(format!("Updated {header_updated}"))
+                                    .min_w_0()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(header_updated),
+                            ),
                     )
                     .when(
                         matches!(&self.remote_lookup, RemoteLookupState::Loaded { .. }),
@@ -600,21 +648,23 @@ impl Dashboard {
                                 .aria_label(accessible_label.clone())
                                 .w_full()
                                 .min_w_0()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .whitespace_normal()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(relationship.clone()),
-                                )
+                                .gap_1()
                                 .child(
                                     h_flex()
+                                        .flex_wrap()
                                         .w_full()
                                         .min_w_0()
-                                        .items_start()
-                                        .gap_2()
+                                        .items_center()
+                                        .gap_1()
+                                        .when(layout.is_mobile(), |this| this.items_start())
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .whitespace_normal()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(relationship.clone()),
+                                        )
                                         .child(
                                             Button::new(("issue-detail-linked", index))
                                                 .compact()
@@ -629,7 +679,7 @@ impl Dashboard {
                                         .child(
                                             div()
                                                 .min_w_0()
-                                                .flex_1()
+                                                .when(!layout.is_mobile(), |this| this.flex_1())
                                                 .whitespace_normal()
                                                 .text_sm()
                                                 .child(summary),
