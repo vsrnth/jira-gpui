@@ -243,6 +243,56 @@ final class JiraDeskUITests: XCTestCase {
         return element.value.map { String(describing: $0) } ?? ""
     }
 
+    func testIssueOverviewDetails() throws {
+        try launchFixture(scenario: "issues")
+
+        let hostWindow = try require(app.windows.firstMatch, "fixture host window")
+        let toolbar = try require(app.descendants(matching: .any)["issues-toolbar"], "issues-toolbar")
+        let table = try require(app.descendants(matching: .any)["issues-table"], "issues-table")
+        XCTAssertTrue(hostWindow.frame.contains(toolbar.frame), "Issues toolbar should span the table and detail workspace")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-detail"].exists, "overview should start without an open detail pane")
+        let overviewWidth = table.frame.width
+
+        let firstRow = try require(app.descendants(matching: .any)["issue-row-DESK-179"], "issue-row-DESK-179")
+        firstRow.click()
+        let detail = try require(app.descendants(matching: .any)["issue-detail"], "issue-detail after selecting DESK-179")
+        let splitTable = try require(app.descendants(matching: .any)["issues-table"], "issues-table beside selected detail")
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-179", in: detail), "selecting DESK-179 should open its detail")
+        XCTAssertTrue(hostWindow.frame.contains(splitTable.frame), "table pane should remain inside the fixture window")
+        XCTAssertGreaterThanOrEqual(splitTable.frame.width, 280, "table pane should retain a usable viewport")
+        XCTAssertFalse(splitTable.frame.intersects(detail.frame), "table and detail panes should remain separate")
+        XCTAssertLessThan(splitTable.frame.width, overviewWidth * 0.7, "detail should use a distinct pane beside the table")
+        XCTAssertTrue(firstRow.isSelected, "selected issue row should expose selected semantics")
+        XCTAssertLessThan(firstRow.frame.height, 45, "selected table row should remain compact")
+
+        let secondRow = try require(app.descendants(matching: .any)["issue-row-DESK-171"], "issue-row-DESK-171 beside detail")
+        secondRow.click()
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-171", in: detail), "selecting another row should update the existing detail pane")
+        XCTAssertTrue(secondRow.isSelected, "the new issue row should expose selected semantics")
+
+        let updatedHeader = try require(app.descendants(matching: .any)["issues-column-updated"], "Updated column header")
+        let updatedCell = try require(app.descendants(matching: .any)["issue-cell-updated-DESK-171"], "DESK-171 Updated cell")
+        splitTable.scroll(byDeltaX: 600, deltaY: 0)
+        XCTAssertTrue(splitTable.frame.contains(updatedHeader.frame), "horizontal scroll should reveal the Updated header in the table viewport")
+        XCTAssertTrue(splitTable.frame.contains(updatedCell.frame), "the matching Updated cell should scroll with its header")
+        XCTAssertLessThanOrEqual(abs(updatedHeader.frame.minX - updatedCell.frame.minX), 12, "Updated cell should remain aligned with its header")
+        splitTable.scroll(byDeltaX: -600, deltaY: 0)
+
+        try setValue("MVP", identifier: "issue-search")
+        let count = try require(app.descendants(matching: .any)["issue-list-summary"], "issue-list-summary after local filter")
+        XCTAssertTrue(waitForSemanticText("1 of 5 Jira issues", in: count), "local summary filter should retain the total count while details stay open")
+        XCTAssertTrue(waitForSemanticText("Issue detail for DESK-171", in: detail), "filtering the table should preserve the selected detail")
+        let clear = try require(app.buttons["issue-filters-clear"], "issue-filters-clear while details are open")
+        clear.click()
+        XCTAssertTrue(waitForSemanticText("5 Jira issues", in: count), "clearing the filter should restore all fixture rows")
+
+        let back = try require(app.buttons["issue-detail-back"], "issue-detail-back")
+        back.click()
+        let restoredTable = try require(app.descendants(matching: .any)["issues-table"], "issues-table after closing details")
+        XCTAssertFalse(app.descendants(matching: .any)["issue-detail"].exists, "Back to issues should close the detail pane")
+        XCTAssertGreaterThan(restoredTable.frame.width, overviewWidth * 0.85, "closing details should restore the full-width table")
+    }
+
     func testIssues() throws {
         try launchFixture(scenario: "issues")
 

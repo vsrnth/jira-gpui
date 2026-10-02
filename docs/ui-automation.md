@@ -301,6 +301,10 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   the full-width table. Detail checks retain the normalized `sample` workspace
   identity, the stable `issue-detail-details-trigger`, and bounded
   collapse/reopen geometry.
+- `issues-overview` isolates the table/detail interaction: selecting rows
+  keeps the table beside the selected issue, horizontal scrolling moves the
+  Updated header and cell together, local filtering preserves the selected
+  detail, and Back restores the full-width table.
 - `issues` also verifies the local search contract: summary text remains a
   local filter when activated with Enter (without a Jira lookup error), and
   only a syntactically valid issue key reveals the contextual `Find key`
