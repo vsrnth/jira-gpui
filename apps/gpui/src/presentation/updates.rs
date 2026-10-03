@@ -227,6 +227,7 @@ pub(crate) fn visible_update_row_count(row_count: usize, expanded: bool) -> usiz
     }
 }
 
+#[cfg(test)]
 pub(crate) fn hidden_update_row_count(row_count: usize, expanded: bool) -> usize {
     row_count.saturating_sub(visible_update_row_count(row_count, expanded))
 }

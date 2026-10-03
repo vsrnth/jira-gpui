@@ -110,11 +110,21 @@ impl SidebarItem for AccessibleSidebarMenuItem {
         window: &mut Window,
         cx: &mut gpui_kit::App,
     ) -> impl IntoElement {
-        let item = self.item.render(id, window, cx).into_any_element();
+        let activation = self.activation;
+        let item = self
+            .item
+            .on_click({
+                let activation = activation.clone();
+                move |event, window, cx| {
+                    cx.stop_propagation();
+                    activation(event, window, cx);
+                }
+            })
+            .render(id, window, cx)
+            .into_any_element();
         let accessibility_id = self.accessibility_id;
         let accessible_label = self.accessible_label;
         let selected = self.selected;
-        let activation = self.activation;
         div()
             .id(accessibility_id)
             .debug_selector(move || accessibility_id.to_owned())
@@ -123,6 +133,10 @@ impl SidebarItem for AccessibleSidebarMenuItem {
             .aria_label(accessible_label)
             .aria_selected(selected)
             .tab_index(0)
+            .on_click({
+                let activation = activation.clone();
+                move |event, window, cx| activation(event, window, cx)
+            })
             .on_key_down({
                 let activation = activation.clone();
                 move |event, window, cx| {
@@ -132,7 +146,6 @@ impl SidebarItem for AccessibleSidebarMenuItem {
                     }
                 }
             })
-            .on_click(move |event, window, cx| activation(event, window, cx))
             .child(item)
     }
 }
@@ -156,6 +169,10 @@ pub(super) fn refresh_action_label(operation_in_progress: bool) -> &'static str 
 
 pub(super) fn should_render_sidebar_sync_message(message: &str) -> bool {
     message != "Preview data · Jira connection not configured"
+}
+
+fn should_render_mobile_sync_status(has_workspace: bool, message: &str) -> bool {
+    has_workspace || should_render_sidebar_sync_message(message)
 }
 
 impl Dashboard {
@@ -397,6 +414,10 @@ impl Dashboard {
                 Sidebar::new("dashboard-sidebar-component")
                     .collapsible(SidebarCollapsible::Icon)
                     .collapsed(collapsed)
+                    .when(
+                        cx.theme().is_dark() && self.section == Section::Issues,
+                        |this| this.bg(gpui_kit::rgb(0x0d1316)),
+                    )
                     .w(gpui_kit::rems(15.))
                     .header(header)
                     .child(menu)
@@ -500,8 +521,21 @@ impl Dashboard {
             SidebarMenuItem::new(label)
                 .icon(icon)
                 .active(selected)
-                .when(count > 0, |this| {
-                    this.suffix(move |_, _| div().text_xs().child(count.to_string()))
+                .when(section == Section::Updates && count > 0, |this| {
+                    this.suffix(move |_, cx| {
+                        div()
+                            .min_w_6()
+                            .h_6()
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(cx.theme().sidebar_accent)
+                            .text_color(cx.theme().sidebar_accent_foreground)
+                            .text_xs()
+                            .child(count.to_string())
+                    })
                 }),
             accessibility_id,
             accessible_label,
@@ -513,13 +547,18 @@ impl Dashboard {
     }
 
     fn activate_section(&mut self, section: Section, cx: &mut Context<Self>) -> bool {
+        if self.watch_flow.is_submitting() && section != self.section {
+            self.sync_message = "Finish the confirmed Jira change before changing views".to_owned();
+            cx.notify();
+            return false;
+        }
         if section == Section::Team
             && self
                 .selected_issue
                 .as_ref()
                 .is_some_and(|selected| !self.team_issues.iter().any(|issue| &issue.id == selected))
         {
-            if self.issue_edit_flow.is_submitting() {
+            if self.issue_edit_flow.is_submitting() || self.watch_flow.is_submitting() {
                 self.sync_message =
                     "Finish the confirmed Jira change before changing views".to_owned();
                 cx.notify();
@@ -694,7 +733,7 @@ impl Dashboard {
                 MobileNavItem {
                     id: "mobile-updates",
                     label: "Updates",
-                    accessible_label: format!("Updates · {} unread", self.unread_count()),
+                    accessible_label: format!("Local updates · {} unread", self.unread_count()),
                     selected: updates_active,
                     section: Section::Updates,
                     width: nav_item_width,
@@ -748,7 +787,7 @@ impl Dashboard {
             .flex_1()
             .min_w_0()
             .w(px(width))
-            .h_9()
+            .h_11()
             .px_1()
             .rounded(cx.theme().radius)
             .when(selected, |this| {
@@ -791,6 +830,7 @@ impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_status_combobox(window, cx);
         self.ensure_search_input(window, cx);
+        self.ensure_inbox_search_input(window, cx);
         self.ensure_comment_input(window, cx);
         if matches!(
             self.issue_edit_flow.state(),
@@ -843,7 +883,10 @@ impl Render for Dashboard {
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 .child(self.render_mobile_nav(viewport_width, cx))
-                .child(self.render_mobile_status(cx))
+                .when(
+                    should_render_mobile_sync_status(self.workspace.is_some(), &self.sync_message),
+                    |this| this.child(self.render_mobile_status(cx)),
+                )
                 .child(main)
         } else {
             h_flex()
@@ -854,5 +897,123 @@ impl Render for Dashboard {
                 .child(self.render_sidebar(layout, viewport_width, cx))
                 .child(main)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dashboard, Section, should_render_mobile_sync_status};
+    use gpui_kit::{VisualTestContext, px};
+
+    #[gpui_kit::test]
+    fn mobile_fixture_has_large_navigation_targets_and_hides_default_preview_status(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let dashboard = Dashboard::from_sample_data();
+        let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let navigation = visual
+            .debug_bounds("mobile-navigation")
+            .expect("mobile navigation should be laid out");
+        for id in [
+            "mobile-issues",
+            "mobile-updates",
+            "mobile-team",
+            "mobile-settings",
+        ] {
+            let bounds = visual
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} should be laid out"));
+            assert!(
+                bounds.size.height >= px(44.),
+                "{id} has a touch target shorter than 44 logical pixels: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.y >= navigation.origin.y
+                    && bounds.origin.y + bounds.size.height
+                        <= navigation.origin.y + navigation.size.height,
+                "{id} escapes the mobile navigation bounds: item={bounds:?}, nav={navigation:?}"
+            );
+        }
+
+        assert!(
+            visual.debug_bounds("mobile-sync-status").is_none(),
+            "the default preview status strip should be absent"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn desktop_sidebar_navigation_dispatches_inner_item_clicks(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+        let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| {
+            Dashboard::from_sample_data()
+        });
+        let dashboard = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        for (id, expected_section) in [
+            ("nav-updates", Section::Updates),
+            ("nav-issues", Section::Issues),
+        ] {
+            let bounds = visual
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} should be laid out"));
+            assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+            assert!(
+                bounds.origin.x >= px(0.)
+                    && bounds.origin.y >= px(0.)
+                    && bounds.origin.x + bounds.size.width <= px(960.) + px(1.)
+                    && bounds.origin.y + bounds.size.height <= px(700.) + px(1.),
+                "{id} should remain inside the window: {bounds:?}"
+            );
+
+            visual.simulate_click(
+                gpui_kit::point(
+                    bounds.origin.x + bounds.size.width / 2.,
+                    bounds.origin.y + bounds.size.height / 2.,
+                ),
+                Default::default(),
+            );
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+
+            assert_eq!(
+                dashboard.read_with(&visual, |dashboard, _| dashboard.section),
+                expected_section,
+                "clicking {id} should activate its section"
+            );
+            if expected_section == Section::Issues {
+                assert!(
+                    visual.debug_bounds("issues-toolbar").is_some(),
+                    "activating {id} should render the Issues toolbar"
+                );
+                assert!(
+                    visual.debug_bounds("update-list").is_none(),
+                    "activating {id} should leave the Inbox list"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mobile_status_keeps_live_and_nondefault_feedback() {
+        assert!(!should_render_mobile_sync_status(
+            false,
+            "Preview data · Jira connection not configured"
+        ));
+        assert!(should_render_mobile_sync_status(
+            true,
+            "Preview data · Jira connection not configured"
+        ));
+        assert!(should_render_mobile_sync_status(
+            false,
+            "Opening local cache…"
+        ));
     }
 }

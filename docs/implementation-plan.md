@@ -11,7 +11,8 @@ onboarding, authenticated `/myself` identity, account-scoped
 assigned-or-watched read sync, user-editable cross-project JQL scope, inferred
 project labels, SQLite caching, local update events, incremental polling, lazy
 issue detail, exact Jira-key lookup, ticket-grouped activity, confirmed comment
-creation, confirmed assignment and status-transition actions, Linux Wayland
+creation, confirmed assignment and status-transition actions, confirmed
+watch/unwatch controls for the authenticated account, Linux Wayland
 AppImage packaging, and native macOS DMG packaging. Linux is x86_64; macOS is
 native arm64 or x86_64.
 
@@ -32,8 +33,9 @@ milestone is an internal/local build, not a public release. See
   notification adapter and test are unavailable there. In-app feed and
   feedback remain available on both targets.
 - Jira synchronization and detail reads are read-only.
-- Confirmed comment creation, assignment changes, and status transitions are
-  the only Jira writes; each is dispatched once with no automatic retry.
+- Confirmed comment creation, assignment changes, status transitions, and
+  watch/unwatch changes for the authenticated account are the only Jira writes;
+  each is dispatched once with no automatic retry.
 - The remote sync uses the configured scope and returns the authenticated
   user's assigned-or-watched issues across projects, ordered by Jira
   `updated_at` newest first; issue-detail comments render newest first.

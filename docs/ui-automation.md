@@ -13,16 +13,42 @@ cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
   --size 1280x900 --theme light
 
 cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
+  --scenario issue-detail --output target/ui-lab/issue-detail-dark.png \
+  --size 1280x900 --theme dark
+
+cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
+  --scenario issue-detail --output target/ui-lab/issue-detail-light.png \
+  --size 1280x900 --theme light
+
+cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
+  --scenario issue-detail --output target/ui-lab/issue-detail-narrow.png \
+  --size 390x800 --theme dark
+
+cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
   --scenario settings --output target/ui-lab/settings-dark.png \
   --theme dark
 
 cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
   --scenario onboarding-dialog --output target/ui-lab/onboarding-dialog-light.png \
   --size 960x700 --theme light
+
+cargo run -p jira-gpui --features ui-lab --bin jira-ui-capture -- \
+  --scenario updates-reading --output target/ui-lab/updates-reading-mobile.png \
+  --size 390x800 --theme light
 ```
 
 Use `--help` for all options and `--list` for the UI capture scenarios:
-`onboarding`, `onboarding-dialog`, `issues`, `updates`, `team`, and `settings`.
+`onboarding`, `onboarding-dialog`, `issues`, `issue-detail`, `updates`,
+`updates-reading`, `team`, and `settings`. `issue-detail` opens the first
+sample issue in its shared detail surface with the Details group collapsed. It
+is a single-capture scenario and does not add a case to the five-case matrix.
+Use a desktop size to inspect the shared page or a narrow size to inspect its
+mobile layout. `updates-reading` opens the first fixture ticket's
+mobile reading pane and, like `onboarding-dialog`, is single-capture only; it
+does not add a case to the built-in matrix. The reading pane reuses the shared
+read-only issue overview, keeps the synced activity timeline beneath it, and
+routes full Jira actions to the Issues workspace. The default `updates`
+scenario continues to capture the ticket list.
 The `rich-content` scenario is available to the local macOS XCUITest fixture
 host, not to the offscreen UI capture lab, so it is intentionally absent from
 the capture list and five-case visual matrix below.
@@ -180,6 +206,7 @@ tools/macos-ui-automation/run.sh --scenario issues
 tools/macos-ui-automation/run.sh --scenario relationships
 tools/macos-ui-automation/run.sh --scenario rich-content
 tools/macos-ui-automation/run.sh --scenario updates
+tools/macos-ui-automation/run.sh --scenario issue-watch
 tools/macos-ui-automation/run.sh --scenario team
 tools/macos-ui-automation/run.sh --scenario settings
 tools/macos-ui-automation/run.sh --scenario components
@@ -188,13 +215,15 @@ tools/macos-ui-automation/run.sh --scenario assignee
 tools/macos-ui-automation/run.sh --scenario virtualized
 ```
 
-`relationships` reuses the deterministic issues fixture to verify parent breadcrumbs,
-directional linked issue labels, bounded relationship geometry, empty relationship
-states, and read-only navigation through linked issues. `components` covers kit Tags, Empty, and attachments; `alert` covers the inert
+`relationships` reuses the deterministic issues fixture to verify parent metadata in
+Details, directional linked issue labels, bounded relationship geometry, empty
+relationship states, and read-only navigation through issue actions. `components`
+covers kit Tags, Empty, and attachments; `alert` covers the inert
 kit Alert fixture; `assignee` covers keyboard selection through confirmation;
-and `virtualized` covers scrolling, filtering, variable row measurement, and
-update expansion. These scenarios are local-only and never contact Jira or
-dispatch writes.
+`issue-watch` verifies that a local watch toggle requires confirmation and that
+the fixture cannot dispatch its disabled Confirm action; and `virtualized`
+covers scrolling, filtering, variable row measurement, and update expansion.
+These scenarios are local-only and never contact Jira or dispatch writes.
 
 Validate the XCUITest project, plist, and scheme without launching the host:
 
@@ -262,25 +291,28 @@ The XCUITest target performs bounded semantic waits and read-only actions:
   remain inert, the status and dialog must remain present, and no dashboard may
   open. The fixture supplies no credentials or token, and this scenario uses no
   keychain, network, Jira, persistence, or Jira writes.
-- `issues` selects the deterministic fixture row `issue-row-DESK-179` and
-  verifies Story/Task/Bug/Epic type identity and their rendered semantic color
-  surfaces, the normalized `sample` workspace label,
-  and bounded-waits for the `issue-detail` accessible title/label to become
-  exactly `Issue detail for DESK-179`. It also verifies the semantic
-  `issue-detail-details-trigger` control, confirms that the Details accordion
-  starts expanded, collapses and reopens it, and checks that its height changes
-  and returns within bounded geometry tolerances. The fixture also checks all
-  five stable priority identities and labels, and reselects an issue with a
-  genuinely empty cached description to ensure it remains ready without a
-  loading spinner while background refresh is deferred.
+- `issues` starts with the full-width overview table and no open detail pane.
+  It checks the single toolbar, stable key/summary/status/assignee/updated
+  column and cell identities, aligned bounded cells, compact row geometry, and
+  full-summary accessibility text when long visible summaries truncate. The
+  selected row must expose selected semantics and a full blue row surface.
+  Activating a row keeps the same table beside the detail pane, and selecting
+  another row updates that pane. `Back to issues` closes details and restores
+  the full-width table. Detail checks retain the normalized `sample` workspace
+  identity, the stable `issue-detail-details-trigger`, and bounded
+  collapse/reopen geometry.
+- `issues-overview` isolates the table/detail interaction: selecting rows
+  keeps the table beside the selected issue, horizontal scrolling moves the
+  Updated header and cell together, local filtering preserves the selected
+  detail, and Back restores the full-width table.
 - `issues` also verifies the local search contract: summary text remains a
-  local filter when activated with Enter (without a Jira lookup error), exact
-  issue keys still use the explicit `Find key` action and select locally known
-  fixture issues, and `Clear filters` restores the input, `All statuses`, and
-  the fixture's full five-issue result count after combined filters. The
-  search/status controls and count are checked for semantic labels, usable
-  toolbar geometry, and non-overlap inside the host window.
-- `issues` also verifies concise post-refresh status copy, the single
+  local filter when activated with Enter (without a Jira lookup error), and
+  only a syntactically valid issue key reveals the contextual `Find key`
+  action. Exact local keys open the matching fixture detail; `Clear filters`
+  restores the input, `All statuses`, and the fixture's full five-issue count.
+  The status dropdown retains its semantic selection and filters locally.
+- `issues` also navigates between Issues and Local updates through the sidebar,
+  then verifies concise post-refresh status copy, the single
   icon-only `Refresh Jira` Sidebar action beside the username/profile when
   expanded and stacked below the profile in the collapsed rail, and the detail
   type/status/priority row:

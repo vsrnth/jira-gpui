@@ -17,6 +17,25 @@ const SETTINGS_GROUP_LABELS: [&str; 5] = [
     "Desktop notifications",
     "Saved Jira login",
 ];
+const SETTINGS_CATEGORIES: [(SettingsCategory, &str, &str); 5] = [
+    (SettingsCategory::Appearance, "Appearance", "appearance"),
+    (SettingsCategory::IssueScope, "Issue scope", "issue-scope"),
+    (
+        SettingsCategory::TeamTracker,
+        "Team tracker",
+        "team-tracker",
+    ),
+    (
+        SettingsCategory::DesktopNotifications,
+        "Desktop notifications",
+        "desktop-notifications",
+    ),
+    (
+        SettingsCategory::SavedJiraLogin,
+        "Saved Jira login",
+        "saved-jira-login",
+    ),
+];
 const SCOPE_HELP_COPY: &str = "This is a scope expression. Jira Desk appends assigned-or-watched account membership, incremental updated overlap, and ORDER BY updated DESC. Do not include ORDER BY.";
 const LIVE_WORKSPACE_COPY: &str =
     "Settings become available after a live Jira workspace is connected.";
@@ -565,6 +584,52 @@ impl Dashboard {
         layout: LayoutMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let category_navigation = h_flex()
+            .id("settings-category-navigation")
+            .debug_selector(|| "settings-category-navigation".to_owned())
+            .accessibility_id("settings-category-navigation")
+            .role(gpui_kit::accesskit::Role::TabList)
+            .aria_label("Settings categories")
+            .w_full()
+            .flex_wrap()
+            .gap_1()
+            .children(SETTINGS_CATEGORIES.map(|(category, label, slug)| {
+                let selected = self.settings_category == category;
+                let id = format!("settings-category-{slug}");
+                let debug_id = id.clone();
+                div()
+                    .id(id.clone())
+                    .debug_selector(move || debug_id.clone())
+                    .accessibility_id(id)
+                    .role(gpui_kit::accesskit::Role::Tab)
+                    .aria_label(label)
+                    .aria_selected(selected)
+                    .tab_index(0)
+                    .px_3()
+                    .py_2()
+                    .rounded(cx.theme().radius)
+                    .text_sm()
+                    .when(selected, |this| {
+                        this.bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground)
+                    })
+                    .when(!selected, |this| {
+                        this.text_color(cx.theme().muted_foreground)
+                            .hover(|style| style.bg(cx.theme().list_hover))
+                    })
+                    .on_key_down(cx.listener(move |this, event, window, cx| {
+                        if is_activation_key(event) {
+                            window.prevent_default();
+                            this.settings_category = category;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_category = category;
+                        cx.notify();
+                    }))
+                    .child(label)
+            }));
         let dashboard = cx.entity().downgrade();
         let appearance_dashboard = dashboard.clone();
         let issue_dashboard = dashboard.clone();
@@ -636,12 +701,41 @@ impl Dashboard {
                     .group(selected_group),
             ]);
 
-        div()
+        let content_id = format!(
+            "settings-content-{}",
+            SETTINGS_CATEGORIES
+                .iter()
+                .find_map(|(category, _, slug)| {
+                    (*category == self.settings_category).then_some(*slug)
+                })
+                .expect("every settings category has navigation metadata")
+        );
+        let content_debug_id = content_id.clone();
+
+        v_flex()
             .id("settings-root")
             .debug_selector(|| "settings-root".to_owned())
+            .accessibility_id("settings-root")
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label("Settings")
             .size_full()
             .min_w_0()
-            .child(settings)
+            .gap_3()
+            .p_3()
+            .child(category_navigation)
+            .child(
+                div()
+                    .id(content_id.clone())
+                    .debug_selector(move || content_debug_id.clone())
+                    .accessibility_id(content_id)
+                    .role(gpui_kit::accesskit::Role::Group)
+                    .aria_label("Selected settings category content")
+                    .w_full()
+                    .max_w(gpui_kit::rems(if layout.is_mobile() { 40. } else { 48. }))
+                    .flex_1()
+                    .min_h_0()
+                    .child(settings),
+            )
     }
 }
 

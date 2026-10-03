@@ -1,4 +1,6 @@
-use super::issues_view::issue_count_label;
+use super::issues_view::{
+    compact_issue_workspace_summary, issue_count_label, issue_workspace_summary,
+};
 use super::settings::{persisted_direct_team_member, team_identifier_lines};
 use super::shell_view::{refresh_action_label, should_render_sidebar_sync_message};
 use super::updates_view::update_filter_is_selected;
@@ -26,6 +28,62 @@ fn issue_count_label_distinguishes_filtered_and_loaded_counts() {
     assert_eq!(issue_count_label(9, 9, false), "9 Jira issues");
 }
 
+#[test]
+fn issue_workspace_summary_pluralizes_honest_local_counts() {
+    assert_eq!(
+        issue_workspace_summary(3, 2),
+        "3 tickets with unread updates · 2 issues in progress"
+    );
+    assert_eq!(
+        issue_workspace_summary(1, 1),
+        "1 ticket with unread updates · 1 issue in progress"
+    );
+    assert_eq!(
+        issue_workspace_summary(0, 0),
+        "0 tickets with unread updates · 0 issues in progress"
+    );
+    assert_eq!(compact_issue_workspace_summary(3, 2), "3 unread · 2 active");
+}
+
+#[gpui_kit::test]
+fn mobile_issue_workspace_uses_compact_counts_and_non_overlapping_actions(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert_eq!(compact_issue_workspace_summary(3, 3), "3 unread · 3 active");
+    let overview = visual
+        .debug_bounds("issues-workspace-summary")
+        .expect("mobile issue workspace overview should be laid out");
+    let counts = visual
+        .debug_bounds("issues-workspace-summary-counts")
+        .expect("mobile compact counts should be laid out");
+    let updates = visual
+        .debug_bounds("issues-review-updates")
+        .expect("mobile Updates action should be laid out");
+    let active = visual
+        .debug_bounds("issues-show-active")
+        .expect("mobile Active action should be laid out");
+
+    assert!(overview.size.height < px(90.));
+    assert!(counts.size.width > px(0.) && counts.size.height > px(0.));
+    assert!(updates.size.width > px(0.) && updates.size.height > px(0.));
+    assert!(active.size.width > px(0.) && active.size.height > px(0.));
+    assert!(updates.origin.x + updates.size.width <= active.origin.x);
+    for bounds in [counts, updates, active] {
+        assert!(bounds.origin.x >= overview.origin.x);
+        assert!(bounds.origin.y >= overview.origin.y);
+        assert!(bounds.origin.x + bounds.size.width <= overview.origin.x + overview.size.width);
+        assert!(bounds.origin.y + bounds.size.height <= overview.origin.y + overview.size.height);
+    }
+}
+
 #[gpui_kit::test]
 fn issue_search_help_wraps_inside_narrow_issue_list(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::component::init);
@@ -41,6 +99,40 @@ fn issue_search_help_wraps_inside_narrow_issue_list(cx: &mut gpui_kit::TestAppCo
     assert!(help.size.height > px(16.));
     assert!(help.origin.x >= px(0.));
     assert!(help.origin.x + help.size.width <= px(350.));
+}
+
+#[gpui_kit::test]
+fn long_issue_summary_keeps_narrow_issue_row_bounded(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+    let window = cx.open_window(gpui_kit::size(px(350.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+
+    visual.update(|_, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            let issue = dashboard
+                .domain_issues
+                .iter_mut()
+                .find(|issue| issue.id.as_str() == "10184")
+                .expect("fixture issue should exist");
+            issue.summary = "A reliable issue summary stays readable when the workspace list is narrow and the source ticket title is exceptionally long. "
+                .repeat(18);
+            dashboard.rebuild_issue_views(false, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let row = visual
+        .debug_bounds("issue-row-10184")
+        .expect("mutated fixture issue row should be rendered");
+    assert!(row.size.width > px(0.) && row.size.height > px(0.));
+    assert!(
+        row.size.height < px(190.),
+        "long summary should remain clamped in a bounded row: {row:?}"
+    );
 }
 
 #[gpui_kit::test]
@@ -168,6 +260,7 @@ fn search_input_enter_ignores_summary_and_selects_local_issue_key(
         dashboard_entity.update(cx, |dashboard, _| {
             // The Enter event is emitted only after Change has been drained, matching typing.
             assert_eq!(dashboard.selected_issue.as_ref(), Some(&issue_id));
+            assert!(dashboard.mobile_detail_open);
         });
     });
 }
@@ -434,6 +527,7 @@ fn native_status_popover_list_is_bounded_and_selection_only_confirms(
     );
 
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     let issue_id = dashboard.selected_issue.clone().expect("selected issue");
     dashboard.workspace = Some(workspace);
     dashboard.status_transition_items = transitions.clone();
@@ -1372,6 +1466,7 @@ fn cached_detail_renders_without_spinner_and_survives_background_failure(
     let issue = sample_issues().into_iter().next().expect("issue");
     let issue_id = issue.id.clone();
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     // This test isolates cached detail rendering; the native status lookup is
     // covered by the dedicated status-popover fixture below.
     dashboard.status_transition_reads_suppressed = true;
@@ -1495,6 +1590,7 @@ fn empty_cached_detail_renders_without_spinner_and_survives_background_failure(
     let issue = sample_issues().into_iter().next().expect("issue");
     let issue_id = issue.id.clone();
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     dashboard.status_transition_reads_suppressed = true;
     dashboard.workspace = Some(Arc::new(workspace));
     let cached_issue = dashboard
@@ -1691,7 +1787,7 @@ fn unknown_related_lookup_preserves_search_filter_when_workspace_is_unavailable(
 }
 
 #[gpui_kit::test]
-fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui_kit::TestAppContext) {
+fn open_update_selects_issue_and_opens_desktop_detail(cx: &mut gpui_kit::TestAppContext) {
     let issue = sample_issues()
         .into_iter()
         .find(|issue| issue.key.as_str() == "DESK-176")
@@ -1699,7 +1795,7 @@ fn open_update_selects_issue_and_opens_mobile_detail(cx: &mut gpui_kit::TestAppC
     let dashboard = cx.new(|_| Dashboard::from_sample_data());
 
     cx.update_entity(&dashboard, |dashboard, cx| {
-        dashboard.open_update_issue(issue.id.clone(), true, cx);
+        dashboard.open_update_issue(issue.id.clone(), false, cx);
     });
     let (selected_issue, section, mobile_detail_open) =
         cx.read_entity(&dashboard, |dashboard, _| {
@@ -1755,11 +1851,185 @@ fn clicking_issue_row_keeps_selection_layout_bounded(cx: &mut gpui_kit::TestAppC
     let selected_row = visual
         .debug_bounds("issue-row-10179")
         .expect("selected issue row should remain laid out");
-    assert_eq!(selected_row.size, row.size);
+    assert!(visual.debug_bounds("issue-detail").is_some());
+    assert!(
+        (f32::from(selected_row.size.height) - f32::from(row.size.height)).abs() <= 1.0,
+        "opening details should not replace the compact row with a card: before={row:?}, after={selected_row:?}"
+    );
+    assert!(selected_row.size.width < row.size.width);
+    assert!(selected_row.size.width <= row.size.width);
 }
 
 #[gpui_kit::test]
-fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
+fn desktop_issue_overview_opens_and_closes_the_detail_panes(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+
+    let window = cx.open_window(gpui_kit::size(px(1200.), px(900.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issues-toolbar").is_some());
+    assert!(visual.debug_bounds("issues-table").is_some());
+    assert!(visual.debug_bounds("issue-detail").is_none());
+
+    let row = visual
+        .debug_bounds("issue-row-10179")
+        .expect("overview should render issue rows");
+    let table = visual
+        .debug_bounds("issues-table")
+        .expect("overview table should be laid out");
+    let row_left_inset = row.origin.x - table.origin.x;
+    let row_right_inset = table.origin.x + table.size.width - row.origin.x - row.size.width;
+    assert!(
+        row_left_inset >= px(8.),
+        "table row should have an 8px left inset: {row:?}"
+    );
+    assert!(
+        row_right_inset >= px(8.),
+        "table row should have an 8px right inset: row={row:?}, table={table:?}"
+    );
+    assert!(
+        table.size.width - row.size.width >= px(16.),
+        "table row should preserve at least 16px of combined horizontal inset: row={row:?}, table={table:?}"
+    );
+    assert!(
+        row.size.height >= px(30.) && row.size.height <= px(45.),
+        "overview row should stay compact: {row:?}"
+    );
+
+    let status_header = visual
+        .debug_bounds("issues-column-status")
+        .expect("status column header should be laid out");
+    let status_cell = visual
+        .debug_bounds("issue-cell-status-DESK-179")
+        .expect("status column cell should be laid out");
+    assert!(
+        (f32::from(status_header.origin.x) - f32::from(status_cell.origin.x)).abs() <= 1.0,
+        "status cell should align with its header: header={status_header:?}, cell={status_cell:?}"
+    );
+
+    visual.simulate_click(
+        gpui_kit::point(
+            row.origin.x + row.size.width / 2.,
+            row.origin.y + row.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issue-detail").is_some());
+    assert!(visual.debug_bounds("issue-detail-back").is_some());
+    assert!(visual.debug_bounds("issues-table").is_some());
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.mobile_detail_open));
+
+    let next_row = visual
+        .debug_bounds("issue-row-10184")
+        .expect("another issue row should remain available beside detail");
+    visual.simulate_click(
+        gpui_kit::point(
+            next_row.origin.x + next_row.size.width / 2.,
+            next_row.origin.y + next_row.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.selected_issue.clone()),
+        Some(IssueId::new("10184").expect("sample issue id")),
+        "selecting another table row should update the issue detail selection"
+    );
+
+    let back = visual
+        .debug_bounds("issue-detail-back")
+        .expect("opened detail should offer a back action");
+    visual.simulate_click(
+        gpui_kit::point(
+            back.origin.x + back.size.width / 2.,
+            back.origin.y + back.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issues-toolbar").is_some());
+    assert!(visual.debug_bounds("issues-table").is_some());
+    assert!(visual.debug_bounds("issue-detail").is_none());
+    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.mobile_detail_open));
+}
+
+#[gpui_kit::test]
+fn desktop_issue_table_and_detail_keep_usable_panes_at_breakpoints(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+
+    for width in [720., 960., 1_200.] {
+        let window = cx.open_window(gpui_kit::size(px(width), px(800.)), |_, _| {
+            Dashboard::from_sample_data()
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let row = visual
+            .debug_bounds("issue-row-10179")
+            .unwrap_or_else(|| panic!("DESK-179 row should be visible at {width}px"));
+        visual.simulate_click(
+            gpui_kit::point(
+                row.origin.x + row.size.width / 2.,
+                row.origin.y + row.size.height / 2.,
+            ),
+            Default::default(),
+        );
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let main = visual
+            .debug_bounds("dashboard-main")
+            .expect("dashboard main content should be laid out");
+        let toolbar = visual
+            .debug_bounds("issues-toolbar")
+            .expect("toolbar should remain above both panes");
+        let table = visual
+            .debug_bounds("issues-table")
+            .expect("table viewport should remain beside detail");
+        let detail = visual
+            .debug_bounds("issue-detail")
+            .expect("selected issue detail should remain visible");
+        let row = visual
+            .debug_bounds("issue-row-10179")
+            .expect("selected row should remain visible in the table");
+
+        assert!(
+            toolbar.origin.y < table.origin.y,
+            "toolbar should remain above panes at {width}px"
+        );
+        assert!(
+            table.origin.x >= main.origin.x
+                && table.origin.x + table.size.width <= main.origin.x + main.size.width + px(1.),
+            "table viewport should stay within dashboard content at {width}px: main={main:?}, table={table:?}"
+        );
+        assert!(
+            detail.origin.x >= table.origin.x + table.size.width - px(1.),
+            "table and detail should occupy separate horizontal regions at {width}px: table={table:?}, detail={detail:?}"
+        );
+        assert!(
+            table.size.width >= px(280.) && detail.size.width >= px(280.),
+            "both panes should retain a usable viewport at {width}px: table={table:?}, detail={detail:?}"
+        );
+        assert!(row.size.height >= px(30.) && row.size.height <= px(45.));
+    }
+}
+
+#[gpui_kit::test]
+fn desktop_issue_toolbar_fits_valid_key_and_clear_action_at_standard_width(
     cx: &mut gpui_kit::TestAppContext,
 ) {
     cx.update(gpui_kit::component::init);
@@ -1767,38 +2037,65 @@ fn issue_list_summary_header_keeps_two_lines_bounded_at_compact_width(
     let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| {
         Dashboard::from_sample_data()
     });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        dashboard_entity.update(cx, |dashboard, cx| {
+            dashboard.ensure_search_input(window, cx);
+            let input = dashboard.search_input.clone().expect("issue search input");
+            input.update(cx, |input, cx| input.set_value("DESK-179", window, cx));
+            dashboard.set_search_query("DESK-179".to_owned(), cx);
+            dashboard.set_status_filter(IssueStatusFilter::Done, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let toolbar = visual
+        .debug_bounds("issues-toolbar")
+        .expect("issues toolbar should be laid out");
+    for selector in ["issue-search", "issue-search-submit", "issue-filters-clear"] {
+        let control = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be laid out"));
+        assert!(
+            control.origin.x >= toolbar.origin.x
+                && control.origin.y >= toolbar.origin.y
+                && control.origin.x + control.size.width
+                    <= toolbar.origin.x + toolbar.size.width + px(1.)
+                && control.origin.y + control.size.height
+                    <= toolbar.origin.y + toolbar.size.height + px(1.),
+            "toolbar control should remain within the toolbar: selector={selector}, control={control:?}, toolbar={toolbar:?}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn desktop_issue_header_exposes_count_and_columns_at_compact_width(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+
+    let window = cx.open_window(gpui_kit::size(px(720.), px(700.)), |_, _| {
+        Dashboard::from_sample_data()
+    });
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
 
-    let header = visual
-        .debug_bounds("issue-list-header")
-        .expect("issue list summary header should be laid out");
-    let primary = visual
+    let summary = visual
         .debug_bounds("issue-list-summary")
-        .expect("issue list primary summary should be laid out");
-    let secondary = visual
-        .debug_bounds("issue-list-context")
-        .expect("issue list secondary context should be laid out");
-
-    for (name, bounds) in [("primary", primary), ("secondary", secondary)] {
-        assert!(
-            bounds.size.width > px(0.) && bounds.size.height > px(0.),
-            "{name} issue summary line collapsed: {bounds:?}"
-        );
-        assert!(
-            bounds.origin.x >= header.origin.x
-                && bounds.origin.x + bounds.size.width
-                    <= header.origin.x + header.size.width + px(1.)
-                && bounds.origin.y >= header.origin.y
-                && bounds.origin.y + bounds.size.height
-                    <= header.origin.y + header.size.height + px(1.),
-            "{name} issue summary line escapes its header: header={header:?}, line={bounds:?}"
-        );
-    }
+        .expect("issue count should remain exposed to accessibility");
+    let key = visual
+        .debug_bounds("issues-column-key")
+        .expect("Key column header should be laid out");
     assert!(
-        primary.origin.y + primary.size.height <= secondary.origin.y,
-        "issue summary lines should be vertically separated: primary={primary:?}, secondary={secondary:?}"
+        summary.size.width > px(0.) && summary.size.height > px(0.),
+        "issue count header should have visible geometry: {summary:?}"
+    );
+    assert!(
+        key.origin.y >= summary.origin.y
+            && key.origin.y + key.size.height <= summary.origin.y + summary.size.height + px(1.)
     );
 }
 
@@ -2070,6 +2367,62 @@ fn native_settings_root_and_general_controls_are_bounded(cx: &mut gpui_kit::Test
 }
 
 #[gpui_kit::test]
+fn mobile_settings_direct_navigation_selects_bounded_category_content(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Settings;
+    let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let root = visual
+        .debug_bounds("settings-root")
+        .expect("mobile settings root should be laid out");
+    let navigation = visual
+        .debug_bounds("settings-category-navigation")
+        .expect("mobile settings should expose category navigation");
+    let team = visual
+        .debug_bounds("settings-category-team-tracker")
+        .expect("Team tracker category should be directly visible");
+    assert!(navigation.origin.x >= root.origin.x && navigation.origin.y >= root.origin.y);
+    assert!(navigation.origin.x + navigation.size.width <= root.origin.x + root.size.width);
+    assert!(team.origin.x >= navigation.origin.x && team.origin.y >= navigation.origin.y);
+    assert!(team.origin.x + team.size.width <= navigation.origin.x + navigation.size.width);
+
+    visual.simulate_click(
+        gpui_kit::point(
+            team.origin.x + team.size.width / 2.,
+            team.origin.y + team.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.settings_category),
+        SettingsCategory::TeamTracker
+    );
+    let content = visual
+        .debug_bounds("settings-content-team-tracker")
+        .expect("selected Team tracker content should have stable identity");
+    assert!(visual.debug_bounds("settings-content-appearance").is_none());
+    assert!(content.size.width > px(0.) && content.size.height > px(0.));
+    assert!(content.origin.x >= root.origin.x && content.origin.y >= root.origin.y);
+    assert!(content.origin.x + content.size.width <= root.origin.x + root.size.width + px(1.));
+    assert!(content.origin.y + content.size.height <= root.origin.y + root.size.height + px(1.));
+    assert!(
+        visual.debug_bounds("team-settings-feedback").is_none(),
+        "navigation must not manufacture settings feedback"
+    );
+}
+
+#[gpui_kit::test]
 fn team_table_sort_keeps_selected_detail_identity_after_reordering(
     cx: &mut gpui_kit::TestAppContext,
 ) {
@@ -2322,63 +2675,65 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
         "native details surface escapes the detail pane: pane={pane:?}, details={details:?}"
     );
 
-    for selector in [
-        "issue-detail-assignee",
-        "issue-detail-reporter",
-        "issue-detail-status-category",
-        "issue-detail-parent",
-        "issue-detail-created",
-        "issue-detail-updated",
-        "issue-detail-due-date",
-    ] {
-        let value = visual
-            .debug_bounds(selector)
-            .unwrap_or_else(|| panic!("metadata value should be laid out: {selector}"));
-        assert!(value.size.width > px(0.) && value.size.height > px(0.));
-        assert!(
-            value.origin.x >= details.origin.x
-                && value.origin.y >= details.origin.y
-                && value.origin.x + value.size.width
-                    <= details.origin.x + details.size.width + px(1.)
-                && value.origin.y + value.size.height
-                    <= details.origin.y + details.size.height + px(1.),
-            "metadata value escapes native details surface: selector={selector}, details={details:?}, value={value:?}"
-        );
-    }
+    assert!(
+        !dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open),
+        "Details should begin collapsed"
+    );
+    assert!(visual.debug_bounds("issue-detail-type").is_none());
 
-    let type_surface = visual
-        .debug_bounds("issue-detail-type-surface")
-        .expect("issue type metadata surface should be laid out");
-    let status_trigger = visual
-        .debug_bounds("issue-status-trigger")
-        .expect("status metadata trigger should be laid out");
+    let status_pill = visual
+        .debug_bounds("issue-detail-status-pill")
+        .expect("static status should be laid out in the header");
     let priority_surface = visual
         .debug_bounds("issue-detail-priority-surface")
         .expect("priority metadata surface should be laid out");
+    let breadcrumb = visual
+        .debug_bounds("issue-detail-breadcrumbs")
+        .expect("key and status breadcrumb should be laid out");
+    let key = visual
+        .debug_bounds("issue-detail-key")
+        .expect("selected issue key should be laid out");
+    let summary = visual
+        .debug_bounds("issue-detail-summary")
+        .expect("issue summary should be laid out");
+    let updated = visual
+        .debug_bounds("issue-detail-updated-header")
+        .expect("updated timestamp metadata should be laid out");
     let metadata_row = visual
         .debug_bounds("issue-detail-metadata-row")
         .expect("metadata row should be laid out");
-    for (name, bounds) in [
-        ("type", type_surface),
-        ("status", status_trigger),
-        ("priority", priority_surface),
-    ] {
-        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
-        assert!(
-            bounds.origin.y >= metadata_row.origin.y
-                && bounds.origin.y + bounds.size.height
-                    <= metadata_row.origin.y + metadata_row.size.height + px(1.),
-            "{name} surface escapes metadata row: row={metadata_row:?}, surface={bounds:?}"
-        );
-    }
+    assert!(priority_surface.size.width > px(0.) && priority_surface.size.height > px(0.));
     assert!(
-        (f32::from(type_surface.size.height) - f32::from(status_trigger.size.height)).abs() <= 1.
+        priority_surface.origin.y >= metadata_row.origin.y
+            && priority_surface.origin.y + priority_surface.size.height
+                <= metadata_row.origin.y + metadata_row.size.height + px(1.),
+        "priority surface escapes metadata row: row={metadata_row:?}, surface={priority_surface:?}"
     );
     assert!(
-        (f32::from(type_surface.size.height) - f32::from(priority_surface.size.height)).abs() <= 1.
+        status_pill.origin.x >= breadcrumb.origin.x
+            && status_pill.origin.y >= breadcrumb.origin.y
+            && status_pill.origin.x + status_pill.size.width
+                <= breadcrumb.origin.x + breadcrumb.size.width + px(1.)
+            && status_pill.origin.y + status_pill.size.height
+                <= breadcrumb.origin.y + breadcrumb.size.height + px(1.),
+        "static status escapes key/status breadcrumb: breadcrumb={breadcrumb:?}, status={status_pill:?}"
+    );
+    assert!(
+        key.origin.y >= breadcrumb.origin.y
+            && key.origin.y + key.size.height
+                <= breadcrumb.origin.y + breadcrumb.size.height + px(1.)
+    );
+    assert!(
+        summary.size.height > priority_surface.size.height,
+        "summary should dominate compact metadata: summary={summary:?}, metadata={priority_surface:?}"
+    );
+    assert!(
+        updated.origin.y >= metadata_row.origin.y
+            && updated.origin.y + updated.size.height
+                <= metadata_row.origin.y + metadata_row.size.height + px(1.),
+        "updated timestamp escapes metadata row: row={metadata_row:?}, updated={updated:?}"
     );
 
-    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
     let trigger = visual
         .debug_bounds("issue-detail-details-trigger")
         .expect("details accordion trigger should be laid out");
@@ -2390,16 +2745,71 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
         Default::default(),
     );
     visual.run_until_parked();
-    assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
+    let expanded_details = visual
+        .debug_bounds("issue-detail-details")
+        .expect("expanded Details group should be laid out");
 
-    visual.update(|_, cx| dashboard_entity.update(cx, |_, cx| cx.notify()));
+    for selector in [
+        "issue-detail-type",
+        "issue-detail-assignee",
+        "issue-detail-reporter",
+        "issue-detail-status-category",
+        "issue-detail-parent",
+        "issue-detail-created",
+        "issue-detail-updated",
+        "issue-detail-due-date",
+    ] {
+        let value = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("expanded metadata value should be laid out: {selector}"));
+        assert!(value.size.width > px(0.) && value.size.height > px(0.));
+        assert!(
+            value.origin.x >= expanded_details.origin.x
+                && value.origin.y >= expanded_details.origin.y
+                && value.origin.x + value.size.width
+                    <= expanded_details.origin.x + expanded_details.size.width + px(1.)
+                && value.origin.y + value.size.height
+                    <= expanded_details.origin.y + expanded_details.size.height + px(1.),
+            "metadata value escapes native details surface: selector={selector}, details={expanded_details:?}, value={value:?}"
+        );
+    }
+    let action_bar = visual
+        .debug_bounds("issue-detail-action-bar")
+        .expect("status and comment controls should be in the action toolbar");
+    let status_trigger = visual
+        .debug_bounds("issue-status-trigger")
+        .expect("editable status control should be in the action toolbar");
+    assert!(
+        status_trigger.origin.x >= action_bar.origin.x
+            && status_trigger.origin.y >= action_bar.origin.y
+            && status_trigger.origin.x + status_trigger.size.width
+                <= action_bar.origin.x + action_bar.size.width + px(1.)
+            && status_trigger.origin.y + status_trigger.size.height
+                <= action_bar.origin.y + action_bar.size.height + px(1.),
+        "editable status control escapes the action toolbar: toolbar={action_bar:?}, status={status_trigger:?}"
+    );
+
+    let trigger = visual
+        .debug_bounds("issue-detail-details-trigger")
+        .expect("details accordion trigger should remain laid out when expanded");
+    visual.simulate_click(
+        gpui_kit::point(
+            trigger.origin.x + trigger.size.width / 2.,
+            trigger.origin.y + trigger.size.height / 2.,
+        ),
+        Default::default(),
+    );
     visual.run_until_parked();
     assert!(!dashboard_entity.read_with(&visual, |dashboard, _| dashboard.issue_details_open));
-
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let trigger = visual
         .debug_bounds("issue-detail-details-trigger")
-        .expect("details accordion trigger should remain laid out when closed");
+        .expect("details accordion trigger should remain laid out when collapsed");
     visual.simulate_click(
         gpui_kit::point(
             trigger.origin.x + trigger.size.width / 2.,
@@ -2412,10 +2822,69 @@ fn native_issue_details_metadata_stays_bounded_at_desktop_width(cx: &mut gpui_ki
 }
 
 #[gpui_kit::test]
+fn team_linked_issue_summary_stays_readable_at_1280px(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+
+    let issue = sample_issues()
+        .into_iter()
+        .find(|issue| issue.key.as_str() == "DESK-184")
+        .expect("linked Team fixture issue");
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Team;
+    dashboard.sidebar_collapsed = false;
+    dashboard.team_members = vec![PersistedTeamMember {
+        identifier: "amina".to_owned(),
+        account_id: "amina".to_owned(),
+        display_name: "Amina Yusuf".to_owned(),
+    }];
+    dashboard.team_issues = sample_issues();
+    dashboard.selected_issue = Some(issue.id.clone());
+    dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
+
+    let window = cx.open_window(gpui_kit::size(px(1280.), px(900.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let pane = visual
+        .debug_bounds("team-detail")
+        .expect("Team issue detail should be laid out");
+    let linked_row = visual
+        .debug_bounds("issue-detail-linked-row-1")
+        .expect("second linked issue should have a stable geometry selector");
+    let linked_summary = visual
+        .debug_bounds("issue-detail-linked-summary-1")
+        .expect("second linked issue summary should have a stable geometry selector");
+
+    assert!(
+        (400. ..=430.).contains(&f32::from(pane.size.width)),
+        "1280px Team viewport should retain the expected approximately 420px detail pane: {pane:?}"
+    );
+    assert!(
+        linked_row.origin.x >= pane.origin.x
+            && linked_row.origin.y >= pane.origin.y
+            && linked_row.origin.x + linked_row.size.width
+                <= pane.origin.x + pane.size.width + px(1.),
+        "linked issue row should stay inside the detail pane: pane={pane:?}, row={linked_row:?}"
+    );
+    assert!(
+        linked_row.size.height <= px(100.),
+        "linked summary should not collapse into a tall one-word stack: {linked_row:?}"
+    );
+    assert!(
+        linked_summary.size.width >= px(160.)
+            && linked_summary.size.height > px(0.)
+            && linked_summary.size.width <= linked_row.size.width,
+        "linked summary should retain at least 160px inside the row: row={linked_row:?}, summary={linked_summary:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::component::init);
     let issue = sample_issues().into_iter().next().expect("sample issue");
     let mut dashboard = Dashboard::from_sample_data();
+    dashboard.mobile_detail_open = true;
     dashboard.detail_state = DetailState::Loaded(detail_view_from_issue(&issue));
     let window = cx.open_window(gpui_kit::size(px(1_200.), px(1_200.)), |_, _| dashboard);
     let dashboard_entity = window.root(cx).expect("dashboard root");
@@ -2440,6 +2909,9 @@ fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui_ki
     let actions = visual
         .debug_bounds("comment-composer-actions")
         .expect("comment action row should be laid out");
+    let add_comment = visual
+        .debug_bounds("issue-detail-add-comment")
+        .expect("Add comment action should be laid out");
     let post_comment = visual
         .debug_bounds("post-comment")
         .expect("post comment button should be laid out");
@@ -2480,6 +2952,26 @@ fn idle_comment_action_is_intrinsic_and_bounded_inside_composer(cx: &mut gpui_ki
     assert!(
         composer.origin.y >= description.origin.y + description.size.height,
         "comment composer should not overlap the description: description={description:?}, composer={composer:?}"
+    );
+
+    visual.simulate_click(
+        gpui_kit::point(
+            add_comment.origin.x + add_comment.size.width / 2.,
+            add_comment.origin.y + add_comment.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.simulate_keystrokes("fixture");
+    visual.run_until_parked();
+    assert_eq!(
+        dashboard_entity.read_with(&visual, |dashboard, cx| {
+            dashboard
+                .comment_input
+                .as_ref()
+                .map(|input| input.read(cx).value().to_string())
+        }),
+        Some("fixture".to_owned()),
+        "Add comment should focus the comment composer for direct typing"
     );
 }
 
@@ -2670,6 +3162,269 @@ fn selected_detail_feedback_is_early_and_has_stable_state_identity(
 }
 
 #[gpui_kit::test]
+fn mobile_updates_preview_explains_missing_cached_issue_details(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Updates;
+    let issue_id = dashboard
+        .update_groups
+        .iter()
+        .find(|group| group.issue_key == "DESK-179")
+        .expect("DESK-179 update group")
+        .issue_id
+        .clone();
+    let issue = dashboard
+        .domain_issues
+        .iter_mut()
+        .find(|issue| issue.id == issue_id)
+        .expect("cached DESK-179 issue fixture");
+    issue.description_text = None;
+    issue.rich_description = None;
+    issue.detail_loaded = false;
+    dashboard.selected_update_issue = Some(issue_id);
+    dashboard.mobile_update_detail_open = true;
+
+    let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(visual.debug_bounds("issue-detail").is_some());
+    assert!(visual.debug_bounds("issue-detail-description").is_some());
+    assert!(visual.debug_bounds("update-issue-unavailable").is_some());
+    assert!(visual.debug_bounds("update-reading-activity").is_some());
+    assert!(visual.debug_bounds("update-open-full-details").is_some());
+}
+
+#[gpui_kit::test]
+fn mobile_updates_preview_uses_bounded_read_only_issue_overview(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::component::init);
+
+    let mut dashboard = Dashboard::from_sample_data();
+    dashboard.section = Section::Updates;
+    dashboard.mobile_update_detail_open = true;
+    let window = cx.open_window(gpui_kit::size(px(390.), px(800.)), |_, _| dashboard);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let pane = visual
+        .debug_bounds("update-reading-pane")
+        .expect("selected mobile update should show its reading pane");
+    let overview = visual
+        .debug_bounds("issue-detail")
+        .expect("reading pane should use the shared issue overview");
+    let summary = visual
+        .debug_bounds("issue-detail-summary")
+        .expect("issue summary should be laid out");
+    let metadata = visual
+        .debug_bounds("issue-detail-metadata-row")
+        .expect("issue metadata should be laid out");
+    let description = visual
+        .debug_bounds("issue-detail-description")
+        .expect("cached issue description should be laid out");
+    let action_bar = visual
+        .debug_bounds("issue-detail-action-bar")
+        .expect("read-only issue actions should be laid out");
+    let watch = visual
+        .debug_bounds("issue-watch-button")
+        .expect("watch action should be laid out");
+    let add_comment = visual
+        .debug_bounds("issue-detail-add-comment")
+        .expect("Add comment action should be laid out");
+    let change_status = visual
+        .debug_bounds("issue-detail-change-status")
+        .expect("Change status action should be laid out");
+    let activity = visual
+        .debug_bounds("update-reading-activity")
+        .expect("local activity timeline should follow the issue overview");
+    let open_full_details = visual
+        .debug_bounds("update-open-full-details")
+        .expect("full details navigation should remain available");
+
+    assert!(overview.size.width > px(0.) && overview.size.height > px(0.));
+    assert!(overview.origin.x >= pane.origin.x && overview.origin.y >= pane.origin.y);
+    assert!(overview.origin.x + overview.size.width <= pane.origin.x + pane.size.width + px(1.));
+    for (name, bounds) in [
+        ("summary", summary),
+        ("metadata", metadata),
+        ("description", description),
+        ("action bar", action_bar),
+        ("watch", watch),
+        ("Add comment", add_comment),
+        ("Change status", change_status),
+    ] {
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(
+            bounds.origin.x >= overview.origin.x
+                && bounds.origin.x + bounds.size.width
+                    <= overview.origin.x + overview.size.width + px(1.),
+            "{name} should stay inside the mobile issue overview: overview={overview:?}, bounds={bounds:?}"
+        );
+    }
+    assert!(activity.origin.y >= overview.origin.y + overview.size.height - px(1.));
+    assert!(open_full_details.origin.x >= pane.origin.x);
+    assert!(
+        open_full_details.origin.x + open_full_details.size.width
+            <= pane.origin.x + pane.size.width + px(1.)
+    );
+    assert!(visual.debug_bounds("issue-status-trigger").is_none());
+    assert!(visual.debug_bounds("comment-composer").is_none());
+    assert!(visual.debug_bounds("update-issue-unavailable").is_none());
+    assert!(visual.debug_bounds("updates-reading-back").is_some());
+}
+
+#[cfg(feature = "ui-automation")]
+#[gpui_kit::test]
+fn issue_watch_fixture_confirms_locally_and_cancels_without_dispatch(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    cx.update(gpui_kit::component::init);
+
+    let window = cx.open_window(gpui_kit::size(px(1_200.), px(900.)), |_, _| {
+        Dashboard::from_ui_automation_issue_watch()
+    });
+    let dashboard_entity = window.root(cx).expect("dashboard root");
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let initial = dashboard_entity.read_with(&visual, |dashboard, _| {
+        (
+            dashboard.selected_issue.clone(),
+            dashboard.watch_flow.state().clone(),
+        )
+    });
+    let (issue_id, initial_state) = initial;
+    assert!(matches!(
+        initial_state,
+        WatchState::Ready {
+            watching: false,
+            ..
+        }
+    ));
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| dashboard.workspace.is_none()));
+
+    let watch = visual
+        .debug_bounds("issue-watch-button")
+        .expect("Watch action should be available in the local fixture");
+    visual.simulate_click(
+        gpui_kit::point(
+            watch.origin.x + watch.size.width / 2.,
+            watch.origin.y + watch.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let confirmation = visual
+        .debug_bounds("issue-watch-confirmation")
+        .expect("confirming Watch should open the scoped confirmation surface");
+    let detail = visual
+        .debug_bounds("issue-detail")
+        .expect("the selected issue detail should remain visible during confirmation");
+    let confirm = visual
+        .debug_bounds("issue-watch-confirm")
+        .expect("confirmation should offer a disabled Confirm action in the fixture");
+    let cancel = visual
+        .debug_bounds("issue-watch-cancel")
+        .expect("confirmation should offer Cancel");
+    for (name, bounds) in [
+        ("confirmation", confirmation),
+        ("Confirm", confirm),
+        ("Cancel", cancel),
+    ] {
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(
+            bounds.origin.x >= px(0.)
+                && bounds.origin.y >= px(0.)
+                && bounds.origin.x + bounds.size.width <= px(1_200.) + px(1.)
+                && bounds.origin.y + bounds.size.height <= px(900.) + px(1.),
+            "{name} should stay inside the local fixture window: {bounds:?}"
+        );
+    }
+    assert!(
+        confirmation.origin.x >= detail.origin.x
+            && confirmation.origin.y >= detail.origin.y
+            && confirmation.origin.x + confirmation.size.width
+                <= detail.origin.x + detail.size.width + px(1.)
+            && confirmation.origin.y + confirmation.size.height
+                <= detail.origin.y + detail.size.height + px(1.),
+        "confirmation should stay inside the issue detail: detail={detail:?}, confirmation={confirmation:?}"
+    );
+    assert!(
+        confirmation.origin.x <= confirm.origin.x
+            && confirmation.origin.y <= confirm.origin.y
+            && confirm.origin.x + confirm.size.width
+                <= confirmation.origin.x + confirmation.size.width + px(1.)
+            && confirm.origin.y + confirm.size.height
+                <= confirmation.origin.y + confirmation.size.height + px(1.)
+    );
+    assert!(
+        confirmation.origin.x <= cancel.origin.x
+            && confirmation.origin.y <= cancel.origin.y
+            && cancel.origin.x + cancel.size.width
+                <= confirmation.origin.x + confirmation.size.width + px(1.)
+            && cancel.origin.y + cancel.size.height
+                <= confirmation.origin.y + confirmation.size.height + px(1.)
+    );
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| matches!(
+        dashboard.watch_flow.state(),
+        WatchState::Confirming {
+            issue_id: confirming_id,
+            target_watching: true,
+            ..
+        } if Some(confirming_id) == issue_id.as_ref()
+    )));
+
+    // The fixture has no workspace, so Confirm is disabled and must not create a write task.
+    visual.simulate_click(
+        gpui_kit::point(
+            confirm.origin.x + confirm.size.width / 2.,
+            confirm.origin.y + confirm.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| {
+        dashboard.workspace.is_none()
+            && dashboard.watch_write_task.is_none()
+            && matches!(
+                dashboard.watch_flow.state(),
+                WatchState::Confirming {
+                    issue_id: confirming_id,
+                    target_watching: true,
+                    ..
+                } if Some(confirming_id) == issue_id.as_ref()
+            )
+    }));
+
+    visual.simulate_click(
+        gpui_kit::point(
+            cancel.origin.x + cancel.size.width / 2.,
+            cancel.origin.y + cancel.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    assert!(dashboard_entity.read_with(&visual, |dashboard, _| matches!(
+        dashboard.watch_flow.state(),
+        WatchState::Ready {
+            issue_id: ready_id,
+            watching: false,
+            ..
+        } if Some(ready_id) == issue_id.as_ref()
+    )));
+    assert!(
+        dashboard_entity.read_with(&visual, |dashboard, _| dashboard.watch_write_task.is_none())
+    );
+    assert!(visual.debug_bounds("issue-watch-feedback").is_none());
+}
+
+#[gpui_kit::test]
 fn update_card_keeps_issue_key_visible_at_compact_desktop_width(cx: &mut gpui_kit::TestAppContext) {
     cx.update(gpui_kit::component::init);
 
@@ -2788,7 +3543,6 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui_kit::T
         "updates-description",
         "update-list",
         "update-card-0",
-        "update-row-0-0",
         "update-actions-0",
     ] {
         let bounds = visual
@@ -2813,12 +3567,68 @@ fn updates_mobile_header_and_card_fit_the_supported_minimum(cx: &mut gpui_kit::T
     let description = visual
         .debug_bounds("updates-description")
         .expect("updates description should be laid out");
+    let card = visual
+        .debug_bounds("update-card-0")
+        .expect("collapsed update card should be laid out");
+    let actions = visual
+        .debug_bounds("update-actions-0")
+        .expect("collapsed update actions should be laid out");
+    let expand = visual
+        .debug_bounds("update-group-expand-0")
+        .expect("collapsed activity group should expose its expand control");
+    assert!(
+        visual.debug_bounds("update-row-0-0").is_none(),
+        "event rows should be collapsed until the group is expanded"
+    );
     assert!(filters.origin.y > header.origin.y);
     assert!(description.origin.y > filters.origin.y);
     assert!(
         description.origin.y + description.size.height
             <= header.origin.y + header.size.height + px(1.),
         "updates description collides with or escapes its header: header={header:?}, description={description:?}"
+    );
+
+    assert!(
+        expand.origin.x >= actions.origin.x
+            && expand.origin.y >= actions.origin.y
+            && expand.origin.x + expand.size.width
+                <= actions.origin.x + actions.size.width + px(1.)
+            && expand.origin.y + expand.size.height
+                <= actions.origin.y + actions.size.height + px(1.),
+        "expand control escapes its action row: actions={actions:?}, expand={expand:?}"
+    );
+    // Expand through the visible control so the event geometry below covers
+    // the actual mobile interaction path after actions move beneath the summary.
+    visual.simulate_click(
+        gpui_kit::point(
+            expand.origin.x + expand.size.width / 2.,
+            expand.origin.y + expand.size.height / 2.,
+        ),
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    let event = visual
+        .debug_bounds("update-row-0-0")
+        .expect("expanded activity event should be laid out");
+    let expanded_card = visual
+        .debug_bounds("update-card-0")
+        .expect("expanded update card should be laid out");
+    assert!(
+        event.size.width > px(0.)
+            && event.size.height > px(0.)
+            && event.origin.x >= expanded_card.origin.x
+            && event.origin.y >= expanded_card.origin.y
+            && event.origin.x + event.size.width
+                <= expanded_card.origin.x + expanded_card.size.width + px(1.)
+            && event.origin.y + event.size.height
+                <= expanded_card.origin.y + expanded_card.size.height + px(1.),
+        "expanded mobile activity event escapes its card: card={expanded_card:?}, event={event:?}"
+    );
+    assert!(
+        actions.origin.x >= card.origin.x,
+        "group actions should remain within the collapsed card: card={card:?}, actions={actions:?}"
     );
 }
 
@@ -2828,7 +3638,7 @@ fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui_kit::Tes
 
     let mut dashboard = Dashboard::from_sample_data();
     dashboard.section = Section::Updates;
-    let window = cx.open_window(gpui_kit::size(px(960.), px(700.)), |_, _| dashboard);
+    let window = cx.open_window(gpui_kit::size(px(1370.), px(700.)), |_, _| dashboard);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2842,18 +3652,43 @@ fn updates_desktop_header_rows_stay_separated_and_bounded(cx: &mut gpui_kit::Tes
     let filters = visual
         .debug_bounds("updates-filters")
         .expect("updates filters should be laid out");
-    let description = visual
-        .debug_bounds("updates-description")
-        .expect("updates description should be laid out");
+    assert!(
+        visual.debug_bounds("updates-description").is_none(),
+        "the ticket and unread summary is reserved for the mobile header"
+    );
 
-    assert!(heading.origin.y >= header.origin.y);
-    assert!(filters.origin.y > heading.origin.y);
-    assert!(description.origin.y > filters.origin.y);
-    for (name, bounds) in [
-        ("heading", heading),
-        ("filters", filters),
-        ("description", description),
+    let heading_center = heading.origin.y + heading.size.height / 2.;
+    let filters_center = filters.origin.y + filters.size.height / 2.;
+    assert!(
+        (f32::from(heading_center) - f32::from(filters_center)).abs() <= 1.,
+        "desktop heading and toolbar should align vertically: heading={heading:?}, filters={filters:?}"
+    );
+    for selector in [
+        "inbox-search",
+        "inbox-status-filter",
+        "inbox-refresh",
+        "mark-all-read",
     ] {
+        let bounds = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("desktop toolbar control should be laid out: {selector}"));
+        assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+        assert!(
+            bounds.origin.x >= filters.origin.x
+                && bounds.origin.x + bounds.size.width
+                    <= filters.origin.x + filters.size.width + px(1.)
+                && bounds.origin.y >= filters.origin.y
+                && bounds.origin.y + bounds.size.height
+                    <= filters.origin.y + filters.size.height + px(1.),
+            "toolbar control escapes filters row: row={filters:?}, selector={selector}, bounds={bounds:?}"
+        );
+        let control_center = bounds.origin.y + bounds.size.height / 2.;
+        assert!(
+            (f32::from(control_center) - f32::from(filters_center)).abs() <= 2.,
+            "desktop toolbar control should remain on the single row: row={filters:?}, selector={selector}, bounds={bounds:?}"
+        );
+    }
+    for (name, bounds) in [("heading", heading), ("filters", filters)] {
         assert!(
             bounds.origin.x >= header.origin.x
                 && bounds.origin.x + bounds.size.width

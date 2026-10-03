@@ -1,5 +1,5 @@
-//! Jira Cloud HTTP transport for remote reads and explicitly confirmed comment, assignment, and
-//! workflow-status writes. Writes are dispatched once without automatic retries.
+//! Jira Cloud HTTP transport for remote reads and explicitly confirmed comment, assignment,
+//! workflow-status, and watcher writes. Writes are dispatched once without automatic retries.
 //!
 //! The adapter owns a small Tokio runtime on a worker thread. This is intentional: GPUI and a
 //! future Tauri shell can poll the application ports without having to install or drive a Tokio
@@ -18,10 +18,11 @@ use jira_application::{
     DEFAULT_MAX_ATTACHMENT_DOWNLOAD_BYTES, DEFAULT_MAX_ATTACHMENT_IMAGE_BYTES, ErrorKind,
     IssueChangelog, IssueChangelogRequest, IssueCommentsPage, IssueCommentsPageRequest,
     IssueDetailRequest, IssueFetchRequest, IssueLocator, IssuePage, IssueTransition,
-    IssueTransitionsRequest, JiraAttachmentReadPort, JiraCommentWritePort, JiraIssueActivityPort,
-    JiraIssueDetailReadPort, JiraIssueEditPort, JiraIssueSearchPort, JiraReadPort,
-    JiraSyncReadPort, JiraUserReadPort, MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture,
-    RecentIssueCommentsRequest, TransitionIssueRequest, UserSearchRequest,
+    IssueTransitionsRequest, IssueWatchRequest, JiraAttachmentReadPort, JiraCommentWritePort,
+    JiraIssueActivityPort, JiraIssueDetailReadPort, JiraIssueEditPort, JiraIssueSearchPort,
+    JiraIssueWatchPort, JiraReadPort, JiraSyncReadPort, JiraUserReadPort,
+    MAX_ASSIGNABLE_USER_SEARCH_LIMIT, PageCursor, PortFuture, RecentIssueCommentsRequest,
+    SetIssueWatchingRequest, TransitionIssueRequest, UserSearchRequest,
 };
 use jira_domain::{Issue, IssueComment, IssueId, JiraSiteId, User};
 use reqwest::{Client, header};
@@ -571,6 +572,85 @@ impl JiraHttpClient {
             .await
             .map_err(write_transport_error)?;
         read_write_response(response).await
+    }
+
+    async fn fetch_issue_watch_state_request(
+        client: Client,
+        url: Url,
+        credentials: ApiTokenCredentials,
+        max_response_bytes: usize,
+    ) -> Result<bool, ApplicationError> {
+        let response = client
+            .get(url)
+            .basic_auth(credentials.email, Some(credentials.token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = read_response::read_body(response, max_response_bytes).await?;
+        jira_adapter::decode_issue_watch_state(&body).map_err(|_| {
+            ApplicationError::new(
+                ErrorKind::Upstream,
+                "Jira returned invalid issue watch data",
+            )
+        })
+    }
+
+    async fn set_issue_watching_request(
+        client: Client,
+        url: Url,
+        current_user_url: Url,
+        credentials: ApiTokenCredentials,
+        site_id: JiraSiteId,
+        max_response_bytes: usize,
+        watching: bool,
+    ) -> Result<(), ApplicationError> {
+        let request = if watching {
+            Self::watch_issue_request_builder(&client, url, &credentials)
+        } else {
+            // Jira requires accountId for DELETE. Resolve it from the same
+            // authenticated credentials immediately before the one write;
+            // the application port remains self-only.
+            let current_user = Self::current_user_request(
+                client.clone(),
+                current_user_url,
+                credentials.clone(),
+                site_id,
+                max_response_bytes,
+            )
+            .await?;
+            let account_id = current_user.account_id.as_str();
+            Self::unwatch_issue_request_builder(
+                &client,
+                unwatch_issue_url(url, account_id)?,
+                &credentials,
+            )
+        };
+        let response = request.send().await.map_err(write_transport_error)?;
+        read_write_response(response).await
+    }
+
+    fn watch_issue_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+    ) -> reqwest::RequestBuilder {
+        // Omitting the account ID tells Jira to add the authenticated caller.
+        client
+            .post(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "application/json")
+    }
+
+    fn unwatch_issue_request_builder(
+        client: &Client,
+        url: Url,
+        credentials: &ApiTokenCredentials,
+    ) -> reqwest::RequestBuilder {
+        client
+            .delete(url)
+            .basic_auth(&credentials.email, Some(&credentials.token))
+            .header(header::ACCEPT, "application/json")
     }
 
     fn transition_issue_request_builder(
@@ -1376,6 +1456,75 @@ impl JiraIssueEditPort for JiraHttpClient {
     }
 }
 
+impl JiraIssueWatchPort for JiraHttpClient {
+    fn fetch_issue_watch_state<'a>(
+        &'a self,
+        request: &'a IssueWatchRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, bool> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_issue_locator(&request.locator) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.locator, Some("watchers")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let max = self.config.max_response_bytes;
+        self.submit(cancellation, async move {
+            Self::fetch_issue_watch_state_request(client, url, credentials, max).await
+        })
+    }
+
+    fn set_issue_watching<'a>(
+        &'a self,
+        request: &'a SetIssueWatchingRequest,
+        cancellation: &'a CancellationToken,
+    ) -> PortFuture<'a, ()> {
+        if let Err(error) = cancellation.check() {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = self.validate_site(&request.site_id) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        if let Err(error) = validate_issue_locator(&request.locator) {
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        let url = match self.issue_endpoint(&request.locator, Some("watchers")) {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let client = self.client.clone();
+        let credentials = self.credentials.clone();
+        let current_user_url = match self.endpoint("rest/api/3/myself") {
+            Ok(url) => url,
+            Err(error) => return Box::pin(std::future::ready(Err(error))),
+        };
+        let site_id = self.site_id.clone();
+        let max_response_bytes = self.config.max_response_bytes;
+        let watching = request.watching;
+        self.submit_write(cancellation, async move {
+            Self::set_issue_watching_request(
+                client,
+                url,
+                current_user_url,
+                credentials,
+                site_id,
+                max_response_bytes,
+                watching,
+            )
+            .await
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
     #[error("Jira base URL must be a valid HTTPS Atlassian Cloud URL")]
@@ -1536,6 +1685,20 @@ fn append_issue_locator_query(
         }
     }
     Ok(())
+}
+
+fn unwatch_issue_url(mut url: Url, account_id: &str) -> Result<Url, ApplicationError> {
+    if account_id.trim().is_empty()
+        || account_id.len() > 128
+        || account_id.chars().any(char::is_control)
+    {
+        return Err(ApplicationError::new(
+            ErrorKind::Upstream,
+            "Jira returned an invalid authenticated account ID",
+        ));
+    }
+    url.query_pairs_mut().append_pair("accountId", account_id);
+    Ok(url)
 }
 
 fn map_transition_response(body: &[u8]) -> Result<Vec<IssueTransition>, ApplicationError> {

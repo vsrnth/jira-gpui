@@ -1,25 +1,62 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use super::virtual_rows::{
     RowMeasureKey, cached_height, measured_row, retain_identities, revision_hash,
 };
 use super::*;
 use gpui_kit::component::Selectable as _;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 
 fn update_group_height(group: &UpdateGroupViewModel, layout: LayoutMode, expanded: bool) -> f32 {
     let rows = compact_update_rows(&group.events);
     let visible = visible_update_row_count(rows.len(), expanded);
     // Event text is line-clamped on mobile and single-line on desktop. The
     // extra allowance covers the action row and card padding without clipping.
-    if layout.is_mobile() {
-        180. + visible as f32 * 40.
+    if !expanded {
+        if layout.is_mobile() { 84. } else { 62. }
+    } else if layout.is_mobile() {
+        100. + visible as f32 * 40.
     } else {
-        116. + visible as f32 * 22.
+        72. + visible as f32 * 22.
     }
 }
 
 pub(super) fn update_filter_is_selected(current: UpdateFilter, option: UpdateFilter) -> bool {
     current == option
+}
+
+pub(super) fn visible_inbox_groups(dashboard: &Dashboard) -> Vec<usize> {
+    let query = dashboard.inbox_query.trim().to_lowercase();
+    let issues_by_id = dashboard
+        .domain_issues
+        .iter()
+        .chain(dashboard.team_issues.iter())
+        .chain(dashboard.selected_issue_core.iter())
+        .fold(HashMap::new(), |mut issues, issue| {
+            issues.entry(issue.id.clone()).or_insert(issue);
+            issues
+        });
+    filtered_update_group_indices(&dashboard.update_groups, dashboard.update_filter)
+        .into_iter()
+        .filter(|index| {
+            let group = &dashboard.update_groups[*index];
+            let issue = issues_by_id.get(&group.issue_id).copied();
+            let matches_query = query.is_empty()
+                || group.issue_key.to_lowercase().contains(&query)
+                || group.issue_summary.to_lowercase().contains(&query)
+                || group
+                    .events
+                    .iter()
+                    .any(|event| event.change.to_lowercase().contains(&query));
+            let matches_status = dashboard.inbox_status_filter == IssueStatusFilter::All
+                || issue.is_some_and(|issue| {
+                    dashboard
+                        .inbox_status_filter
+                        .matches(issue.status.category.as_deref().unwrap_or_default())
+                });
+            matches_query && matches_status
+        })
+        .collect()
 }
 
 fn should_show_row_timestamp(
@@ -31,6 +68,41 @@ fn should_show_row_timestamp(
 }
 
 impl Dashboard {
+    fn inbox_status_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selection = self.inbox_status_filter;
+        let dashboard = cx.entity().downgrade();
+        Button::new("inbox-status-trigger")
+            .compact()
+            .secondary()
+            .outline()
+            .accessibility_id("inbox-status-trigger")
+            .label(selection.label())
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                [
+                    ("All statuses", IssueStatusFilter::All),
+                    ("To do", IssueStatusFilter::ToDo),
+                    ("In progress", IssueStatusFilter::InProgress),
+                    ("Done", IssueStatusFilter::Done),
+                    ("Uncategorized", IssueStatusFilter::Uncategorized),
+                ]
+                .into_iter()
+                .fold(menu, |menu, (label, filter)| {
+                    let dashboard = dashboard.clone();
+                    menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        if let Some(dashboard) = dashboard.upgrade() {
+                            dashboard.update(cx, |this, cx| {
+                                this.inbox_status_filter = filter;
+                                this.clear_hidden_update_selection();
+                                this.reset_update_list_scroll();
+                                cx.notify();
+                            });
+                        }
+                    }))
+                })
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_updates(
         &self,
         layout: LayoutMode,
@@ -38,7 +110,7 @@ impl Dashboard {
     ) -> impl IntoElement {
         let mobile = layout.is_mobile();
         let unread = self.unread_count();
-        let visible_groups = filtered_update_group_indices(&self.update_groups, self.update_filter);
+        let visible_groups = visible_inbox_groups(self);
         let no_visible_groups = visible_groups.is_empty();
         let retained_update_ids = visible_groups
             .iter()
@@ -49,7 +121,7 @@ impl Dashboard {
             .size_full()
             .min_w_0()
             .child(
-                v_flex()
+                h_flex()
                     .id("updates-header")
                     .debug_selector(|| "updates-header".to_owned())
                     .when(mobile, |this| this.px_3())
@@ -60,42 +132,35 @@ impl Dashboard {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .gap_1()
+                    .when(mobile, |this| this.flex_col().items_stretch())
                     .child(
-                        h_flex()
-                            .min_w_0()
-                            .justify_between()
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .id("updates-heading")
-                                            .debug_selector(|| "updates-heading".to_owned())
-                                            .text_sm()
-                                            .font_semibold()
-                                            .child("Change ledger"),
-                                    )
-                            )
-                            .child(
-                                Button::new("mark-all-read")
-                                    .compact()
-                                    .ghost()
-                                    .disabled(unread == 0 || self.operation_in_progress)
-                                    .label("Mark all read")
-                                    .on_click(cx.listener(|this, _, _, cx| this.mark_all_read(cx))),
+                        h_flex().min_w_0().justify_between().child(
+                            h_flex().min_w_0().gap_2().child(
+                                div()
+                                    .id("updates-heading")
+                                    .accessibility_id("inbox-heading")
+                                    .debug_selector(|| "updates-heading".to_owned())
+                                    .role(gpui_kit::accesskit::Role::Heading)
+                                    .aria_label("Activity")
+                                    .text_lg()
+                                    .font_semibold()
+                                    .child("Activity"),
                             ),
+                        ),
                     )
                     .child(
                         h_flex()
                             .id("updates-filters")
                             .debug_selector(|| "updates-filters".to_owned())
                             .min_w_0()
-                            .w_full()
-                            .gap_1()
+                            .flex_1()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
                             .child(
                                 Button::new("updates-filter-unread")
                                     .compact()
+                                    .accessibility_id("updates-filter-unread")
                                     .selected(update_filter_is_selected(
                                         self.update_filter,
                                         UpdateFilter::Unread,
@@ -105,9 +170,12 @@ impl Dashboard {
                                         UpdateFilter::Unread,
                                     ))
                                     .when(self.update_filter == UpdateFilter::Unread, |this| {
-                                        this.primary()
+                                        this.bg(cx.theme().blue.opacity(0.14))
+                                            .text_color(cx.theme().blue)
+                                            .border_1()
+                                            .border_color(cx.theme().blue)
                                     })
-                                    .label(format!("Unread · {unread}"))
+                                    .label(format!("Unread events · {unread}"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.set_update_filter(UpdateFilter::Unread, cx)
                                     })),
@@ -115,6 +183,7 @@ impl Dashboard {
                             .child(
                                 Button::new("updates-filter-all")
                                     .compact()
+                                    .accessibility_id("updates-filter-all")
                                     .selected(update_filter_is_selected(
                                         self.update_filter,
                                         UpdateFilter::All,
@@ -124,40 +193,162 @@ impl Dashboard {
                                         UpdateFilter::All,
                                     ))
                                     .when(self.update_filter == UpdateFilter::All, |this| {
-                                        this.primary()
+                                        this.bg(cx.theme().blue.opacity(0.14))
+                                            .text_color(cx.theme().blue)
+                                            .border_1()
+                                            .border_color(cx.theme().blue)
                                     })
                                     .label(format!("All · {}", self.update_groups.len()))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.set_update_filter(UpdateFilter::All, cx)
                                     })),
+                            )
+                            .when_some(self.inbox_search_input.clone(), |this, input| {
+                                this.child(
+                                    div()
+                                        .id("inbox-search-wrap")
+                                        .debug_selector(|| "inbox-search".to_owned())
+                                        .min_w_0()
+                                        .when(!mobile, |this| this.flex_1())
+                                        .when(mobile, |this| this.w_full())
+                                        .child(
+                                            Input::new(&input)
+                                                .cleanable(true)
+                                                .prefix(Icon::new(IconName::Search))
+                                                .accessibility_id("inbox-search")
+                                                .aria_label("Search issues, keys, or activity")
+                                                .min_w_0()
+                                                .w_full(),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("inbox-status-filter")
+                                    .debug_selector(|| "inbox-status-filter".to_owned())
+                                    .accessibility_id("inbox-status-filter")
+                                    .min_w_0()
+                                    .w(gpui_kit::rems(9.))
+                                    .child(
+                                        div()
+                                            .id("inbox-status-trigger-wrap")
+                                            .debug_selector(|| "inbox-status-trigger".to_owned())
+                                            .child(self.inbox_status_dropdown(cx)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("inbox-refresh-wrap")
+                                    .debug_selector(|| "inbox-refresh".to_owned())
+                                    .child(
+                                        Button::new("inbox-refresh")
+                                            .compact()
+                                            .ghost()
+                                            .icon(IconName::RefreshCw)
+                                            .accessibility_label("Refresh Jira")
+                                            .tooltip("Refresh Jira")
+                                            .disabled(self.operation_in_progress)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.begin_refresh(window, cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("mark-all-read-wrap")
+                                    .debug_selector(|| "mark-all-read".to_owned())
+                                    .child(
+                                        Button::new("mark-all-read")
+                                            .compact()
+                                            .ghost()
+                                            .disabled(unread == 0 || self.operation_in_progress)
+                                            .label("Mark all read")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.mark_all_read(cx)
+                                                }),
+                                            ),
+                                    ),
                             ),
                     )
-                    .child(
-                        h_flex().min_w_0().child(
-                            div()
-                                .id("updates-description")
-                                .debug_selector(|| "updates-description".to_owned())
-                                .min_w_0()
-                                .flex_1()
-                                .truncate()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Operational change ledger · local Jira activity"),
-                        ),
-                    ),
+                    .when(mobile, |this| {
+                        this.child(
+                            h_flex().min_w_0().child(
+                                div()
+                                    .id("updates-description")
+                                    .debug_selector(|| "updates-description".to_owned())
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} tickets · {} unread events",
+                                        visible_groups.len(),
+                                        unread
+                                    )),
+                            ),
+                        )
+                    }),
             )
             .child(
                 h_flex()
+                    .id("updates-workspace")
+                    .debug_selector(|| "updates-workspace".to_owned())
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .min_w_0()
+                    .when(
+                        layout.is_mobile() && self.mobile_update_detail_open,
+                        |this| this.child(self.update_reading_pane(layout, cx)),
+                    )
+                    .when(
+                        layout.is_mobile() && !self.mobile_update_detail_open,
+                        |this| {
+                            this.child(self.update_list(
+                                layout,
+                                no_visible_groups,
+                                visible_groups.clone(),
+                                cx,
+                            ))
+                        },
+                    )
+                    .when(!layout.is_mobile(), |this| {
+                        this.child(self.update_list(
+                            layout,
+                            no_visible_groups,
+                            visible_groups.clone(),
+                            cx,
+                        ))
+                        .child(self.update_reading_pane(layout, cx))
+                    }),
+            )
+    }
+
+    fn update_list(
+        &self,
+        layout: LayoutMode,
+        no_visible_groups: bool,
+        visible_groups: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let no_filter_matches = !self.inbox_query.trim().is_empty()
+            || self.inbox_status_filter != IssueStatusFilter::All;
+        h_flex()
                     .id("update-list")
                     .debug_selector(|| "update-list".to_owned())
                     .accessibility_id("update-list")
                     .role(gpui_kit::accesskit::Role::Group)
                     .aria_label("Local Jira activity")
                     .flex_1()
+                    .when(!layout.is_mobile(), |this| this.flex_grow(1.5))
                     .overflow_x_hidden()
                     .vertical_scrollbar(&self.updates_scroll_handle)
+                    .h_full()
                     .min_h_0()
-                    .w_full()
+                    .min_w_0()
+                    .when(layout.is_mobile(), |this| this.w_full())
                     .justify_start()
                     .items_start()
                     .child(
@@ -252,7 +443,9 @@ impl Dashboard {
                                             }
                                         })
                                         .role(gpui_kit::accesskit::Role::Status)
-                                        .aria_label(if self.update_filter == UpdateFilter::Unread {
+                                        .aria_label(if no_filter_matches {
+                                            "No matching local activity. Change the search or status filter."
+                                        } else if self.update_filter == UpdateFilter::Unread {
                                             "You are all caught up. New local updates will appear after refresh."
                                         } else {
                                             "No local updates yet. Refresh to check Jira activity."
@@ -260,7 +453,9 @@ impl Dashboard {
                                         .child(gpui_kit::component::empty::Empty::new().header(
                                             gpui_kit::component::empty::EmptyHeader::new()
                                                 .title(gpui_kit::component::empty::EmptyTitle::new().child(
-                                                    if self.update_filter == UpdateFilter::Unread {
+                                                    if no_filter_matches {
+                                                        "No matching activity"
+                                                    } else if self.update_filter == UpdateFilter::Unread {
                                                         "You are all caught up"
                                                     } else {
                                                         "No local updates yet"
@@ -268,7 +463,9 @@ impl Dashboard {
                                                 ))
                                                 .description(
                                                     gpui_kit::component::empty::EmptyDescription::new()
-                                                        .child(if self.update_filter == UpdateFilter::Unread {
+                                                        .child(if no_filter_matches {
+                                                            "Change the search or status filter to see activity."
+                                                        } else if self.update_filter == UpdateFilter::Unread {
                                                             "New local updates will appear after refresh."
                                                         } else {
                                                             "Refresh to check Jira activity."
@@ -277,8 +474,212 @@ impl Dashboard {
                                         )),
                                 )
                             }),
+                    )
+            .into_any_element()
+    }
+
+    fn update_reading_pane(&self, layout: LayoutMode, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.selected_update_issue.as_ref().and_then(|issue_id| {
+            visible_inbox_groups(self)
+                .into_iter()
+                .map(|index| &self.update_groups[index])
+                .find(|group| &group.issue_id == issue_id)
+        });
+        let Some(group) = selected else {
+            return v_flex()
+                .id("update-reading-pane-empty")
+                .accessibility_id("update-reading-pane-empty")
+                .role(gpui_kit::accesskit::Role::Status)
+                .aria_label("Select a ticket to read its local updates")
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .justify_center()
+                .p(gpui_kit::rems(layout.detail_padding() / 16.))
+                .when(layout.is_mobile(), |this| {
+                    this.child(
+                        Button::new("updates-reading-back")
+                            .compact()
+                            .ghost()
+                            .debug_selector(|| "updates-reading-back".to_owned())
+                            .h_11()
+                            .label("Back to tickets")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.close_mobile_update_detail(cx)),
+                            ),
+                    )
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Select a ticket to read its updates"),
+                )
+                .into_any_element();
+        };
+        let issue = self
+            .domain_issues
+            .iter()
+            .chain(self.team_issues.iter())
+            .find(|issue| issue.id == group.issue_id)
+            .or_else(|| {
+                self.selected_issue_core
+                    .as_ref()
+                    .filter(|issue| issue.id == group.issue_id)
+            })
+            .cloned();
+        let has_cached_issue_detail = issue.as_ref().is_some_and(issue_has_cached_detail);
+        let issue_view = issue.as_ref().and_then(|issue| {
+            issue_views_for_filter_with_offset(
+                std::slice::from_ref(issue),
+                &self.users,
+                IssueStatusFilter::All,
+                "",
+                self.timestamp_offset,
+            )
+            .into_iter()
+            .next()
+        });
+        let cached_detail = issue
+            .as_ref()
+            .filter(|issue| issue_has_cached_detail(issue))
+            .map(detail_view_from_issue);
+        let mobile = layout.is_mobile();
+        let issue_id = group.issue_id.clone();
+        let body = v_flex()
+            .id("update-reading-body")
+            .debug_selector(|| "update-reading-body".to_owned())
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .min_w_0()
+            .overflow_x_hidden()
+            .gap_3()
+            .when_some(issue_view.as_ref(), |this, view| {
+                this.child(self.render_issue_overview(
+                    view,
+                    cached_detail.as_ref(),
+                    layout,
+                    true,
+                    cx,
+                ))
+            })
+            .when(issue_view.is_none(), |this| {
+                this.child(
+                    div()
+                        .id("update-reading-issue-unavailable")
+                        .accessibility_id("update-reading-issue-unavailable")
+                        .role(gpui_kit::accesskit::Role::Status)
+                        .aria_label(format!("Issue details unavailable for {}", group.issue_key))
+                        .px(gpui_kit::rems(layout.detail_padding() / 16.))
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{} · {}", group.issue_key, group.issue_summary)),
+                )
+            })
+            .when(!has_cached_issue_detail, |this| {
+                this.child(
+                    div()
+                        .id("update-issue-unavailable")
+                        .accessibility_id("update-issue-unavailable")
+                        .debug_selector(|| "update-issue-unavailable".to_owned())
+                        .role(gpui_kit::accesskit::Role::Status)
+                        .aria_label("Cached issue details are unavailable")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Cached issue details are unavailable. The activity below is what was synced."),
+                )
+            })
+            .child(
+                v_flex()
+                    .id("update-reading-activity")
+                    .accessibility_id("update-reading-activity")
+                    .debug_selector(|| "update-reading-activity".to_owned())
+                    .role(gpui_kit::accesskit::Role::Group)
+                    .aria_label(format!("Local activity for {}", group.issue_key))
+                    .min_w_0()
+                    .gap_2()
+                    .px(gpui_kit::rems(layout.detail_padding() / 16.))
+                    .child(div().text_sm().font_semibold().child("Activity"))
+                    .children(group.events.iter().enumerate().map(|(index, event)| {
+                        v_flex()
+                            .id(("update-reading-activity-event", index))
+                            .accessibility_id(format!("update-reading-activity-event-{index}"))
+                            .min_w_0()
+                            .gap_1()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .child(div().text_sm().child(event.change.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(event.occurred_at.clone()),
+                            )
+                    }))
+                    .when(group.events.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("update-reading-activity-empty")
+                                .role(gpui_kit::accesskit::Role::Status)
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No local activity recorded."),
+                        )
+                    }),
+            )
+            .into_any_element();
+        v_flex()
+            .id("update-reading-pane")
+            .debug_selector(|| "update-reading-pane".to_owned())
+            .accessibility_id("update-reading-pane")
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label(format!("{} local updates", group.issue_key))
+            .flex_1()
+            .when(!mobile, |this| this.flex_grow(1.))
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_x_hidden()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .when(mobile, |this| {
+                this.child(
+                    Button::new("updates-reading-back")
+                        .compact()
+                        .ghost()
+                        .debug_selector(|| "updates-reading-back".to_owned())
+                        .h_11()
+                        .label("Back to tickets")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.close_mobile_update_detail(cx)),
+                        ),
+                )
+            })
+            .child(body)
+            .child(
+                h_flex()
+                    .id("update-reading-actions")
+                    .debug_selector(|| "update-reading-actions".to_owned())
+                    .flex_shrink_0()
+                    .w_full()
+                    .p_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Button::new("update-open-full-details")
+                            .compact()
+                            .debug_selector(|| "update-open-full-details".to_owned())
+                            .when(mobile, |this| this.h_11().w_full())
+                            .label("Open full issue details")
+                            .accessibility_id("update-open-full-details")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_update_issue(issue_id.clone(), mobile, cx)
+                            })),
                     ),
             )
+            .into_any_element()
     }
 
     fn update_group_card(
@@ -301,7 +702,6 @@ impl Dashboard {
         let expanded = self.expanded_update_groups.contains(&group.issue_id);
         let rows = compact_update_rows(&group.events);
         let visible_row_count = visible_update_row_count(rows.len(), expanded);
-        let hidden_row_count = hidden_update_row_count(rows.len(), expanded);
         let read_state = if group.unread { "Unread" } else { "Read" };
         let accessible_label = format!(
             "{read_state} update. Open {} ({}): {}",
@@ -309,29 +709,32 @@ impl Dashboard {
         );
         let open_area = div()
             .id(("update-open", index))
+            .debug_selector(move || format!("update-open-{index}"))
             .accessibility_id(format!("update-open-{index}"))
             .role(gpui_kit::accesskit::Role::Button)
             .aria_label(accessible_label.clone())
             .tab_index(0)
             .flex()
-            .flex_1()
             .h_auto()
-            .when(mobile, |this| this.w_full())
             .items_start()
             .min_w_0()
+            .when(!mobile, |this| this.flex_1())
+            .when(mobile, |this| this.flex_none().w_full())
             .gap_3()
             .p_2()
+            .border_1()
+            .border_color(cx.theme().transparent)
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_update_issue(clicked_issue_id.clone(), mobile, cx);
+                this.select_update_group(clicked_issue_id.clone(), mobile, cx);
             }))
             .on_key_down(cx.listener(move |this, event, window, cx| {
                 if is_activation_key(event) {
                     window.prevent_default();
-                    this.open_update_issue(keyboard_issue_id.clone(), mobile, cx);
+                    this.select_update_group(keyboard_issue_id.clone(), mobile, cx);
                 }
             }))
-            .focus(|style| style.border_1().border_color(cx.theme().primary))
+            .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
             .child(
                 div()
                     .id(format!("update-unread-dot-{index}"))
@@ -350,98 +753,89 @@ impl Dashboard {
                     .size_2()
                     .flex_shrink_0()
                     .rounded_full()
-                    .when(group.unread, |this| this.bg(cx.theme().primary))
+                    .when(group.unread, |this| this.bg(cx.theme().blue))
                     .when(!group.unread, |this| this.bg(cx.theme().muted)),
             )
             .child(
-                v_flex()
+                h_flex()
                     .min_w_0()
                     .flex_1()
-                    .gap_1()
+                    .w_full()
+                    .when(mobile, |this| this.flex_col().items_stretch())
+                    .when(!mobile, |this| this.items_center())
+                    .gap_3()
                     .text_base()
                     .text_color(cx.theme().foreground)
                     .child(
                         h_flex()
+                            .id(format!("update-metadata-{index}"))
+                            .debug_selector(move || format!("update-metadata-{index}"))
+                            .accessibility_id(format!("update-metadata-{index}"))
+                            .role(gpui_kit::accesskit::Role::Group)
+                            .aria_label("Update metadata")
                             .min_w_0()
-                            .w_full()
-                            .justify_between()
-                            .when(mobile, |this| {
-                                this.flex_col().w_full().items_start().gap_1()
-                            })
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .when(!mobile, |this| this.flex_1())
-                                    .when(layout.is_mobile(), |this| this.flex_col())
-                                    .gap_2()
-                                    .child(
-                                        h_flex()
-                                            .id(format!("update-metadata-{index}"))
-                                            .debug_selector(move || {
-                                                format!("update-metadata-{index}")
-                                            })
-                                            .accessibility_id(format!("update-metadata-{index}"))
-                                            .role(gpui_kit::accesskit::Role::Group)
-                                            .aria_label("Update metadata")
-                                            .min_w_0()
-                                            .items_start()
-                                            .gap_2()
-                                            .child(
-                                                self.issue_key_label(group.issue_key.clone(), cx),
-                                            )
-                                            .child(self.issue_type_label_with_icon(
-                                                issue_type,
-                                                group.issue_key.clone(),
-                                                cx,
-                                            ))
-                                            .child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_xs()
-                                                    .text_color(if group.unread {
-                                                        cx.theme().primary
-                                                    } else {
-                                                        cx.theme().muted_foreground
-                                                    })
-                                                    .child(read_state),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .when(!mobile, |this| this.flex_1())
-                                            .when(mobile, |this| this.w_full())
-                                            .line_clamp(2)
-                                            .text_sm()
-                                            .when(group.unread, |this| this.font_semibold())
-                                            .when(!group.unread, |this| this.font_normal())
-                                            .child(group.issue_summary.clone()),
-                                    ),
-                            )
+                            .items_center()
+                            .gap_2()
+                            .child(self.issue_key_label(group.issue_key.clone(), cx))
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .when(!mobile, |this| this.flex_shrink_0())
-                                    .when(mobile, |this| this.w_full().truncate())
+                                    .id(format!("update-group-count-{index}"))
+                                    .accessibility_id(format!("update-group-count-{index}"))
+                                    .role(gpui_kit::accesskit::Role::Status)
+                                    .aria_label(format!("{} activity events", group.events.len()))
+                                    .px_2()
+                                    .rounded_full()
+                                    .bg(cx.theme().blue.opacity(0.16))
                                     .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(group.latest_occurred_at.clone()),
+                                    .child(group.events.len().to_string()),
                             ),
                     )
                     .child(
-                        v_flex().gap_1().children(
-                            rows.iter().take(visible_row_count).enumerate().map(
-                                |(row_index, row)| {
-                                    self.update_row_element(
-                                        index, row_index, row, group, mobile, cx,
-                                    )
-                                },
-                            ),
-                        ),
-                    ),
+                        div()
+                            .id(format!("update-title-{index}"))
+                            .debug_selector(move || format!("update-title-{index}"))
+                            .min_w_0()
+                            .flex_1()
+                            .when(!mobile, |this| this.truncate())
+                            .when(mobile, |this| {
+                                this.flex_none().w_full().whitespace_normal().line_clamp(2)
+                            })
+                            .text_base()
+                            .when(group.unread, |this| this.font_semibold())
+                            .when(!group.unread, |this| this.font_normal())
+                            .child(group.issue_summary.clone()),
+                    )
+                    .when_some(
+                        self.domain_issues
+                            .iter()
+                            .find(|issue| issue.id == group.issue_id),
+                        |this, issue| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(cx.theme().radius)
+                                    .bg(cx.theme().muted)
+                                    .text_xs()
+                                    .child(issue.status.name.clone()),
+                            )
+                        },
+                    )
+                    .when(mobile, |this| {
+                        this.child(
+                            div()
+                                .id(format!("update-timestamp-{index}"))
+                                .debug_selector(move || format!("update-timestamp-{index}"))
+                                .min_w_0()
+                                .w_full()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(group.latest_occurred_at.clone()),
+                        )
+                    }),
             )
             .into_any_element();
-        h_flex()
+        v_flex()
             .id(("update-card", index))
             .accessibility_id(format!("update-card-{index}"))
             .role(gpui_kit::accesskit::Role::Group)
@@ -449,58 +843,113 @@ impl Dashboard {
             .debug_selector(move || format!("update-card-{index}"))
             .w_full()
             .min_w_0()
-            .overflow_x_hidden()
-            .items_start()
-            .gap_2()
-            .when(mobile, |this| this.flex_col())
+            .gap_1()
             .py_1()
+            .relative()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(open_area)
+            .when(
+                self.selected_update_issue.as_ref() == Some(&group.issue_id),
+                |this| this.bg(cx.theme().blue.opacity(0.08)),
+            )
             .child(
-                v_flex()
-                    .id(("update-actions", index))
-                    .debug_selector(move || format!("update-actions-{index}"))
-                    .flex_shrink_0()
-                    .when(!mobile, |this| this.items_end())
-                    .when(mobile, |this| this.w_full().flex_wrap().items_start())
+                h_flex()
+                    .id(("update-header-row", index))
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .when(mobile, |this| this.flex_col().items_stretch())
                     .gap_1()
-                    .p_1()
-                    .when(hidden_row_count > 0, |this| {
-                        let issue_id = issue_id.clone();
-                        this.child(
-                            Button::new(("update-expand", index))
-                                .compact()
-                                .ghost()
-                                .label(format!("Show {hidden_row_count} more"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_update_group_expanded(issue_id.clone(), cx);
-                                })),
-                        )
-                    })
-                    .when(expanded && rows.len() > UPDATE_PREVIEW_LIMIT, |this| {
-                        let issue_id = issue_id.clone();
-                        this.child(
-                            Button::new(("update-collapse", index))
-                                .compact()
-                                .ghost()
-                                .label("Show less")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_update_group_expanded(issue_id.clone(), cx);
-                                })),
-                        )
-                    })
-                    .when(group.unread, |this| {
-                        this.child(
-                            Button::new(("update-mark-read", index))
-                                .ghost()
-                                .compact()
-                                .label("Mark read")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.mark_group_read(issue_id.clone(), cx);
-                                })),
-                        )
-                    }),
+                    .child(open_area)
+                    .child(
+                        h_flex()
+                            .id(("update-actions", index))
+                            .debug_selector(move || format!("update-actions-{index}"))
+                            .flex_shrink_0()
+                            .items_center()
+                            .when(mobile, |this| this.w_full().justify_end())
+                            .gap_1()
+                            .when(!expanded, |this| {
+                                let issue_id = issue_id.clone();
+                                this.child(
+                                    Button::new(("update-expand", index))
+                                        .accessibility_id(format!("update-group-expand-{index}"))
+                                        .debug_selector(move || {
+                                            format!("update-group-expand-{index}")
+                                        })
+                                        .compact()
+                                        .ghost()
+                                        .icon(IconName::ChevronDown)
+                                        .accessibility_label("Show activity")
+                                        .tooltip(format!(
+                                            "Show {} activity events",
+                                            group.events.len()
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_update_group_expanded(issue_id.clone(), cx);
+                                        })),
+                                )
+                            })
+                            .when(expanded, |this| {
+                                let issue_id = issue_id.clone();
+                                this.child(
+                                    Button::new(("update-collapse", index))
+                                        .accessibility_id(format!("update-group-expand-{index}"))
+                                        .debug_selector(move || {
+                                            format!("update-group-expand-{index}")
+                                        })
+                                        .compact()
+                                        .ghost()
+                                        .icon(IconName::ChevronUp)
+                                        .accessibility_label("Hide activity")
+                                        .tooltip("Hide activity events")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_update_group_expanded(issue_id.clone(), cx);
+                                        })),
+                                )
+                            })
+                            .when(group.unread, |this| {
+                                this.child(
+                                    Button::new(("update-mark-read", index))
+                                        .accessibility_id(format!("update-mark-read-{index}"))
+                                        .ghost()
+                                        .compact()
+                                        .icon(IconName::Check)
+                                        .accessibility_label("Mark read")
+                                        .tooltip("Mark activity read")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.mark_group_read(issue_id.clone(), cx);
+                                        })),
+                                )
+                            }),
+                    ),
+            )
+            .when(expanded, |this| {
+                this.child(
+                    v_flex()
+                        .id(format!("update-rows-{index}"))
+                        .gap_1()
+                        .px_2()
+                        .children(rows.iter().take(visible_row_count).enumerate().map(
+                            |(row_index, row)| {
+                                self.update_row_element(index, row_index, row, group, mobile, cx)
+                            },
+                        )),
+                )
+            })
+            .when(
+                self.selected_update_issue.as_ref() == Some(&group.issue_id),
+                |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(2.))
+                            .bg(cx.theme().blue),
+                    )
+                },
             )
             .into_any_element()
     }
@@ -524,6 +973,9 @@ impl Dashboard {
             should_show_row_timestamp(group.events.len(), &group.latest_occurred_at, &occurred_at);
         h_flex()
             .id(format!("update-row-{group_index}-{row_index}"))
+            .accessibility_id(format!("update-row-{group_index}-{row_index}"))
+            .role(gpui_kit::accesskit::Role::Group)
+            .aria_label(format!("Activity event: {change}"))
             .debug_selector(move || format!("update-row-{group_index}-{row_index}"))
             .min_w_0()
             .when(mobile, |this| this.w_full().flex_col().items_start())
@@ -552,7 +1004,10 @@ impl Dashboard {
 
 #[cfg(test)]
 mod tests {
+    use super::super::UpdateFilter;
     use super::should_show_row_timestamp;
+    use crate::dashboard::{Dashboard, Section};
+    use gpui_kit::VisualTestContext;
 
     #[test]
     fn row_timestamp_only_omits_singleton_duplicate() {
@@ -570,5 +1025,521 @@ mod tests {
                 "event_count={event_count}, latest={latest}, row={row}"
             );
         }
+    }
+
+    #[test]
+    fn inbox_search_and_status_filters_are_local_and_use_status_categories() {
+        let mut dashboard = Dashboard::from_sample_data();
+        dashboard.section = Section::Updates;
+        dashboard.search_query = "issue-page query stays here".to_owned();
+        dashboard.status_filter = crate::presentation::IssueStatusFilter::Done;
+        dashboard.inbox_query = "DESK-176".to_owned();
+        dashboard.inbox_status_filter = crate::presentation::IssueStatusFilter::InProgress;
+
+        let visible = super::visible_inbox_groups(&dashboard);
+        assert_eq!(visible.len(), 1);
+        let issue_id = dashboard.update_groups[visible[0]].issue_id.clone();
+        let issue = dashboard
+            .domain_issues
+            .iter()
+            .find(|issue| issue.id == issue_id)
+            .expect("cached fixture issue should accompany its activity group");
+        assert_eq!(issue.status.name, "In Review");
+        assert_eq!(issue.status.category.as_deref(), Some("In progress"));
+
+        dashboard.inbox_query = "Status:".to_owned();
+        dashboard.inbox_status_filter = crate::presentation::IssueStatusFilter::All;
+        assert!(super::visible_inbox_groups(&dashboard).iter().any(|index| {
+            dashboard.update_groups[*index]
+                .events
+                .iter()
+                .any(|event| event.change.contains("Status:"))
+        }));
+        assert_eq!(dashboard.search_query, "issue-page query stays here");
+        assert_eq!(
+            dashboard.status_filter,
+            crate::presentation::IssueStatusFilter::Done
+        );
+        assert!(matches!(
+            dashboard.remote_lookup,
+            super::super::RemoteLookupState::Idle
+        ));
+
+        dashboard.selected_update_issue = Some(issue_id);
+        dashboard.inbox_query = "no matching ticket".to_owned();
+        dashboard.clear_hidden_update_selection();
+        assert!(dashboard.selected_update_issue.is_none());
+
+        dashboard.inbox_query.clear();
+        dashboard.inbox_status_filter = crate::presentation::IssueStatusFilter::All;
+        let removed_id = dashboard.update_groups[0].issue_id.clone();
+        dashboard
+            .domain_issues
+            .retain(|issue| issue.id != removed_id);
+        assert!(
+            super::visible_inbox_groups(&dashboard)
+                .iter()
+                .any(|index| dashboard.update_groups[*index].issue_id == removed_id)
+        );
+        dashboard.inbox_status_filter = crate::presentation::IssueStatusFilter::InProgress;
+        assert!(
+            !super::visible_inbox_groups(&dashboard)
+                .iter()
+                .any(|index| dashboard.update_groups[*index].issue_id == removed_id)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn inbox_event_rows_expand_and_collapse_with_the_compact_group_control(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(900.)),
+            |_, _| {
+                let mut dashboard = Dashboard::from_sample_data();
+                dashboard.section = Section::Updates;
+                dashboard
+            },
+        );
+        let dashboard = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(visual.debug_bounds("update-row-0-0").is_none());
+        let issue_id = dashboard.read_with(&visual, |dashboard, _| {
+            dashboard.update_groups[0].issue_id.clone()
+        });
+        visual.update(|_, cx| {
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.toggle_update_group_expanded(issue_id.clone(), cx);
+            });
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("update-row-0-0").is_some());
+
+        visual.update(|_, cx| {
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.toggle_update_group_expanded(issue_id.clone(), cx);
+            });
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("update-row-0-0").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn mobile_ticket_summaries_wrap_inside_the_row_at_narrow_widths(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        for width in [320., 390.] {
+            let window = cx.open_window(
+                gpui_kit::size(gpui_kit::px(width), gpui_kit::px(800.)),
+                |_, _| {
+                    let mut dashboard = Dashboard::from_sample_data();
+                    dashboard.section = Section::Updates;
+                    dashboard.selected_update_issue = None;
+                    dashboard
+                },
+            );
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let row = visual
+                .debug_bounds("update-card-0")
+                .expect("mobile compact ticket row should be visible");
+            let title = visual
+                .debug_bounds("update-title-0")
+                .expect("ticket summary should be visible");
+            let timestamp = visual
+                .debug_bounds("update-timestamp-0")
+                .expect("ticket timestamp should be visible");
+            let actions = visual
+                .debug_bounds("update-actions-0")
+                .expect("mobile ticket actions should be visible");
+            assert!(
+                title.size.width >= gpui_kit::px(200.),
+                "ticket summary should have useful width at {width}px: {title:?}"
+            );
+            assert!(title.size.height > gpui_kit::px(26.));
+            assert!(title.origin.x >= row.origin.x);
+            assert!(
+                title.origin.x + title.size.width
+                    <= row.origin.x + row.size.width + gpui_kit::px(1.),
+                "ticket title should wrap within the row at {width}px: title={title:?}, row={row:?}"
+            );
+            assert!(
+                actions.origin.y >= timestamp.origin.y + timestamp.size.height,
+                "mobile actions should sit below the timestamp at {width}px: actions={actions:?}, timestamp={timestamp:?}"
+            );
+            assert!(
+                actions.origin.x + actions.size.width
+                    <= row.origin.x + row.size.width + gpui_kit::px(1.),
+                "mobile actions should stay inside the row at {width}px: actions={actions:?}, row={row:?}"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn inbox_linked_issue_navigates_to_cached_issue_without_remote_lookup(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(900.)),
+            |_, _| {
+                let mut dashboard = Dashboard::from_sample_data();
+                dashboard.section = Section::Updates;
+                dashboard
+            },
+        );
+        let dashboard = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let linked_key = visual
+            .debug_bounds("issue-detail-linked-key-0")
+            .expect("cached DESK-184 reading pane should expose DESK-179 relationship");
+        visual.simulate_click(
+            gpui_kit::point(
+                linked_key.origin.x + linked_key.size.width / 2.,
+                linked_key.origin.y + linked_key.size.height / 2.,
+            ),
+            Default::default(),
+        );
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let (section, selected_key, lookup_is_idle) =
+            dashboard.read_with(&visual, |dashboard, _| {
+                let selected_key = dashboard.selected_issue.as_ref().and_then(|selected| {
+                    dashboard
+                        .domain_issues
+                        .iter()
+                        .find(|issue| &issue.id == selected)
+                        .map(|issue| issue.key.to_string())
+                });
+                (
+                    dashboard.section,
+                    selected_key,
+                    matches!(
+                        dashboard.remote_lookup,
+                        super::super::RemoteLookupState::Idle
+                    ),
+                )
+            });
+        assert_eq!(section, Section::Issues);
+        assert_eq!(selected_key.as_deref(), Some("DESK-179"));
+        assert!(
+            lookup_is_idle,
+            "cached linked navigation must not start a remote lookup"
+        );
+        assert!(visual.debug_bounds("update-list").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn mobile_update_selection_opens_reading_pane_and_back_returns_to_list(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(390.), gpui_kit::px(800.)),
+            |_, _| {
+                let mut dashboard = Dashboard::from_sample_data();
+                dashboard.section = Section::Updates;
+                dashboard.selected_update_issue = None;
+                dashboard
+            },
+        );
+        let dashboard = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let list = visual
+            .debug_bounds("update-list")
+            .expect("mobile updates list should be laid out");
+        let row = visual
+            .debug_bounds("update-card-0")
+            .expect("mobile ticket row should be laid out");
+        let title = visual
+            .debug_bounds("update-title-0")
+            .expect("mobile ticket title should be laid out");
+        let timestamp = visual
+            .debug_bounds("update-timestamp-0")
+            .expect("mobile ticket timestamp should be laid out");
+        let actions = visual
+            .debug_bounds("update-actions-0")
+            .expect("mobile ticket actions should be laid out");
+        assert!(list.size.width > gpui_kit::px(0.) && list.size.height > gpui_kit::px(0.));
+        assert!(row.size.width > gpui_kit::px(0.) && row.size.height > gpui_kit::px(0.));
+        assert!(title.size.width > gpui_kit::px(0.));
+        assert!(timestamp.origin.y >= title.origin.y + title.size.height);
+        assert!(actions.origin.x >= row.origin.x);
+        assert!(
+            actions.origin.x + actions.size.width
+                <= row.origin.x + row.size.width + gpui_kit::px(1.)
+        );
+        assert!(row.origin.x >= gpui_kit::px(0.));
+        assert!(row.origin.y >= gpui_kit::px(0.));
+        assert!(row.origin.x + row.size.width <= gpui_kit::px(390.) + gpui_kit::px(1.));
+        assert!(row.origin.y + row.size.height <= gpui_kit::px(800.) + gpui_kit::px(1.));
+        assert!(visual.debug_bounds("update-reading-pane").is_none());
+        let issue_id = dashboard.read_with(&visual, |dashboard, _| {
+            dashboard
+                .update_groups
+                .first()
+                .expect("sample update group")
+                .issue_id
+                .clone()
+        });
+        let open = visual
+            .debug_bounds("update-open-0")
+            .expect("first ticket row should expose its activation target");
+        visual.simulate_click(
+            gpui_kit::point(
+                open.origin.x + open.size.width / 2.,
+                open.origin.y + open.size.height / 2.,
+            ),
+            Default::default(),
+        );
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let (section, selected_update_issue, mobile_detail_open) =
+            dashboard.read_with(&visual, |dashboard, _| {
+                (
+                    dashboard.section,
+                    dashboard.selected_update_issue.clone(),
+                    dashboard.mobile_update_detail_open,
+                )
+            });
+        assert_eq!(section, Section::Updates);
+        assert_eq!(selected_update_issue, Some(issue_id));
+        assert!(mobile_detail_open);
+        let workspace = visual
+            .debug_bounds("updates-workspace")
+            .expect("mobile updates workspace should be laid out");
+        let pane = visual
+            .debug_bounds("update-reading-pane")
+            .expect("mobile reading pane should be laid out");
+        assert!(pane.size.width > gpui_kit::px(0.) && pane.size.height > gpui_kit::px(0.));
+        assert!(pane.origin.x >= workspace.origin.x);
+        assert!(pane.origin.y >= workspace.origin.y);
+        assert!(
+            pane.origin.x + pane.size.width
+                <= workspace.origin.x + workspace.size.width + gpui_kit::px(1.)
+        );
+        assert!(
+            pane.origin.y + pane.size.height
+                <= workspace.origin.y + workspace.size.height + gpui_kit::px(1.),
+            "mobile pane escapes workspace: pane={pane:?}, workspace={workspace:?}"
+        );
+        assert!(visual.debug_bounds("update-list").is_none());
+        let back = visual
+            .debug_bounds("updates-reading-back")
+            .expect("mobile reading pane should provide a back action");
+        let full_details = visual
+            .debug_bounds("update-open-full-details")
+            .expect("mobile reading pane should provide full issue details navigation");
+        for (name, bounds) in [("Back", back), ("full details", full_details)] {
+            assert!(
+                bounds.size.height >= gpui_kit::px(44.),
+                "mobile {name} target should be at least 44px high: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.x >= pane.origin.x
+                    && bounds.origin.y >= pane.origin.y
+                    && bounds.origin.x + bounds.size.width
+                        <= pane.origin.x + pane.size.width + gpui_kit::px(1.)
+                    && bounds.origin.y + bounds.size.height
+                        <= pane.origin.y + pane.size.height + gpui_kit::px(1.),
+                "mobile {name} target should remain inside the reading pane: {bounds:?}, pane={pane:?}"
+            );
+        }
+        visual.simulate_click(
+            gpui_kit::point(
+                back.origin.x + back.size.width / 2.,
+                back.origin.y + back.size.height / 2.,
+            ),
+            Default::default(),
+        );
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(visual.debug_bounds("update-list").is_some());
+        assert!(visual.debug_bounds("update-reading-pane").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn desktop_updates_list_rows_and_reading_pane_stay_inside_workspace(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        for viewport_width in [1095., 1280.] {
+            let window = cx.open_window(
+                gpui_kit::size(gpui_kit::px(viewport_width), gpui_kit::px(900.)),
+                |_, _| {
+                    let mut dashboard = Dashboard::from_sample_data();
+                    dashboard.section = Section::Updates;
+                    dashboard
+                },
+            );
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+
+            let workspace = visual
+                .debug_bounds("updates-workspace")
+                .expect("desktop updates workspace should be laid out");
+            let list = visual
+                .debug_bounds("update-list")
+                .expect("desktop updates list should be laid out");
+            let row = visual
+                .debug_bounds("update-card-0")
+                .expect("desktop ticket row should be laid out");
+            let metadata = visual
+                .debug_bounds("update-metadata-0")
+                .expect("desktop ticket metadata should be laid out");
+            let title = visual
+                .debug_bounds("update-title-0")
+                .expect("desktop ticket title should be laid out");
+            let actions = visual
+                .debug_bounds("update-actions-0")
+                .expect("desktop ticket actions should be laid out");
+            let pane = visual
+                .debug_bounds("update-reading-pane")
+                .expect("desktop reading pane should be laid out");
+
+            for (name, bounds) in [("list", list), ("row", row), ("pane", pane)] {
+                assert!(
+                    bounds.size.width > gpui_kit::px(0.) && bounds.size.height > gpui_kit::px(0.),
+                    "desktop {name} should have positive bounds at {viewport_width}px: {bounds:?}"
+                );
+                assert!(
+                    bounds.origin.x >= workspace.origin.x,
+                    "desktop {name} escapes workspace left: {bounds:?}"
+                );
+                assert!(
+                    bounds.origin.y >= workspace.origin.y,
+                    "desktop {name} escapes workspace top: {bounds:?}"
+                );
+                assert!(
+                    bounds.origin.x + bounds.size.width
+                        <= workspace.origin.x + workspace.size.width + gpui_kit::px(1.),
+                    "desktop {name} escapes workspace right: {bounds:?}, workspace={workspace:?}"
+                );
+                assert!(
+                    bounds.origin.y + bounds.size.height
+                        <= workspace.origin.y + workspace.size.height + gpui_kit::px(1.),
+                    "desktop {name} escapes workspace bottom: {bounds:?}, workspace={workspace:?}"
+                );
+            }
+            assert!(metadata.size.width > gpui_kit::px(0.));
+            assert!(title.origin.x >= metadata.origin.x + metadata.size.width);
+            assert!(
+                title.size.width >= gpui_kit::px(80.),
+                "ticket title is too narrow at {viewport_width}px: {title:?}"
+            );
+            assert!(actions.origin.y <= row.origin.y + row.size.height);
+            assert!(row.size.height <= gpui_kit::px(90.));
+            assert!(
+                title.origin.x >= row.origin.x
+                    && title.origin.x + title.size.width
+                        <= row.origin.x + row.size.width + gpui_kit::px(1.)
+            );
+            assert!(row.origin.x >= gpui_kit::px(0.) && row.origin.y >= gpui_kit::px(0.));
+            assert!(
+                row.origin.x + row.size.width <= gpui_kit::px(viewport_width) + gpui_kit::px(1.)
+            );
+            assert!(row.origin.y + row.size.height <= gpui_kit::px(900.) + gpui_kit::px(1.));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn marking_selected_update_read_clears_hidden_unread_selection_but_all_keeps_group(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(390.), gpui_kit::px(800.)),
+            |_, _| {
+                let mut dashboard = Dashboard::from_sample_data();
+                dashboard.section = Section::Updates;
+                dashboard
+            },
+        );
+        let dashboard = window.root(cx).expect("dashboard root");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+
+        let issue_id = dashboard.read_with(&visual, |dashboard, _| {
+            dashboard
+                .update_groups
+                .iter()
+                .find(|group| group.unread)
+                .expect("sample fixture should include an unread ticket")
+                .issue_id
+                .clone()
+        });
+        visual.update(|_, cx| {
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.select_update_group(issue_id.clone(), true, cx);
+                dashboard.set_update_filter(UpdateFilter::Unread, cx);
+                dashboard.mark_group_read(issue_id.clone(), cx);
+            });
+        });
+
+        let (selected, mobile_detail_open, unread_groups, group_is_read) =
+            dashboard.read_with(&visual, |dashboard, _| {
+                let group = dashboard
+                    .update_groups
+                    .iter()
+                    .find(|group| group.issue_id == issue_id)
+                    .expect("read group remains in the local update data");
+                (
+                    dashboard.selected_update_issue.clone(),
+                    dashboard.mobile_update_detail_open,
+                    super::super::filtered_update_group_indices(
+                        &dashboard.update_groups,
+                        dashboard.update_filter,
+                    )
+                    .into_iter()
+                    .map(|index| dashboard.update_groups[index].issue_id.clone())
+                    .collect::<Vec<_>>(),
+                    !group.unread,
+                )
+            });
+        assert_eq!(selected, None);
+        assert!(!mobile_detail_open);
+        assert!(!unread_groups.contains(&issue_id));
+        assert!(group_is_read);
+
+        visual.update(|_, cx| {
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.set_update_filter(UpdateFilter::All, cx);
+            });
+        });
+        let (all_groups, selected, mobile_detail_open) =
+            dashboard.read_with(&visual, |dashboard, _| {
+                (
+                    super::super::filtered_update_group_indices(
+                        &dashboard.update_groups,
+                        dashboard.update_filter,
+                    )
+                    .into_iter()
+                    .map(|index| dashboard.update_groups[index].issue_id.clone())
+                    .collect::<Vec<_>>(),
+                    dashboard.selected_update_issue.clone(),
+                    dashboard.mobile_update_detail_open,
+                )
+            });
+        assert!(all_groups.contains(&issue_id));
+        assert_eq!(selected, None);
+        assert!(!mobile_detail_open);
     }
 }

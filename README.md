@@ -50,11 +50,12 @@ Windows are unsupported.
   diagnostic setup and write failures never prevent startup, and logging is
   best-effort.
 
-Jira writes are limited to three deliberate actions: creating a comment,
-changing an assignee, and applying an available status transition. Each action
-shows the exact issue and target for explicit confirmation, is sent once with
-no automatic retry, and requires a refresh before retrying an uncertain result.
-All other issue edits and attachment mutations remain unsupported.
+Jira writes are limited to four deliberate actions: creating a comment,
+changing an assignee, applying an available status transition, and watching or
+unwatching an issue as the authenticated account. Each action requires explicit
+confirmation, is sent once with no automatic retry, and requires a refresh
+before retrying an uncertain result. All other issue edits, issue deletion, and
+attachment mutations remain unsupported.
 
 Media reads do not mutate Jira. Description thumbnails are limited to 8 MiB
 each, 16 references, and 32 MiB aggregate, with no arbitrary Media Services

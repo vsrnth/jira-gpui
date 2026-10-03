@@ -159,6 +159,21 @@ pub struct TransitionIssueRequest {
     pub transition_id: String,
 }
 
+/// Read the authenticated Jira account's watcher state for one issue.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssueWatchRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+}
+
+/// A user-confirmed request to watch or unwatch one issue as the authenticated account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetIssueWatchingRequest {
+    pub site_id: JiraSiteId,
+    pub locator: IssueLocator,
+    pub watching: bool,
+}
+
 /// Typed request for the core issue-detail payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IssueLocator {

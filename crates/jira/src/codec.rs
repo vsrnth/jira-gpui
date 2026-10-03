@@ -57,6 +57,13 @@ pub fn decode_transitions_response(body: &[u8]) -> Result<Vec<IssueTransition>, 
         .collect()
 }
 
+/// Decodes Jira's watcher response and returns `isWatching` for the authenticated user.
+pub fn decode_issue_watch_state(body: &[u8]) -> Result<bool, JiraCodecError> {
+    let payload: JiraIssueWatchResponse =
+        serde_json::from_slice(body).map_err(|_| JiraCodecError::MalformedJson)?;
+    Ok(payload.is_watching)
+}
+
 /// Decodes and maps a comment returned by Jira after creation.
 pub fn decode_created_comment_response(body: &[u8]) -> Result<IssueComment, JiraCodecError> {
     let comment: JiraComment =
@@ -70,6 +77,12 @@ pub fn decode_created_comment_response(body: &[u8]) -> Result<IssueComment, Jira
 #[serde(rename_all = "camelCase")]
 struct JiraTransitionsResponse {
     transitions: Vec<JiraTransitionResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JiraIssueWatchResponse {
+    is_watching: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +191,16 @@ mod tests {
         assert_eq!(
             transition_request_body("31"),
             json!({"transition": {"id": "31"}})
+        );
+    }
+
+    #[test]
+    fn issue_watch_codec_reads_the_authenticated_users_boolean_state() {
+        assert!(decode_issue_watch_state(br#"{"isWatching":true,"watchCount":4}"#).unwrap());
+        assert!(!decode_issue_watch_state(br#"{"isWatching":false,"watchCount":4}"#).unwrap());
+        assert_eq!(
+            decode_issue_watch_state(br#"{"watchCount":4}"#),
+            Err(JiraCodecError::MalformedJson)
         );
     }
 

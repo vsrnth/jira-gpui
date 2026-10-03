@@ -52,8 +52,10 @@ pub(crate) fn issues_pane_mode(layout: LayoutMode, mobile_detail_open: bool) -> 
         } else {
             IssuesPaneMode::ListOnly
         }
-    } else {
+    } else if mobile_detail_open {
         IssuesPaneMode::ListAndDetail
+    } else {
+        IssuesPaneMode::ListOnly
     }
 }
 
@@ -92,19 +94,20 @@ impl LayoutMode {
 
     pub(crate) fn issue_list_width(self) -> f32 {
         match self {
-            // Keep the initial list allocation stable as the shell moves from
-            // rail to full sidebar. A larger list here would make the detail
-            // workspace shrink at the 960/1,200px mode boundaries.
-            Self::Wide | Self::Standard | Self::Compact => 350.0,
+            // The desktop table can scroll horizontally below this width, but
+            // a wider starting pane exposes more of its fixed columns.
+            Self::Compact => 320.0,
+            Self::Standard => 360.0,
+            Self::Wide => 480.0,
             Self::Mobile => 0.0,
         }
     }
 
     pub(crate) fn issue_list_range(self) -> (f32, f32) {
         match self {
-            Self::Compact => (280.0, 420.0),
-            Self::Standard => (320.0, 520.0),
-            Self::Wide => (320.0, 640.0),
+            Self::Compact => (280.0, 4_096.0),
+            Self::Standard => (320.0, 4_096.0),
+            Self::Wide => (360.0, 4_096.0),
             Self::Mobile => (0.0, 0.0),
         }
     }
@@ -189,12 +192,9 @@ mod tests {
     };
 
     #[test]
-    fn issue_panes_keep_desktop_detail_visible() {
+    fn desktop_issue_panes_open_details_only_after_selection() {
         for layout in [LayoutMode::Compact, LayoutMode::Standard, LayoutMode::Wide] {
-            assert_eq!(
-                issues_pane_mode(layout, false),
-                IssuesPaneMode::ListAndDetail
-            );
+            assert_eq!(issues_pane_mode(layout, false), IssuesPaneMode::ListOnly);
             assert_eq!(
                 issues_pane_mode(layout, true),
                 IssuesPaneMode::ListAndDetail

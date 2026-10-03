@@ -29,7 +29,7 @@ use gpui_kit::{
 use jira_application::{
     ApplicationError, AttachmentDownloadRequest, CancellationToken, DEFAULT_JQL_SCOPE,
     DefaultPollingPolicy, IssueLocator, IssueTransition, JiraCommentWritePort, JiraIssueEditPort,
-    JiraReadPort, MAX_JQL_SCOPE_LENGTH,
+    JiraIssueWatchPort, JiraReadPort, MAX_JQL_SCOPE_LENGTH,
 };
 
 use jira_domain::{AccountId, Issue, IssueId, IssueKey, User};
@@ -53,11 +53,10 @@ use crate::{
     presentation::{
         CompactedUpdateRow, FeedbackSeverity, IssueDetailViewModel, IssueStatusFilter,
         IssueStatusSelection, IssueViewModel, OutcomeCopy, ReadSurface, RecoveryDirective,
-        SavedLoginOutcomeKind, UPDATE_PREVIEW_LIMIT, UpdateFilter, UpdateGroupViewModel,
-        comment_outcome_copy, compact_update_rows, filtered_update_group_indices,
-        generic_summary_label, hidden_update_row_count, issue_views_for_filter_with_offset,
-        lookup_workspace_unavailable_copy, read_error_copy, saved_login_outcome_copy,
-        scope_outcome_copy, team_outcome_copy, update_group_event_ids,
+        SavedLoginOutcomeKind, UpdateFilter, UpdateGroupViewModel, comment_outcome_copy,
+        compact_update_rows, filtered_update_group_indices, generic_summary_label,
+        issue_views_for_filter_with_offset, lookup_workspace_unavailable_copy, read_error_copy,
+        saved_login_outcome_copy, scope_outcome_copy, team_outcome_copy, update_group_event_ids,
         update_groups_for_events_with_offset, visible_update_row_count,
     },
     responsive::{IssuesPaneMode, LayoutMode, issues_pane_mode, layout_for_width},
@@ -82,7 +81,10 @@ mod shell_view;
 mod team_view;
 mod updates_view;
 mod virtual_rows;
+mod watch_flow;
 
+#[cfg(test)]
+use crate::presentation::hidden_update_row_count;
 #[cfg(test)]
 use crate::presentation::issue_views_for_filter;
 #[cfg(test)]
@@ -100,6 +102,7 @@ use issue_edit_flow::{
     IssueEditState, IssueEditSubmission, TransitionSubmission, issue_edit_error_message,
     status_control_is_editable,
 };
+use watch_flow::{WatchCompletion, WatchFlow, WatchState};
 
 use detail_payload::{
     DetailReadRequest, detail_image_issue_id, fetch_detail_images, prepare_detail_payload,
@@ -756,11 +759,20 @@ pub struct Dashboard {
     updates_scroll_handle: VirtualListScrollHandle,
     updates_row_measurements: virtual_rows::RowMeasureCache,
     update_filter: UpdateFilter,
+    inbox_query: String,
+    inbox_search_input: Option<Entity<InputState>>,
+    inbox_search_subscriptions: Vec<Subscription>,
+    inbox_status_filter: IssueStatusFilter,
     expanded_update_groups: HashSet<IssueId>,
+    selected_update_issue: Option<IssueId>,
+    mobile_update_detail_open: bool,
     selected_issue: Option<IssueId>,
     selected_issue_core: Option<Issue>,
     mobile_detail_open: bool,
     issue_details_open: bool,
+    issue_overflow_open: bool,
+    issue_comments_open: bool,
+    comment_options_open: bool,
     sync_message: String,
     workspace: Option<Arc<LiveWorkspace>>,
     #[cfg(feature = "ui-automation")]
@@ -826,6 +838,11 @@ pub struct Dashboard {
     issue_edit_flow: IssueEditFlow,
     issue_edit_cancellation: Option<CancellationToken>,
     issue_edit_task: Option<gpui_kit::Task<()>>,
+    watch_flow: WatchFlow,
+    watch_read_cancellation: Option<CancellationToken>,
+    watch_read_task: Option<gpui_kit::Task<()>>,
+    watch_write_task: Option<gpui_kit::Task<()>>,
+    watch_confirm_after_read: bool,
     assignee_input: Option<Entity<InputState>>,
     assignee_subscriptions: Vec<Subscription>,
     assignee_list: Option<
@@ -990,6 +1007,17 @@ impl Dashboard {
         dashboard
     }
 
+    /// Seeds the first cached update group as the active mobile reading pane in the screenshot lab.
+    #[cfg(feature = "ui-lab")]
+    pub(crate) fn prepare_mobile_update_reading_for_ui_lab(&mut self) {
+        self.section = Section::Updates;
+        self.selected_update_issue = self
+            .update_groups
+            .first()
+            .map(|group| group.issue_id.clone());
+        self.mobile_update_detail_open = self.selected_update_issue.is_some();
+    }
+
     /// Primes the inert automation fixture with the post-refresh copy and metadata control
     /// needed by local accessibility coverage. No live workspace or write path is installed.
     #[cfg(feature = "ui-automation")]
@@ -1012,6 +1040,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.prepare_for_ui_automation();
+        self.mobile_detail_open = true;
         self.ensure_assignee_input(window, cx);
         self.ensure_assignee_list(window, cx);
         let Some(issue) = self.selected_issue_view() else {
@@ -1093,6 +1122,7 @@ impl Dashboard {
     #[cfg(feature = "ui-automation")]
     pub(crate) fn from_ui_automation_alert() -> Self {
         let mut dashboard = Self::from_sample_data_for_section(SampleSection::Issues);
+        dashboard.mobile_detail_open = true;
         let issue_id = dashboard
             .domain_issues
             .first()
@@ -1119,6 +1149,7 @@ impl Dashboard {
         };
 
         let mut dashboard = Self::from_sample_data();
+        dashboard.mobile_detail_open = true;
         let image = RichImage {
             attachment_id: "fixture-image".to_owned(),
             filename: "cached-fixture.png".to_owned(),
@@ -1396,6 +1427,32 @@ impl Dashboard {
         dashboard
     }
 
+    /// Fixture-only Watch UI in a known, unwatched state. It has no workspace
+    /// or writer, so it can exercise confirmation and cancellation locally but
+    /// cannot dispatch Jira requests.
+    #[cfg(feature = "ui-automation")]
+    pub(crate) fn from_ui_automation_issue_watch() -> Self {
+        let mut dashboard = Self::from_ui_automation_comment_confirmation();
+        dashboard.comment_flow = CommentFlow::new();
+        let issue = dashboard
+            .domain_issues
+            .first()
+            .cloned()
+            .expect("sample issue fixture");
+        let generation = dashboard
+            .watch_flow
+            .begin_read(issue.id.clone())
+            .expect("fixture watch state read");
+        assert!(dashboard.watch_flow.finish_read(
+            Some(&issue.id),
+            issue.id.clone(),
+            issue.key.as_str().to_owned(),
+            generation,
+            Ok(false),
+        ));
+        dashboard
+    }
+
     #[cfg(any(test, feature = "ui-lab", feature = "ui-automation"))]
     fn from_sample_data_with_diagnostics(diagnostics: DiagnosticsSink, section: Section) -> Self {
         let domain_issues = sample_issues();
@@ -1416,6 +1473,7 @@ impl Dashboard {
             timestamp_offset,
         );
         let selected_issue = issues.first().map(|issue| issue.id.clone());
+        let selected_update_issue = update_groups.first().map(|group| group.issue_id.clone());
 
         Self {
             diagnostics: diagnostics.clone(),
@@ -1431,11 +1489,20 @@ impl Dashboard {
             updates_scroll_handle: VirtualListScrollHandle::new(),
             updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
+            inbox_query: String::new(),
+            inbox_search_input: None,
+            inbox_search_subscriptions: Vec::new(),
+            inbox_status_filter: IssueStatusFilter::All,
             expanded_update_groups: HashSet::new(),
+            selected_update_issue,
+            mobile_update_detail_open: false,
             selected_issue,
             selected_issue_core: None,
             mobile_detail_open: false,
-            issue_details_open: true,
+            issue_details_open: false,
+            issue_overflow_open: false,
+            issue_comments_open: true,
+            comment_options_open: false,
             sync_message: "Preview data · Jira connection not configured".to_owned(),
             workspace: None,
             #[cfg(feature = "ui-automation")]
@@ -1507,6 +1574,11 @@ impl Dashboard {
             issue_edit_flow: IssueEditFlow::new(),
             issue_edit_cancellation: None,
             issue_edit_task: None,
+            watch_flow: WatchFlow::new(),
+            watch_read_cancellation: None,
+            watch_read_task: None,
+            watch_write_task: None,
+            watch_confirm_after_read: false,
             assignee_input: None,
             assignee_subscriptions: Vec::new(),
             assignee_list: None,
@@ -1548,11 +1620,20 @@ impl Dashboard {
             updates_scroll_handle: VirtualListScrollHandle::new(),
             updates_row_measurements: virtual_rows::new_row_measure_cache(),
             update_filter: UpdateFilter::All,
+            inbox_query: String::new(),
+            inbox_search_input: None,
+            inbox_search_subscriptions: Vec::new(),
+            inbox_status_filter: IssueStatusFilter::All,
             expanded_update_groups: HashSet::new(),
+            selected_update_issue: None,
+            mobile_update_detail_open: false,
             selected_issue: None,
             selected_issue_core: None,
             mobile_detail_open: false,
-            issue_details_open: true,
+            issue_details_open: false,
+            issue_overflow_open: false,
+            issue_comments_open: true,
+            comment_options_open: false,
             sync_message: "Opening local cache…".to_owned(),
             workspace: None,
             #[cfg(feature = "ui-automation")]
@@ -1581,7 +1662,7 @@ impl Dashboard {
             team_automatic_polling_paused: false,
             site_label: session.site_label,
             mode_label:
-                "Live Jira sync · confirmed comments, assignee changes, and status transitions · best-effort desktop notifications"
+                "Live Jira sync · confirmed comments, assignee changes, status transitions, and watch changes · best-effort desktop notifications"
                     .to_owned(),
             operation_in_progress: true,
             polling_task: None,
@@ -1630,6 +1711,11 @@ impl Dashboard {
             issue_edit_flow: IssueEditFlow::new(),
             issue_edit_cancellation: None,
             issue_edit_task: None,
+            watch_flow: WatchFlow::new(),
+            watch_read_cancellation: None,
+            watch_read_task: None,
+            watch_write_task: None,
+            watch_confirm_after_read: false,
             assignee_input: None,
             assignee_subscriptions: Vec::new(),
             assignee_list: None,
@@ -1696,6 +1782,7 @@ impl Dashboard {
                     let jira_read: Arc<dyn JiraReadPort> = jira.clone();
                     let jira_comment_write: Arc<dyn JiraCommentWritePort> = jira.clone();
                     let jira_issue_edit: Arc<dyn JiraIssueEditPort> = jira.clone();
+                    let jira_issue_watch: Arc<dyn JiraIssueWatchPort> = jira.clone();
                     match LiveWorkspace::initialize_with_writers_and_scope(
                         site_id,
                         Some(authenticated_account),
@@ -1708,7 +1795,7 @@ impl Dashboard {
                     .await
                     {
                         Ok(workspace) => {
-                            let workspace = Arc::new(workspace);
+                            let workspace = Arc::new(workspace.with_watch_writer(jira_issue_watch));
                             let team_accounts = saved_team
                                 .iter()
                                 .filter_map(|member| AccountId::new(member.account_id.clone()).ok())
@@ -1764,6 +1851,9 @@ impl Dashboard {
                         this.workspace_members = "Authenticated Jira account".to_owned();
                         this.workspace = Some(workspace);
                         this.apply_cached(cached, cx);
+                        if let Some((issue_id, issue_key)) = this.selected_watch_identity() {
+                            this.load_issue_watch_state(issue_id, issue_key, cx);
+                        }
                         this.apply_team_cached(team_cached, cx);
                         this.start_automatic_polling(cx);
                         this.sync_message =
@@ -1993,6 +2083,12 @@ impl Dashboard {
     }
 
     fn search_jira(&mut self, cx: &mut Context<Self>) {
+        if self.watch_flow.is_submitting() {
+            self.sync_message =
+                "Finish the confirmed Jira change before changing issues".to_owned();
+            cx.notify();
+            return;
+        }
         let query = self.search_query.trim().to_owned();
         let Some(key) = crate::presentation::normalized_issue_key(&query) else {
             self.clear_remote_lookup();
@@ -2010,6 +2106,13 @@ impl Dashboard {
         expected_query: String,
         cx: &mut Context<Self>,
     ) {
+        if self.watch_flow.is_submitting() {
+            self.sync_message =
+                "Finish the confirmed Jira change before changing issues".to_owned();
+            cx.notify();
+            return;
+        }
+        self.mobile_detail_open = true;
         if let Some(issue_id) = issue_id_for_key_in_sources(
             &key,
             &self.domain_issues,
@@ -2018,6 +2121,7 @@ impl Dashboard {
         ) {
             self.clear_remote_lookup();
             self.select_issue(issue_id, cx, true);
+            cx.notify();
             return;
         }
 
@@ -2162,12 +2266,14 @@ impl Dashboard {
     /// existing guarded Jira lookup path is reused without putting a key from the payload in a
     /// browser URL or issuing a write.
     fn open_related_issue_key(&mut self, key: IssueKey, cx: &mut Context<Self>) {
-        if self.issue_edit_flow.is_submitting() {
+        if self.issue_edit_flow.is_submitting() || self.watch_flow.is_submitting() {
             self.sync_message =
                 "Finish the confirmed Jira change before changing issues".to_owned();
             cx.notify();
             return;
         }
+        self.section = Section::Issues;
+        self.mobile_detail_open = true;
         if let Some(issue_id) = issue_id_for_key_in_sources(
             &key,
             &self.domain_issues,
@@ -2180,6 +2286,20 @@ impl Dashboard {
         }
 
         self.search_jira_for_key(key.clone(), key.to_string(), cx);
+    }
+
+    fn open_issue_in_issues(&mut self, issue_id: IssueId, cx: &mut Context<Self>) {
+        if self.watch_flow.is_submitting() && self.selected_issue.as_ref() != Some(&issue_id) {
+            self.sync_message =
+                "Finish the confirmed Jira change before changing issues".to_owned();
+            cx.notify();
+            return;
+        }
+        self.section = Section::Issues;
+        self.mobile_detail_open = true;
+        self.issue_overflow_open = false;
+        self.select_issue(issue_id, cx, false);
+        cx.notify();
     }
 
     fn invalidate_detail_selection(&mut self) {
@@ -2222,25 +2342,236 @@ impl Dashboard {
         // state; its completion is simply ignored after this generation bump.
     }
 
+    fn invalidate_watch_selection(&mut self) {
+        if self.watch_flow.invalidate_selection() {
+            if let Some(cancellation) = self.watch_read_cancellation.take() {
+                cancellation.cancel();
+            }
+            self.watch_read_task.take();
+        }
+        self.watch_confirm_after_read = false;
+        // A dispatched write is never cancelled. Its completion is retained
+        // only to release the global operation guard when it eventually ends.
+    }
+
+    fn selected_watch_identity(&self) -> Option<(IssueId, String)> {
+        let issue_id = self.selected_issue.as_ref()?.clone();
+        let issue = self
+            .domain_issues
+            .iter()
+            .chain(self.team_issues.iter())
+            .find(|issue| issue.id == issue_id)
+            .or_else(|| {
+                self.selected_issue_core
+                    .as_ref()
+                    .filter(|issue| issue.id == issue_id)
+            })?;
+        Some((issue.id.clone(), issue.key.as_str().to_owned()))
+    }
+
+    /// User activation of Watch/Unwatch. Unknown state is read first, then
+    /// shown for explicit confirmation; this method never dispatches a write.
+    fn begin_issue_watch_state(&mut self, cx: &mut Context<Self>) {
+        if self.watch_flow.is_submitting() {
+            return;
+        }
+        if matches!(
+            self.watch_flow.state(),
+            WatchState::Ready { issue_id, .. }
+                if self.selected_issue.as_ref() == Some(issue_id)
+        ) {
+            self.begin_issue_watch_confirmation(cx);
+            return;
+        }
+        let Some((issue_id, issue_key)) = self.selected_watch_identity() else {
+            return;
+        };
+        self.watch_confirm_after_read = true;
+        self.load_issue_watch_state(issue_id, issue_key, cx);
+    }
+
+    fn begin_issue_watch_confirmation(&mut self, cx: &mut Context<Self>) {
+        if self.operation_in_progress {
+            self.sync_message =
+                "Finish the current Jira operation before applying another change".to_owned();
+            cx.notify();
+            return;
+        }
+        let selected = self.selected_issue.as_ref();
+        if !matches!(
+            self.watch_flow.state(),
+            WatchState::Ready { issue_id, .. } if Some(issue_id) == selected
+        ) {
+            return;
+        }
+        self.watch_flow.begin_confirmation();
+        cx.notify();
+    }
+
+    fn cancel_issue_watch_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.watch_flow.cancel_confirmation();
+        cx.notify();
+    }
+
+    fn refresh_issue_watch_state(&mut self, cx: &mut Context<Self>) {
+        if let Some((issue_id, issue_key)) = self.selected_watch_identity() {
+            self.watch_confirm_after_read = false;
+            self.load_issue_watch_state(issue_id, issue_key, cx);
+        }
+    }
+
+    fn load_issue_watch_state(
+        &mut self,
+        issue_id: IssueId,
+        issue_key: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_issue.as_ref() != Some(&issue_id) || self.watch_flow.is_submitting() {
+            return;
+        }
+        if let Some(cancellation) = self.watch_read_cancellation.take() {
+            cancellation.cancel();
+        }
+        self.watch_read_task.take();
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(generation) = self.watch_flow.begin_read(issue_id.clone()) else {
+            return;
+        };
+        let cancellation = CancellationToken::new();
+        self.watch_read_cancellation = Some(cancellation.clone());
+        let task = cx.spawn(async move |this, cx| {
+            let result = workspace
+                .watch_state(IssueLocator::Id(issue_id.clone()), &cancellation)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let applied = this.watch_flow.finish_read(
+                    this.selected_issue.as_ref(),
+                    issue_id.clone(),
+                    issue_key.clone(),
+                    generation,
+                    result,
+                );
+                if applied {
+                    this.watch_read_cancellation = None;
+                    this.watch_read_task = None;
+                    if this.watch_confirm_after_read
+                        && matches!(this.watch_flow.state(), WatchState::Ready { .. })
+                    {
+                        this.watch_confirm_after_read = false;
+                        this.begin_issue_watch_confirmation(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.watch_read_task = Some(task);
+        cx.notify();
+    }
+
+    fn submit_issue_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operation_in_progress
+            || self.comment_task.is_some()
+            || self.issue_edit_flow.is_submitting()
+        {
+            self.sync_message =
+                "Finish the current Jira operation before applying another change".to_owned();
+            cx.notify();
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        if !matches!(
+            self.watch_flow.state(),
+            WatchState::Confirming { issue_id, .. }
+                if self.selected_issue.as_ref() == Some(issue_id)
+        ) {
+            return;
+        }
+        let Some(submission) = self.watch_flow.consume_submission() else {
+            return;
+        };
+        let identity = submission.identity().clone();
+        let issue_id = submission.issue_id().clone();
+        let watching = submission.target_watching;
+        self.operation_in_progress = true;
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = workspace
+                .set_issue_watching(
+                    IssueLocator::Id(issue_id),
+                    watching,
+                    &CancellationToken::new(),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                match this
+                    .watch_flow
+                    .finish_write(identity, this.selected_issue.as_ref(), result)
+                {
+                    WatchCompletion::Applied => {
+                        this.operation_in_progress = false;
+                        this.watch_write_task = None;
+                        this.sync_message = if watching {
+                            "Watching issue".to_owned()
+                        } else {
+                            "Stopped watching issue".to_owned()
+                        };
+                    }
+                    WatchCompletion::Failed { message, .. } => {
+                        this.operation_in_progress = false;
+                        this.watch_write_task = None;
+                        this.sync_message = message;
+                    }
+                    WatchCompletion::Ignored { busy } => {
+                        if busy == watch_flow::BusyDirective::Release {
+                            this.operation_in_progress = false;
+                            this.watch_write_task = None;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.watch_write_task = Some(task);
+        cx.notify();
+    }
+
+    fn issue_watch_fixture_ready(&self) -> bool {
+        cfg!(feature = "ui-automation")
+            && self.workspace.is_none()
+            && matches!(self.watch_flow.state(), WatchState::Ready { .. })
+    }
+
     fn clear_selection_for_team_scope(&mut self, cx: &mut Context<Self>) {
-        if self.issue_edit_flow.is_submitting() {
+        if self.issue_edit_flow.is_submitting() || self.watch_flow.is_submitting() {
             return;
         }
         self.clear_remote_lookup();
         self.invalidate_detail_selection();
         self.invalidate_comment_selection();
         self.invalidate_issue_edit_selection();
+        self.invalidate_watch_selection();
         cx.notify();
     }
 
     fn select_issue(&mut self, issue_id: IssueId, cx: &mut Context<Self>, force: bool) {
-        if self.issue_edit_flow.is_submitting() && self.selected_issue.as_ref() != Some(&issue_id) {
+        if (self.issue_edit_flow.is_submitting() || self.watch_flow.is_submitting())
+            && self.selected_issue.as_ref() != Some(&issue_id)
+        {
             self.sync_message =
                 "Finish the confirmed Jira change before changing issues".to_owned();
             cx.notify();
             return;
         }
         let selection_changed = self.selected_issue.as_ref() != Some(&issue_id);
+        if selection_changed {
+            self.issue_details_open = false;
+            self.issue_overflow_open = false;
+            self.issue_comments_open = true;
+            self.comment_options_open = false;
+        }
         if self.selected_issue.as_ref() == Some(&issue_id)
             && !force
             && matches!(
@@ -2272,6 +2603,9 @@ impl Dashboard {
         }
         self.invalidate_comment_selection();
         self.invalidate_issue_edit_selection();
+        if selection_changed {
+            self.invalidate_watch_selection();
+        }
         // Preserve the prior task-drop position after all selection
         // invalidations; begin above already cancelled its token.
         self.detail_task.take();
@@ -2281,6 +2615,10 @@ impl Dashboard {
         }
         self.selected_issue = Some(issue_id.clone());
         self.invalidate_status_transition();
+
+        if let Some((watch_issue_id, watch_issue_key)) = self.selected_watch_identity() {
+            self.load_issue_watch_state(watch_issue_id, watch_issue_key, cx);
+        }
 
         let Some(workspace) = self.workspace.clone() else {
             self.detail_epoch.finish(&ticket);
@@ -2497,12 +2835,40 @@ impl Dashboard {
             })
     }
 
-    fn open_update_issue(&mut self, issue_id: IssueId, mobile: bool, cx: &mut Context<Self>) {
+    fn open_update_issue(&mut self, issue_id: IssueId, _mobile: bool, cx: &mut Context<Self>) {
+        if self.watch_flow.is_submitting() && self.selected_issue.as_ref() != Some(&issue_id) {
+            self.sync_message =
+                "Finish the confirmed Jira change before changing issues".to_owned();
+            cx.notify();
+            return;
+        }
         self.clear_remote_lookup();
         self.select_issue(issue_id, cx, false);
         self.section = Section::Issues;
-        self.mobile_detail_open = mobile;
+        self.mobile_detail_open = true;
         cx.notify();
+    }
+
+    fn select_update_group(&mut self, issue_id: IssueId, mobile: bool, cx: &mut Context<Self>) {
+        self.selected_update_issue = Some(issue_id);
+        self.mobile_update_detail_open = mobile;
+        cx.notify();
+    }
+
+    fn close_mobile_update_detail(&mut self, cx: &mut Context<Self>) {
+        self.mobile_update_detail_open = false;
+        cx.notify();
+    }
+
+    fn clear_hidden_update_selection(&mut self) {
+        if self.selected_update_issue.as_ref().is_some_and(|selected| {
+            !updates_view::visible_inbox_groups(self)
+                .iter()
+                .any(|index| self.update_groups[*index].issue_id == *selected)
+        }) {
+            self.selected_update_issue = None;
+            self.mobile_update_detail_open = false;
+        }
     }
 
     fn reload_selected_detail(&mut self, cx: &mut Context<Self>) {
@@ -2725,6 +3091,15 @@ impl Dashboard {
     }
 
     fn post_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operation_in_progress
+            || self.watch_flow.is_submitting()
+            || self.issue_edit_flow.is_submitting()
+        {
+            self.sync_message =
+                "Finish the current Jira operation before applying another change".to_owned();
+            cx.notify();
+            return;
+        }
         let Some(target) = self.comment_target_issue().map(|issue| CommentTarget {
             issue_id: issue.id.clone(),
             issue_key: issue.key.as_str().to_owned(),
@@ -3122,6 +3497,7 @@ impl Dashboard {
         );
         self.apply_live_issues(issues, true, cx);
         self.update_groups = update_groups;
+        self.clear_hidden_update_selection();
         if self.selected_issue.is_some() {
             self.reload_status_transitions(cx);
         }
@@ -3395,6 +3771,7 @@ impl Dashboard {
                     event.unread = false;
                 }
             }
+            self.clear_hidden_update_selection();
             cx.notify();
             return;
         };
@@ -3431,6 +3808,7 @@ impl Dashboard {
     fn set_update_filter(&mut self, filter: UpdateFilter, cx: &mut Context<Self>) {
         if self.update_filter != filter {
             self.update_filter = filter;
+            self.clear_hidden_update_selection();
             self.reset_update_list_scroll();
             cx.notify();
         }
@@ -3468,6 +3846,7 @@ impl Dashboard {
                     event.unread = false;
                 }
             }
+            self.clear_hidden_update_selection();
             cx.notify();
             return;
         };
@@ -3690,7 +4069,7 @@ impl Dashboard {
             return;
         }
         let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search issue key or summary"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search issue key or summary…"));
         self.search_subscriptions
             .push(cx.subscribe_in(&input, window, {
                 let input = input.clone();
@@ -3712,6 +4091,27 @@ impl Dashboard {
                 }
             }));
         self.search_input = Some(input);
+    }
+
+    fn ensure_inbox_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inbox_search_input.is_some() {
+            return;
+        }
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search issues, keys, or text…"));
+        self.inbox_search_subscriptions
+            .push(cx.subscribe_in(&input, window, {
+                let input = input.clone();
+                move |this, _, event: &InputEvent, _window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.inbox_query = input.read(cx).value().to_string();
+                        this.clear_hidden_update_selection();
+                        this.reset_update_list_scroll();
+                        cx.notify();
+                    }
+                }
+            }));
+        self.inbox_search_input = Some(input);
     }
 
     fn ensure_comment_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -19,6 +19,8 @@ pub enum UiAutomationScenario {
     RichContent,
     /// Inert comment confirmation at a narrow/mobile window width.
     CommentConfirmation,
+    /// Inert Watch confirmation with a known unwatched fixture issue.
+    IssueWatch,
     /// The local change ledger.
     Updates,
     /// The local team tracker.
@@ -44,6 +46,7 @@ impl UiAutomationScenario {
             Self::Issues => "issues",
             Self::RichContent => "rich-content",
             Self::CommentConfirmation => "comment-confirmation",
+            Self::IssueWatch => "issue-watch",
             Self::Updates => "updates",
             Self::Team => "team",
             Self::Settings => "settings",
@@ -62,6 +65,7 @@ impl UiAutomationScenario {
             "issues" => Ok(Self::Issues),
             "rich-content" => Ok(Self::RichContent),
             "comment-confirmation" => Ok(Self::CommentConfirmation),
+            "issue-watch" => Ok(Self::IssueWatch),
             "updates" => Ok(Self::Updates),
             "team" => Ok(Self::Team),
             "settings" => Ok(Self::Settings),
@@ -70,7 +74,7 @@ impl UiAutomationScenario {
             "assignee" => Ok(Self::Assignee),
             "components" => Ok(Self::Components),
             _ => bail!(
-                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings, virtualized, alert, assignee, components"
+                "unknown scenario {value:?}; expected one of: onboarding, onboarding-busy, issues, rich-content, comment-confirmation, issue-watch, updates, team, settings, virtualized, alert, assignee, components"
             ),
         }
     }
@@ -86,9 +90,9 @@ pub enum Command {
 }
 
 /// Text printed by `--help`.
-pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | comment-confirmation | updates | team | settings | virtualized | alert | assignee | components\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
+pub const HELP: &str = "Usage: cargo run -p jira-gpui --features ui-automation --bin jira-ui-automation-host -- --scenario NAME\n\nOptions:\n  --scenario NAME  onboarding | onboarding-busy | issues | rich-content | comment-confirmation | issue-watch | updates | team | settings | virtualized | alert | assignee | components\n  --list            List supported scenarios\n  -h, --help        Show this help\n\nThe host opens one visible, fixture-backed Jira Desk window for local macOS accessibility automation.\nIt does not load environment startup, keychain, persistence, Jira, network, polling, notifications, or write services.";
 
-const SCENARIOS: &str = "onboarding, onboarding-busy, issues, rich-content, comment-confirmation, updates, team, settings, virtualized, alert, assignee, components";
+const SCENARIOS: &str = "onboarding, onboarding-busy, issues, rich-content, comment-confirmation, issue-watch, updates, team, settings, virtualized, alert, assignee, components";
 
 fn next_value(args: &mut impl Iterator<Item = String>) -> Result<String> {
     let value = args
@@ -151,7 +155,7 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
         app_shell::AppearancePreference,
         dashboard::{Dashboard, SampleSection},
     };
-    use gpui_kit::component::{Root, Theme, ThemeMode, TitleBar};
+    use gpui_kit::component::{Theme, ThemeMode, TitleBar};
     use gpui_kit::{
         App, AppContext as _, Bounds, Pixels, Size, WindowBounds, WindowDecorations, WindowOptions,
         px, size,
@@ -159,7 +163,10 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
 
     const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1240.), px(900.));
     const COMMENT_CONFIRMATION_WINDOW_SIZE: Size<Pixels> = size(px(640.), px(900.));
-    let window_size = if scenario == UiAutomationScenario::CommentConfirmation {
+    let window_size = if matches!(
+        scenario,
+        UiAutomationScenario::CommentConfirmation | UiAutomationScenario::IssueWatch
+    ) {
         COMMENT_CONFIRMATION_WINDOW_SIZE
     } else {
         DEFAULT_WINDOW_SIZE
@@ -195,73 +202,81 @@ fn launch(scenario: UiAutomationScenario) -> Result<()> {
             };
 
             cx.spawn(async move |cx| {
-                cx.open_window(window_options, |window, cx| {
-                    window.activate_window();
-                    window.set_window_title(WINDOW_TITLE);
+                cx.update(|cx| {
+                    gpui_kit::open_window(window_options, cx, |window, cx| {
+                        window.activate_window();
+                        window.set_window_title(WINDOW_TITLE);
 
-                    let fixture_dashboard = |mut dashboard: Dashboard| {
-                        dashboard.initialize_appearance_preference(AppearancePreference::Light);
-                        cx.new(|cx| {
-                            if scenario == UiAutomationScenario::Assignee {
-                                dashboard.prepare_assignee_for_ui_automation(window, cx);
+                        let fixture_dashboard = |mut dashboard: Dashboard| {
+                            dashboard.initialize_appearance_preference(AppearancePreference::Light);
+                            cx.new(|cx| {
+                                if scenario == UiAutomationScenario::Assignee {
+                                    dashboard.prepare_assignee_for_ui_automation(window, cx);
+                                }
+                                dashboard
+                            })
+                        };
+                        let dashboard = match scenario {
+                            UiAutomationScenario::Onboarding
+                            | UiAutomationScenario::OnboardingBusy => None,
+                            UiAutomationScenario::Issues => {
+                                let mut dashboard =
+                                    Dashboard::from_sample_data_for_section(SampleSection::Issues);
+                                dashboard.prepare_for_ui_automation();
+                                Some(dashboard)
                             }
-                            dashboard
-                        })
-                    };
-                    let dashboard = match scenario {
-                        UiAutomationScenario::Onboarding | UiAutomationScenario::OnboardingBusy => {
-                            None
+                            UiAutomationScenario::RichContent => {
+                                Some(Dashboard::from_ui_automation_rich_content())
+                            }
+                            UiAutomationScenario::CommentConfirmation => {
+                                Some(Dashboard::from_ui_automation_comment_confirmation())
+                            }
+                            UiAutomationScenario::IssueWatch => {
+                                Some(Dashboard::from_ui_automation_issue_watch())
+                            }
+                            UiAutomationScenario::Updates => Some(
+                                Dashboard::from_sample_data_for_section(SampleSection::Updates),
+                            ),
+                            UiAutomationScenario::Team => {
+                                Some(Dashboard::from_sample_data_for_section(SampleSection::Team))
+                            }
+                            UiAutomationScenario::Settings => Some(
+                                Dashboard::from_sample_data_for_section(SampleSection::Settings),
+                            ),
+                            UiAutomationScenario::Virtualized => {
+                                Some(Dashboard::from_ui_automation_virtualized())
+                            }
+                            UiAutomationScenario::Alert => {
+                                Some(Dashboard::from_ui_automation_alert())
+                            }
+                            UiAutomationScenario::Assignee => Some(
+                                Dashboard::from_sample_data_for_section(SampleSection::Issues),
+                            ),
+                            UiAutomationScenario::Components => {
+                                Some(Dashboard::from_ui_automation_rich_content())
+                            }
                         }
-                        UiAutomationScenario::Issues => {
-                            let mut dashboard =
-                                Dashboard::from_sample_data_for_section(SampleSection::Issues);
-                            dashboard.prepare_for_ui_automation();
-                            Some(dashboard)
-                        }
-                        UiAutomationScenario::RichContent => {
-                            Some(Dashboard::from_ui_automation_rich_content())
-                        }
-                        UiAutomationScenario::CommentConfirmation => {
-                            Some(Dashboard::from_ui_automation_comment_confirmation())
-                        }
-                        UiAutomationScenario::Updates => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Updates),
-                        ),
-                        UiAutomationScenario::Team => {
-                            Some(Dashboard::from_sample_data_for_section(SampleSection::Team))
-                        }
-                        UiAutomationScenario::Settings => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Settings),
-                        ),
-                        UiAutomationScenario::Virtualized => {
-                            Some(Dashboard::from_ui_automation_virtualized())
-                        }
-                        UiAutomationScenario::Alert => Some(Dashboard::from_ui_automation_alert()),
-                        UiAutomationScenario::Assignee => Some(
-                            Dashboard::from_sample_data_for_section(SampleSection::Issues),
-                        ),
-                        UiAutomationScenario::Components => {
-                            Some(Dashboard::from_ui_automation_rich_content())
-                        }
-                    }
-                    .map(fixture_dashboard);
-                    let shell = cx.new(|cx| {
-                        AppShell::new_for_ui_lab(dashboard, ThemeMode::Light, window, cx)
-                    });
-                    let root = cx.new(|cx| Root::new(shell.clone(), window, cx));
-                    if scenario == UiAutomationScenario::OnboardingBusy {
-                        // The dialog layer is owned by the production Root. Defer until this root
-                        // is installed, then invoke only the inert busy-state hook.
-                        window.defer(cx, move |window, cx| {
-                            shell.update(cx, |shell, cx| {
-                                shell.open_connection_dialog_for_ui_automation_busy(window, cx);
-                            });
+                        .map(fixture_dashboard);
+                        let shell = cx.new(|cx| {
+                            AppShell::new_for_ui_lab(dashboard, ThemeMode::Light, window, cx)
                         });
-                    }
-                    root
+                        if scenario == UiAutomationScenario::OnboardingBusy {
+                            // The dialog layer is owned by the production Root. Defer until this root
+                            // is installed, then invoke only the inert busy-state hook.
+                            let deferred_shell = shell.clone();
+                            window.defer(cx, move |window, cx| {
+                                deferred_shell.update(cx, |shell, cx| {
+                                    shell.open_connection_dialog_for_ui_automation_busy(window, cx);
+                                });
+                            });
+                        }
+                        shell
+                    })
+                    .map(|_| ())
+                    .map_err(|error| {
+                        anyhow::anyhow!("failed to open automation host window: {error}")
+                    })
                 })
-                .map(|_| ())
-                .map_err(|error| anyhow::anyhow!("failed to open automation host window: {error}"))
             })
             .detach();
         });
@@ -291,6 +306,7 @@ mod tests {
                 "comment-confirmation",
                 UiAutomationScenario::CommentConfirmation,
             ),
+            ("issue-watch", UiAutomationScenario::IssueWatch),
             ("updates", UiAutomationScenario::Updates),
             ("team", UiAutomationScenario::Team),
             ("settings", UiAutomationScenario::Settings),
@@ -328,7 +344,9 @@ mod tests {
         assert_eq!(parse_args(["--list"]).unwrap(), Command::List);
         assert!(parse_args(["--list", "--scenario", "issues"]).is_err());
         assert!(HELP.contains("comment-confirmation"));
+        assert!(HELP.contains("issue-watch"));
         assert!(SCENARIOS.contains("comment-confirmation"));
+        assert!(SCENARIOS.contains("issue-watch"));
     }
 
     #[cfg(not(target_os = "macos"))]
