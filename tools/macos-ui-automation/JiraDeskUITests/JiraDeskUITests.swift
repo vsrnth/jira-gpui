@@ -272,11 +272,10 @@ final class JiraDeskUITests: XCTestCase {
 
         let updatedHeader = try require(app.descendants(matching: .any)["issues-column-updated"], "Updated column header")
         let updatedCell = try require(app.descendants(matching: .any)["issue-cell-updated-DESK-171"], "DESK-171 Updated cell")
-        splitTable.scroll(byDeltaX: 600, deltaY: 0)
-        XCTAssertTrue(splitTable.frame.contains(updatedHeader.frame), "horizontal scroll should reveal the Updated header in the table viewport")
-        XCTAssertTrue(splitTable.frame.contains(updatedCell.frame), "the matching Updated cell should scroll with its header")
-        XCTAssertLessThanOrEqual(abs(updatedHeader.frame.minX - updatedCell.frame.minX), 12, "Updated cell should remain aligned with its header")
         splitTable.scroll(byDeltaX: -600, deltaY: 0)
+        XCTAssertTrue(waitForElements([updatedHeader, updatedCell], inside: splitTable), "horizontal scroll should reveal the Updated header and matching cell in the table viewport")
+        XCTAssertLessThanOrEqual(abs(updatedHeader.frame.minX - updatedCell.frame.minX), 12, "Updated cell should remain aligned with its header")
+        splitTable.scroll(byDeltaX: 600, deltaY: 0)
 
         try setValue("MVP", identifier: "issue-search")
         let count = try require(app.descendants(matching: .any)["issue-list-summary"], "issue-list-summary after local filter")
@@ -686,11 +685,10 @@ final class JiraDeskUITests: XCTestCase {
             app.descendants(matching: .any)["issue-cell-updated-DESK-179"],
             "Updated cell in the horizontally scrollable table"
         )
-        compactTable.scroll(byDeltaX: 600, deltaY: 0)
-        XCTAssertTrue(compactTable.frame.contains(updatedHeader.frame), "horizontal scroll should bring the Updated header into the table viewport")
-        XCTAssertTrue(compactTable.frame.contains(updatedCell.frame), "header and row content should scroll together into the table viewport")
-        XCTAssertLessThanOrEqual(abs(updatedHeader.frame.minX - updatedCell.frame.minX), 12, "Updated cell should remain aligned with its header after horizontal scrolling")
         compactTable.scroll(byDeltaX: -600, deltaY: 0)
+        XCTAssertTrue(waitForElements([updatedHeader, updatedCell], inside: compactTable), "horizontal scroll should bring the Updated header and matching row cell into the table viewport")
+        XCTAssertLessThanOrEqual(abs(updatedHeader.frame.minX - updatedCell.frame.minX), 12, "Updated cell should remain aligned with its header after horizontal scrolling")
+        compactTable.scroll(byDeltaX: 600, deltaY: 0)
 
         let statusPill = try require(
             app.descendants(matching: .any)["issue-detail-status-pill"],
@@ -2272,6 +2270,16 @@ final class JiraDeskUITests: XCTestCase {
                 return self.semanticText(element).contains(expected)
             },
             object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: 8) == .completed
+    }
+
+    private func waitForElements(_ elements: [XCUIElement], inside viewport: XCUIElement) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                elements.allSatisfy { viewport.frame.contains($0.frame) }
+            },
+            object: viewport
         )
         return XCTWaiter.wait(for: [expectation], timeout: 8) == .completed
     }
