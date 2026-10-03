@@ -1,8 +1,14 @@
 # Agent Collaboration Policy
 
+## Tool execution and Codemode
+
+- For all future work in this repository, use Codemode (`functions.exec`) for tool execution and orchestration whenever the needed tools are available through it.
+- Batch independent tool calls in one Codemode execution and keep dependent steps sequential.
+- Tools not exposed through Codemode, such as collaboration tools, may be called directly as required by their API.
+
 ## Model roles
 
-- Use `gpt-6-sol` as the primary/root orchestrator.
+- Use `gpt-6.1-sol` as the primary/root orchestrator.
 - Use `gpt-6-luna` subagents exclusively for all implementation and code-writing tasks. All production code, test code, scripts, migrations, configuration code, and code modifications must be authored by Luna subagents.
 - The Sol orchestrator must not write or modify code directly. Sol owns task decomposition, architectural decisions, assignment boundaries, orchestration, integration review, validation, and commits.
 - Give each Luna subagent a concrete, bounded task with explicit files or module ownership. Avoid overlapping write scopes between agents.
